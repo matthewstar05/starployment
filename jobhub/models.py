@@ -1,0 +1,142 @@
+"""Pydantic models shared by sources, scoring, tailoring, and the API."""
+from __future__ import annotations
+
+import hashlib
+from datetime import datetime, timezone
+from typing import Any, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+from pydantic import BaseModel, Field
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def canonical_url(url: str) -> str:
+    parts = urlsplit(url.strip())
+    tracking = {"source", "ref", "referrer", "gh_src", "lever-source", "lever-origin", "src", "trk"}
+    query = sorted((k, v) for k, v in parse_qsl(parts.query) if not k.lower().startswith("utm_") and k.lower() not in tracking)
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path.rstrip("/"), urlencode(query), ""))
+
+
+def job_id_for(url: str) -> str:
+    return hashlib.sha1(canonical_url(url).encode()).hexdigest()[:16]
+
+
+def job_fingerprint(job: "Job") -> str:
+    """Match the same ATS posting across discovery sources and tracking links."""
+    for url in (job.apply_url, job.url):
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower()
+        path = [part for part in parts.path.split("/") if part]
+        if (host == "greenhouse.io" or host.endswith(".greenhouse.io")) and "jobs" in path:
+            i = path.index("jobs")
+            if i and i + 1 < len(path):
+                return f"greenhouse:{path[i-1].lower()}:{path[i+1]}"
+        if host in ("jobs.lever.co", "jobs.eu.lever.co") and len(path) >= 2:
+            return f"lever:{path[0].lower()}:{path[1]}"
+        if host == "jobs.ashbyhq.com" and len(path) >= 2:
+            return f"ashby:{path[0].lower()}:{path[1]}"
+    raw_id = job.raw.get({"greenhouse": "gh_id", "lever": "lever_id", "ashby": "ashby_id"}.get(job.ats, ""))
+    if raw_id and job.raw.get("slug"):
+        return f"{job.ats}:{job.raw['slug'].lower()}:{raw_id}"
+    return canonical_url(job.url)
+
+
+class Job(BaseModel):
+    id: str = ""
+    source: str                      # greenhouse | lever | ashby | simplify | remoteok | jobspy:indeed ...
+    ats: str = "unknown"             # greenhouse | lever | ashby | workday | linkedin | unknown
+    company: str
+    title: str
+    location: str = ""
+    remote: bool = False
+    salary_min: Optional[int] = None
+    salary_max: Optional[int] = None
+    url: str                         # canonical posting URL (dedupe key)
+    apply_url: str = ""              # where the application form lives
+    description: str = ""
+    posted_at: Optional[str] = None  # ISO
+    discovered_at: str = Field(default_factory=now_iso)
+    score: float = 0.0
+    score_json: dict[str, Any] = Field(default_factory=dict)
+    status: str = "new"              # new | queued | applying | applied | skipped | failed | needs_human
+    raw: dict[str, Any] = Field(default_factory=dict)
+
+    def model_post_init(self, __context: Any) -> None:
+        if not self.id:
+            self.id = job_id_for(self.url)
+        if not self.apply_url:
+            self.apply_url = self.url
+
+
+class Education(BaseModel):
+    school: str = ""
+    degree: str = ""
+    field: str = ""
+    start: str = ""
+    end: str = ""
+    gpa: str = ""
+
+
+class Experience(BaseModel):
+    company: str = ""
+    title: str = ""
+    location: str = ""
+    start: str = ""
+    end: str = ""
+    bullets: list[str] = Field(default_factory=list)
+
+
+class Project(BaseModel):
+    name: str = ""
+    role: str = ""
+    start: str = ""
+    end: str = ""
+    bullets: list[str] = Field(default_factory=list)
+    tech: list[str] = Field(default_factory=list)
+
+
+class Profile(BaseModel):
+    first_name: str = ""
+    last_name: str = ""
+    email: str = ""
+    phone: str = ""
+    city: str = ""
+    state: str = ""
+    region: str = ""
+    country: str = ""
+    address_line1: str = ""
+    address_line2: str = ""
+    postal_code: str = ""
+    linkedin: str = ""
+    github: str = ""
+    website: str = ""
+    headline: str = ""
+    summary: str = ""
+    education: list[Education] = Field(default_factory=list)
+    experience: list[Experience] = Field(default_factory=list)
+    projects: list[Project] = Field(default_factory=list)
+    skills: list[str] = Field(default_factory=list)
+    raw_text: str = ""
+    resume_path: str = ""
+    custom_facts: dict[str, str] = Field(default_factory=dict)
+
+    @property
+    def full_name(self) -> str:
+        return f"{self.first_name} {self.last_name}".strip()
+
+    @property
+    def location(self) -> str:
+        return ", ".join(x for x in (self.city, self.state or self.region, self.country) if x)
+
+
+class ApplyResult(BaseModel):
+    status: str                     # applied | dry_run | needs_human | failed
+    message: str = ""
+    screenshots: list[str] = Field(default_factory=list)
+    log: list[str] = Field(default_factory=list)
+    unanswered: list[str] = Field(default_factory=list)
+    resume_path: str = ""
+    submission_attempted: bool = False

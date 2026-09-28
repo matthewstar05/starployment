@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="surface" x1="124" y1="80" x2="900" y2="944" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#1d4ed8"/>
+      <stop offset="0.52" stop-color="#2563eb"/>
+      <stop offset="1" stop-color="#0f2f85"/>
+    </linearGradient>
+    <linearGradient id="orbit" x1="690" y1="170" x2="840" y2="790" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#bfe7ff"/>
+      <stop offset="1" stop-color="#6bb7ff"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#071d58" flood-opacity="0.32"/>
+    </filter>
+  </defs>
+  <rect x="48" y="48" width="928" height="928" rx="224" fill="url(#surface)" filter="url(#shadow)"/>
+  <path d="M244 278h154v350c0 76 34 112 105 112 69 0 103-36 103-112V278h154v362c0 168-87 260-257 260-172 0-259-92-259-260V278Z" fill="#fff"/>
+  <path d="M735 170c-8 127-56 223-137 285-60 46-91 92-91 153 0 81 62 140 153 140 89 0 165-51 197-130" fill="none" stroke="url(#orbit)" stroke-width="25" stroke-linecap="round" opacity="0.93"/>
+  <circle cx="859" cy="617" r="29" fill="#dff4ff"/>
+  <circle cx="736" cy="170" r="18" fill="#fff" opacity="0.9"/>
+</svg>

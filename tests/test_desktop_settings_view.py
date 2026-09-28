@@ -1,0 +1,87 @@
+from __future__ import annotations
+
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+
+def test_settings_view_emits_schema_compatible_appearance():
+    from PySide6.QtWidgets import QApplication
+    from jobhub.config import DEFAULT_SETTINGS, merge_settings, validate_settings
+    from jobhub.desktop.ui import SettingsView
+
+    app = QApplication.instance() or QApplication([])
+    view = SettingsView()
+    emitted = []
+    view.save_requested.connect(emitted.append)
+
+    for appearance in ("System", "Light", "Dark"):
+        view.set_settings({"appearance": appearance})
+        view._save()
+        assert emitted[-1]["appearance"] == appearance
+        validate_settings(merge_settings(DEFAULT_SETTINGS, emitted[-1]))
+    view.close()
+
+
+def test_mailbox_password_is_transient_in_settings_view():
+    from PySide6.QtWidgets import QApplication
+    from jobhub.config import DEFAULT_SETTINGS, merge_settings, validate_settings
+    from jobhub.desktop.ui import SettingsView
+
+    app = QApplication.instance() or QApplication([])
+    view = SettingsView()
+    emitted = []
+    view.save_requested.connect(emitted.append)
+    view.imap_host.setText("imap.example.test")
+    view.imap_username.setText("candidate@example.test")
+    view.imap_sender.setText("codes@example.test")
+    view.imap_password.setText("local-test-secret")
+    view.verification_enabled.setChecked(True)
+    view._save()
+    patch = dict(emitted[-1])
+    assert patch.pop("_imap_password") == "local-test-secret"
+    assert view.imap_password.text() == ""
+    settings = validate_settings(merge_settings(DEFAULT_SETTINGS, patch))
+    assert "password" not in settings["email_verification"]
+    view.close()
+
+
+def test_controller_saves_mailbox_secret_only_to_vault(tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QApplication
+    from jobhub import config, db, scheduler
+    from jobhub.apply import email_verification
+    from jobhub.desktop.controller import DesktopController
+    from jobhub.desktop.ui import JobHubWindow
+
+    db.close()
+    for name, value in {
+        "DATA": tmp_path, "DB_PATH": tmp_path / "test.db", "RESUMES": tmp_path / "resumes",
+        "TAILORED": tmp_path / "tailored", "SCREENSHOTS": tmp_path / "screenshots",
+    }.items():
+        monkeypatch.setattr(config, name, value)
+    db.init()
+    stored = []
+    monkeypatch.setattr(email_verification, "store_password", lambda user, password: stored.append((user, password)))
+    monkeypatch.setattr(email_verification, "has_password", lambda user: False)
+    monkeypatch.setattr(scheduler, "rescore", lambda: None)
+
+    app = QApplication.instance() or QApplication([])
+    window = JobHubWindow()
+    controller = DesktopController(window, scheduler_enabled=False, show_setup_on_start=False)
+    controller.save_settings({
+        "email_verification": {
+            "enabled": True,
+            "imap_host": "imap.example.test",
+            "imap_port": 993,
+            "imap_username": "candidate@example.test",
+            "sender_address": "codes@example.test",
+        },
+        "_imap_password": "local-test-secret",
+    })
+    assert stored == [("candidate@example.test", "local-test-secret")]
+    assert db.get_settings()["email_verification"]["enabled"] is True
+    assert "local-test-secret" not in (tmp_path / "test.db").read_bytes().decode("latin1")
+    controller.stop()
+    window.close()
+    db.close()
+    scheduler.STATE.stop = False

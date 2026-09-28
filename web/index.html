@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>JobHub</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="ambient" aria-hidden="true"></div>
+<aside class="rail">
+  <div class="brand"><span class="dot" aria-hidden="true"></span>JobHub<span class="ver">web</span></div>
+  <nav>
+    <button data-view="overview" class="active">Overview</button>
+    <button data-view="jobs">Jobs</button>
+    <button data-view="applications">Applications</button>
+    <button data-view="profile">Profile</button>
+    <button data-view="settings">Settings</button>
+  </nav>
+  <div class="rail-foot">
+    <div class="kv"><span>scheduler</span><b id="r-sched">:</b></div>
+    <div class="kv"><span>llm</span><b id="r-llm">:</b></div>
+    <div class="kv"><span>next scan</span><b id="r-next">:</b></div>
+    <div class="switches">
+      <label class="switch"><input type="checkbox" id="sw-auto"><span></span>auto-apply</label>
+      <label class="switch"><input type="checkbox" id="sw-dry"><span></span>practice mode</label>
+    </div>
+  </div>
+</aside>
+
+<main>
+  <div id="connection" class="notice hidden" role="alert"></div>
+  <section id="view-overview" class="view active">
+    <header class="topbar">
+      <h1>Overview</h1>
+      <div class="actions">
+        <button class="btn" id="btn-scan">Scan now</button>
+        <button class="btn ghost" id="btn-auto">Apply to top matches</button>
+      </div>
+    </header>
+    <div id="readiness" class="welcome"></div>
+    <div class="stats" id="stats"></div>
+    <div class="two-col">
+      <div class="panel">
+        <div class="panel-h">Recent activity</div>
+        <ul class="feed" id="feed"></ul>
+      </div>
+      <div class="panel">
+        <div class="panel-h">Top matches</div>
+        <div id="top-jobs" class="joblist compact"></div>
+      </div>
+    </div>
+    <div class="panel scans-panel"><div class="panel-h">Source health & recent scans</div><div id="scan-history"></div></div>
+  </section>
+
+  <section id="view-jobs" class="view">
+    <header class="topbar">
+      <div><h1>Discover opportunities</h1><span id="job-count" class="muted small"></span></div>
+      <div class="actions">
+        <button class="btn ghost" id="btn-import">Add job link</button>
+        <input id="job-q" class="input" placeholder="search title / company / location">
+        <select id="job-status" class="input">
+          <option value="new">new</option><option value="all">all</option><option value="applied">applied</option>
+          <option value="needs_human">needs human</option><option value="failed">failed</option><option value="skipped">skipped</option>
+        </select>
+        <input id="job-min-score" type="number" min="0" max="100" class="input score-filter" placeholder="Minimum score" aria-label="Minimum match score">
+        <select id="job-ats" class="input">
+          <option value="">any ATS</option><option>greenhouse</option><option>ashby</option><option>lever</option>
+          <option>workday</option><option>linkedin</option><option>indeed</option><option>unknown</option>
+        </select>
+      </div>
+    </header>
+    <div id="jobs" class="joblist"></div>
+  </section>
+
+  <section id="view-applications" class="view">
+    <header class="topbar"><h1>Applications</h1></header>
+    <div id="apps" class="applist"></div>
+  </section>
+
+  <section id="view-profile" class="view">
+    <header class="topbar">
+      <h1>Profile</h1>
+      <div class="actions">
+        <label class="btn">Upload resume PDF<input type="file" id="resume-file" accept="application/pdf" hidden></label>
+        <button class="btn ghost" id="btn-save-profile">Save</button>
+      </div>
+    </header>
+    <div class="two-col">
+      <div class="panel"><div class="panel-h">Identity</div><div id="profile-form" class="form"></div></div>
+      <div class="panel">
+        <div class="panel-h">Application answers <span class="muted">(only answers you save are used)</span></div>
+        <div id="answers-form" class="form"></div>
+        <p class="small muted">Your resume cannot establish work eligibility or availability. Leave anything unknown blank. Save to confirm the answers above.</p><div class="panel-h" style="margin-top:18px">Resume content</div>
+        <div id="profile-content" class="muted small"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="view-settings" class="view">
+    <header class="topbar">
+      <h1>Settings</h1>
+      <div class="actions"><button class="btn" id="btn-save-settings">Save</button></div>
+    </header>
+    <div class="two-col">
+      <div class="panel"><div class="panel-h">Targeting</div><div id="settings-form" class="form"></div></div>
+      <div class="panel"><div class="panel-h">Sources</div><div id="sources-form" class="form"></div>
+        <div class="panel-h" style="margin-top:18px">Company boards (one slug per line)</div><div id="companies-form" class="form"></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div id="modal" class="modal hidden" role="dialog" aria-modal="true" aria-label="JobHub details"><div class="modal-card"><button class="modal-x" id="modal-x" aria-label="Close dialog">×</button><div id="modal-body"></div></div></div>
+<div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

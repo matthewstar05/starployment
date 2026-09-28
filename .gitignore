@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+data/
+!data/.gitkeep
+.env
+*.log
+.DS_Store
+.pytest_cache/
+tmp/
+output/
+dist/
+build/
+packaging/playwright-browsers/
+
+# Personal verification log (names real employers and attempts); never commit
+VERIFICATION.md
+.ruff_cache/

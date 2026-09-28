@@ -1,0 +1,427 @@
+"""Native Qt Widgets shell for JobHub.
+
+The window is intentionally controller-friendly. It does not import or call
+the scheduler. A controller connects the public signals and feeds refreshed
+data to ``set_data``; this keeps browser work and SQLite writes off the UI
+thread. Page implementations live in ``jobhub.desktop.views`` and the setup
+wizard in ``jobhub.desktop.wizard``; both are re-exported here for callers
+that import from ``jobhub.desktop.ui``.
+"""
+from __future__ import annotations
+
+import sys
+import time
+from typing import Any
+
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, Signal
+from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QPixmap
+from PySide6.QtWidgets import (
+    QGraphicsOpacityEffect,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QVBoxLayout,
+    QWidget,
+)
+
+from .format import activity_label as _activity_label
+from .format import countdown, local_time as _local_time
+from .icon import icon_path
+from .native import TITLE_BAR_HEIGHT, configure_window_chrome, style_title_bar
+from .views.applications import ApplicationsView
+from .views.dashboard import DashboardView
+from .views.jobs import JobsView
+from .views.profile import ProfileView
+from .views.settings import SettingsView
+from .widgets import (
+    ActivityIndicator,
+    AmbientBackdrop,
+    FadeStack,
+    GlassNavList,
+    GlassPanel,
+    Motion,
+    StatusDot,
+    Toast,
+    button,
+    label,
+    reduced_motion,
+)
+from .wizard import SetupWizard
+
+__all__ = [
+    "ApplicationsView", "DashboardView", "JobHubWindow", "JobsView", "ProfileView",
+    "SettingsView", "SetupWizard", "_activity_label", "_local_time",
+]
+
+PAGES = (
+    ("Overview", "dashboard"),
+    ("Jobs", "jobs"),
+    ("Applications", "applications"),
+    ("Profile", "profile"),
+    ("Settings", "settings"),
+)
+OVERVIEW, JOBS, APPLICATIONS, PROFILE, SETTINGS = range(len(PAGES))
+
+
+class ShellBackdrop(AmbientBackdrop):
+    """The window backdrop; with native chrome its top band drags the window."""
+
+    def __init__(self, draggable: bool, parent: QWidget | None = None):
+        super().__init__(parent)
+        self._draggable = draggable
+
+    def _in_title_band(self, event) -> bool:
+        return self._draggable and event.position().y() <= TITLE_BAR_HEIGHT + 6
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self._in_title_band(event):
+            handle = self.window().windowHandle()
+            if handle is not None and handle.startSystemMove():
+                return
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if self._in_title_band(event):
+            window = self.window()
+            window.showNormal() if window.isMaximized() else window.showMaximized()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
+class Sidebar(GlassPanel):
+    """Floating glass sidebar: brand, navigation, and background-scan status."""
+
+    WIDTH = 236
+
+    def __init__(self, native_titlebar: bool, parent: QWidget | None = None):
+        super().__init__(parent, radius=22, material="sidebar")
+        self.setObjectName("sidebar")
+        self.setFixedWidth(self.WIDTH)
+        column = QVBoxLayout(self)
+        column.setContentsMargins(6, TITLE_BAR_HEIGHT if native_titlebar else 18, 6, 12)
+        column.setSpacing(6)
+        brand = QHBoxLayout()
+        brand.setContentsMargins(14, 0, 14, 6)
+        brand.setSpacing(10)
+        if icon_path().is_file():
+            mark = QLabel()
+            pixmap = QPixmap(str(icon_path()))
+            pixmap.setDevicePixelRatio(2.0)
+            mark.setPixmap(pixmap.scaled(56, 56, Qt.AspectRatioMode.KeepAspectRatio,
+                                         Qt.TransformationMode.SmoothTransformation))
+            brand.addWidget(mark)
+        brand.addWidget(label("JobHub", "brand", wrap=False))
+        brand.addStretch()
+        column.addLayout(brand)
+        self.nav = GlassNavList()
+        for title, icon in PAGES:
+            self.nav.add_destination(title, icon)
+        self.nav.setFixedHeight(self.nav.sizeHintForRow(0) * len(PAGES) + 8)
+        column.addWidget(self.nav)
+        column.addStretch(1)
+
+        status = QHBoxLayout()
+        status.setContentsMargins(14, 0, 10, 2)
+        status.setSpacing(10)
+        self.spinner = ActivityIndicator(14)
+        self.spinner.hide()
+        self.status_dot = StatusDot("green", 9)
+        status.addWidget(self.spinner, 0, Qt.AlignmentFlag.AlignTop)
+        status.addWidget(self.status_dot, 0, Qt.AlignmentFlag.AlignTop)
+        text = QVBoxLayout()
+        text.setSpacing(1)
+        self.status_title = label("Ready", "sidebarStatusTitle", wrap=False)
+        self.status_detail = label("", "sidebarStatus")
+        text.addWidget(self.status_title)
+        text.addWidget(self.status_detail)
+        status.addLayout(text, 1)
+        column.addLayout(status)
+        column.addSpacing(8)
+        self.scan = button("Refresh jobs", "secondary", icon="refresh")
+        self.scan.setToolTip("Scan every configured source now (⌘R)")
+        refresh_row = QHBoxLayout()
+        refresh_row.setContentsMargins(8, 0, 8, 0)
+        refresh_row.addWidget(self.scan)
+        column.addLayout(refresh_row)
+
+    def set_status(self, title: str, detail: str, tone: str, busy: bool) -> None:
+        self.status_title.setText(title)
+        self.status_detail.setText(detail)
+        self.status_detail.setVisible(bool(detail))
+        if busy:
+            self.status_dot.hide()
+            self.spinner.start()
+        else:
+            self.spinner.stop()
+            self.status_dot.set_tone(tone)
+            self.status_dot.show()
+
+
+class JobHubWindow(QMainWindow):
+    """Primary application shell.
+
+    Signals form the controller contract: ``scan_requested``,
+    ``apply_requested(job_id)``, ``status_requested(job_id, status)``,
+    ``import_requested(url)``, ``save_profile_requested(data)``,
+    ``save_settings_requested(patch)``, ``appearance_requested(appearance)``,
+    ``setup_completed(data)``, ``setup_requested``,
+    ``answer_questions_requested(questions)``, and ``open_url_requested(url)``.
+    """
+
+    scan_requested = Signal()
+    apply_requested = Signal(str)
+    skip_requested = Signal(str)
+    status_requested = Signal(str, str)
+    import_requested = Signal(str)
+    save_profile_requested = Signal(dict)
+    save_settings_requested = Signal(dict)
+    appearance_requested = Signal(str)
+    setup_completed = Signal(dict)
+    setup_requested = Signal()
+    answer_questions_requested = Signal(list)
+    open_url_requested = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("JobHub")
+        self.resize(1280, 820)
+        self.setMinimumSize(1000, 680)
+        self._native_chrome = configure_window_chrome(self)
+        self._setup_complete = True
+        self._auto_apply = False
+        self._crossfade: QPropertyAnimation | None = None
+
+        root = ShellBackdrop(self._native_chrome)
+        root.setObjectName("shell")
+        self.setCentralWidget(root)
+        outer = QHBoxLayout(root)
+        outer.setContentsMargins(8, 8, 0, 8) if self._native_chrome else outer.setContentsMargins(10, 10, 0, 10)
+        outer.setSpacing(4)
+        self.sidebar = Sidebar(self._native_chrome)
+        root.add_shadow_target(self.sidebar, self.sidebar.radius)
+        outer.addWidget(self.sidebar)
+        self.nav = self.sidebar.nav
+        self.scan = self.sidebar.scan
+        self.scan.clicked.connect(self.scan_requested)
+
+        self.stack = FadeStack(mode="rise")
+        outer.addWidget(self.stack, 1)
+        self.dashboard = DashboardView()
+        self.jobs = JobsView()
+        self.apps = ApplicationsView()
+        self.profile = ProfileView()
+        self.settings = SettingsView()
+        for page in (self.dashboard, self.jobs, self.apps, self.profile, self.settings):
+            self.stack.addWidget(page)
+        self.toast = Toast(root)
+
+        # Compatibility aliases used by tests and older controller code.
+        self.review_button = self.dashboard.review_button
+        self.activity_rows = self.dashboard.activity_rows
+        self.onboarding = self.dashboard.onboarding
+        self.metrics_container = self.dashboard.metrics_container
+        self.empty_attention = self.dashboard.empty_attention
+        self.empty_activity = self.dashboard.empty_activity
+        self.unanswered = self.dashboard.unanswered
+
+        self.nav.currentRowChanged.connect(self._switch_page)
+        self.nav.setCurrentRow(OVERVIEW)
+
+        self.dashboard.setup_requested.connect(self.setup_requested)
+        self.dashboard.jobs_requested.connect(self.show_jobs)
+        self.dashboard.applications_requested.connect(self.show_application)
+        self.dashboard.apply_requested.connect(self.apply_requested)
+        self.dashboard.open_url_requested.connect(self.open_url_requested)
+        self.jobs.apply_requested.connect(self.apply_requested)
+        self.jobs.open_requested.connect(self.open_url_requested)
+        self.jobs.import_requested.connect(self.import_requested)
+        self.jobs.status_requested.connect(self.status_requested)
+        self.apps.open_requested.connect(self.open_url_requested)
+        self.apps.answer_questions_requested.connect(self.answer_questions_requested)
+        self.profile.save_requested.connect(self._profile_save)
+        self.settings.save_requested.connect(self._settings_save)
+        self.settings.appearance_changed.connect(self.appearance_requested)
+        self._install_actions()
+        self.set_scan_state(scanning=False, next_scan_at=None, setup_complete=True, scheduler_enabled=True)
+
+    # ------------------------------------------------------------ chrome
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self._native_chrome:
+            style_title_bar(self)
+
+    def _install_actions(self) -> None:
+        def action(text: str, shortcut: QKeySequence | str | None, slot, role=None) -> QAction:
+            item = QAction(text, self)
+            if shortcut is not None:
+                item.setShortcut(QKeySequence(shortcut))
+            item.triggered.connect(slot)
+            if role is not None:
+                item.setMenuRole(role)
+            self.addAction(item)
+            return item
+
+        self.refresh_action = action("Refresh Jobs", "Ctrl+R", self.scan_requested.emit)
+        self.add_posting_action = action("Add Posting…", "Ctrl+N", self._add_posting)
+        self.find_action = action("Find Jobs", QKeySequence.StandardKey.Find, self._find_jobs)
+        self.setup_action = action("Edit Setup…", "Ctrl+Shift+E", self.setup_requested.emit)
+        self.save_action = action("Save", QKeySequence.StandardKey.Save, self._save_current)
+        self.preferences_action = action("Settings…", QKeySequence.StandardKey.Preferences,
+                                         lambda: self.nav.setCurrentRow(SETTINGS),
+                                         QAction.MenuRole.PreferencesRole)
+        self.page_actions = [
+            action(title, f"Ctrl+{index + 1}", lambda _=False, row=index: self.nav.setCurrentRow(row))
+            for index, (title, _) in enumerate(PAGES)
+        ]
+        # Only a native macOS menu bar; elsewhere the shortcuts stay on the window.
+        if sys.platform == "darwin" and QGuiApplication.platformName() == "cocoa":
+            bar = self.menuBar()
+            file_menu = bar.addMenu("File")
+            for item in (self.refresh_action, self.add_posting_action, self.setup_action, self.save_action):
+                file_menu.addAction(item)
+            file_menu.addAction(self.preferences_action)
+            edit_menu = bar.addMenu("Edit")
+            edit_menu.addAction(self.find_action)
+            view_menu = bar.addMenu("View")
+            for item in self.page_actions:
+                view_menu.addAction(item)
+            bar.addMenu("Window")
+
+    def _add_posting(self) -> None:
+        self.nav.setCurrentRow(JOBS)
+        self.jobs._import_dialog()
+
+    def _find_jobs(self) -> None:
+        self.nav.setCurrentRow(JOBS)
+        self.jobs.focus_search()
+
+    def _save_current(self) -> None:
+        page = self.stack.currentWidget()
+        if page is self.profile and self.profile.dirty:
+            self.profile._save()
+        elif page is self.settings and self.settings.dirty:
+            self.settings._save()
+        elif page is self.apps:
+            self.apps._save_note()
+
+    def _profile_save(self, data: dict) -> None:
+        self.profile.tracker.reset()
+        self.save_profile_requested.emit(data)
+
+    def _settings_save(self, patch: dict) -> None:
+        self.settings.tracker.reset()
+        self.save_settings_requested.emit(patch)
+
+    def _switch_page(self, index: int) -> None:
+        if index >= 0:
+            self.stack.setCurrentIndex(index)
+
+    def show_jobs(self, status: str = "all") -> None:
+        self.jobs.set_filter(status or "all")
+        self.nav.setCurrentRow(JOBS)
+
+    def show_application(self, app_id: object = None) -> None:
+        self.nav.setCurrentRow(APPLICATIONS)
+        if app_id is not None:
+            self.apps.select_application_id(app_id)
+
+    # ---------------------------------------------------------- feedback
+    def notify(self, message: str, tone: str = "info", timeout: int = 4500) -> None:
+        """Show a toast. ``tone``: info, success, warning, error, or busy (timeout 0 keeps it)."""
+        self.toast.show_message(message, tone, timeout)
+
+    def crossfade(self, change) -> None:
+        """Run ``change`` (e.g. a theme switch) under a brief crossfade of the old frame."""
+        root = self.centralWidget()
+        if reduced_motion() or not self.isVisible() or root is None:
+            change()
+            return
+        if self._crossfade is not None:
+            self._crossfade.stop()
+        snapshot = root.grab()
+        overlay = QLabel(root)
+        overlay.setPixmap(snapshot)
+        overlay.setGeometry(root.rect())
+        overlay.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        overlay.show()
+        overlay.raise_()
+        change()
+        effect = QGraphicsOpacityEffect(overlay)
+        overlay.setGraphicsEffect(effect)
+        fade = QPropertyAnimation(effect, b"opacity", overlay)
+        fade.setDuration(Motion.SLOW)
+        fade.setStartValue(1.0)
+        fade.setEndValue(0.0)
+        fade.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        fade.finished.connect(overlay.deleteLater)
+        self._crossfade = fade
+        fade.start()
+
+    def set_scan_state(self, *, scanning: bool, next_scan_at: float | None = None,
+                       setup_complete: bool | None = None, scheduler_enabled: bool = True,
+                       auto_apply: bool | None = None) -> None:
+        """Update the sidebar's background-activity summary."""
+        if setup_complete is not None:
+            self._setup_complete = setup_complete
+        if auto_apply is not None:
+            self._auto_apply = auto_apply
+        automation = "Auto-apply on" if self._auto_apply else "Auto-apply off"
+        self.scan.setEnabled(not scanning)
+        self.scan.setText("Scanning…" if scanning else "Refresh jobs")
+        if scanning:
+            self.sidebar.set_status("Searching for jobs", "This usually takes a minute.", "accent", True)
+        elif not self._setup_complete:
+            self.sidebar.set_status("Setup needed", "Finish setup to start scanning.", "amber", False)
+        elif not scheduler_enabled:
+            self.sidebar.set_status("Scheduled scans paused", automation, "neutral", False)
+        elif next_scan_at:
+            self.sidebar.set_status(f"Next scan {countdown(next_scan_at - time.time())}", automation, "green", False)
+        else:
+            self.sidebar.set_status("Ready", automation, "green", False)
+
+    # -------------------------------------------------------------- data
+    def set_data(
+        self, *, profile=None, settings=None, jobs=None, total_jobs=None,
+        applications=None, stats=None, events=None, top_jobs=None,
+    ) -> None:
+        if profile is not None:
+            if not self.profile.dirty:
+                self.profile.set_profile(profile)
+            self.dashboard.set_profile(profile)
+        if settings is not None:
+            if not self.settings.dirty:
+                self.settings.set_settings(settings)
+            self._setup_complete = bool(settings.get("setup_complete"))
+            self._auto_apply = bool(settings.get("auto_apply"))
+            self.dashboard.set_setup_complete(self._setup_complete)
+        retryable = self._retryable(applications or [])
+        if jobs is not None:
+            self.jobs.set_jobs(jobs, retryable, total_count=total_jobs)
+        if top_jobs is not None:
+            self.dashboard.set_top_jobs(top_jobs, retryable)
+        if stats is not None:
+            self.dashboard.set_stats(stats)
+            new = int(stats.get("new", 0) or 0)
+            self.nav.set_badge(JOBS, f"{new:,}" if new else "", "neutral")
+            review = int(stats.get("needs_human", 0) or 0)
+            self.nav.set_badge(APPLICATIONS, str(review) if review else "", "amber")
+        if applications is not None:
+            self.apps.set_applications(applications)
+            self.dashboard.set_applications(applications, stats)
+        if events is not None:
+            self.dashboard.set_events(events, applications)
+
+    @staticmethod
+    def _retryable(applications: list[dict[str, Any]]) -> set[str]:
+        latest: dict[str, dict] = {}
+        for app in applications:
+            latest.setdefault(app.get("job_id"), app)
+        return {
+            job_id for job_id, app in latest.items()
+            if job_id and app.get("status") in {"needs_human", "failed"} and not app.get("submission_attempted")
+        }
+
+    def show_setup(self, profile=None, settings=None) -> None:
+        wizard = SetupWizard(profile, settings, self)
+        wizard.completed.connect(self.setup_completed)
+        wizard.exec()

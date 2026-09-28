@@ -1,0 +1,69 @@
+name: Native desktop bundles
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            artifact: macos-arm64
+          - os: macos-15-intel
+            artifact: macos-x64
+          - os: windows-2025
+            artifact: windows-x64
+          - os: ubuntu-24.04
+            artifact: linux-x64
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@v9
+        with:
+          python-version: "3.12"
+      - name: Install locked dependencies
+        run: uv sync --locked --group dev
+      - name: Install Linux browser system libraries
+        if: runner.os == 'Linux'
+        run: uv run --no-sync python -m playwright install-deps chromium
+      - name: Install test Chromium
+        run: uv run --no-sync python -m playwright install chromium
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/packaging/playwright-browsers
+      - name: Run local tests
+        run: uv run --no-sync pytest -q
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/packaging/playwright-browsers
+      - name: Build native desktop bundle
+        run: uv run --no-sync python packaging/build_desktop.py
+      - name: Check frozen browser and window
+        run: uv run --no-sync python packaging/smoke_bundle.py
+      - name: Verify macOS code signature
+        if: runner.os == 'macOS'
+        run: codesign --verify --deep --strict dist/JobHub.app
+      - name: Archive macOS application
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent dist/JobHub.app dist/JobHub-${{ matrix.artifact }}.zip
+      - name: Archive Windows application
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path dist/JobHub -DestinationPath dist/JobHub-${{ matrix.artifact }}.zip
+      - name: Archive Linux application
+        if: runner.os == 'Linux'
+        run: tar -C dist -czf dist/JobHub-${{ matrix.artifact }}.tar.gz JobHub
+      - uses: actions/upload-artifact@v4
+        with:
+          name: JobHub-${{ matrix.artifact }}
+          path: dist/JobHub-${{ matrix.artifact }}.*
+          if-no-files-found: error
+          retention-days: 14

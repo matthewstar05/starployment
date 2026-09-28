@@ -1,0 +1,208 @@
+"""Semantic, appearance-aware stylesheet for the native JobHub desktop client.
+
+Stylesheet rules cover stock Qt controls (labels, inputs, buttons, tables,
+scroll bars, menus). Glass surfaces, the sidebar pill, switches, segmented
+controls, and toasts are custom-painted in ``widgets.py`` and deliberately
+have no stylesheet rules. Label roles are selected by ``objectName``; see the
+"Typography" block below for the available roles.
+"""
+from __future__ import annotations
+
+import sys
+
+from PySide6.QtGui import QFont, QFontDatabase
+from PySide6.QtWidgets import QApplication
+
+from .icons import icon_path
+from .theme import DARK, colors_for, resolve_appearance
+
+
+def app_font(size: int = 13, weight: int = QFont.Weight.Normal) -> QFont:
+    """The platform UI font at ``size`` pixels (SF Pro via ``.AppleSystemUIFont`` on macOS)."""
+    if sys.platform == "darwin":
+        font = QFont(".AppleSystemUIFont")
+    else:
+        font = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont)
+    font.setPixelSize(size)
+    font.setWeight(QFont.Weight(weight))
+    return font
+
+
+def stylesheet(appearance: str | None = None) -> str:
+    """Build the global stylesheet for System, Light, or Dark appearance."""
+    scheme = resolve_appearance(appearance)
+    c = colors_for(scheme)
+    dark = scheme == DARK
+    # Qt does not register the SF Pro marketing name on macOS. Its native
+    # system family resolves to the same platform typography without fallback.
+    font_rule = "font-family: '.AppleSystemUIFont';" if sys.platform == "darwin" else ""
+    check_icon = icon_path("check").as_posix()
+    up_icon = icon_path("chevron-up").as_posix()
+    down_icon = icon_path("chevron-down").as_posix()
+    control_line = "rgba(255,255,255,0.10)" if dark else "rgba(0,0,0,0.11)"
+    control_line_hover = "rgba(255,255,255,0.18)" if dark else "rgba(0,0,0,0.18)"
+    secondary_fill = "rgba(255,255,255,0.09)" if dark else "rgba(255,255,255,0.82)"
+    secondary_hover = "rgba(255,255,255,0.14)" if dark else "rgba(255,255,255,1.0)"
+    secondary_pressed = "rgba(255,255,255,0.06)" if dark else "rgba(235,236,240,1.0)"
+    primary_top = "#2E8CFF" if dark else "#1A84F0"
+    scroll_handle = "rgba(255,255,255,0.22)" if dark else "rgba(0,0,0,0.20)"
+    scroll_handle_hover = "rgba(255,255,255,0.34)" if dark else "rgba(0,0,0,0.32)"
+    inset_fill = "rgba(0,0,0,0.22)" if dark else "rgba(255,255,255,0.55)"
+    return f"""
+    /* Base ------------------------------------------------------------- */
+    QWidget {{ color: {c['text']}; {font_rule} font-size: 13px; }}
+    QMainWindow, QDialog {{ background-color: {c['window']}; color: {c['text']}; }}
+    QLabel {{ background-color: transparent; }}
+    QWidget#page, QWidget#formPage, QWidget#formViewport, QScrollArea#formScroll,
+    QScrollArea, QScrollArea > QWidget > QWidget, QStackedWidget, QSplitter,
+    QWidget#formRow, QWidget#toolbar {{ background: transparent; border: none; }}
+    QSplitter::handle {{ background: transparent; }}
+
+    /* Typography (select with objectName) ------------------------------ */
+    QLabel#brand {{ color: {c['text']}; font-size: 17px; font-weight: 700; }}
+    QLabel#eyebrow {{ color: {c['text_muted']}; font-size: 11px; font-weight: 600; }}
+    QLabel#pageTitle {{ color: {c['text']}; font-size: 28px; font-weight: 700; }}
+    QLabel#sheetTitle {{ color: {c['text']}; font-size: 22px; font-weight: 700; }}
+    QLabel#subtitle {{ color: {c['text_muted']}; font-size: 13px; }}
+    QLabel#caption {{ color: {c['text_subtle']}; font-size: 11px; }}
+    QLabel#sectionTitle, QLabel#cardTitle {{ color: {c['text']}; font-size: 15px; font-weight: 600; }}
+    QLabel#groupTitle {{ color: {c['text']}; font-size: 13px; font-weight: 600; }}
+    QLabel#groupNote {{ color: {c['text_muted']}; font-size: 11px; }}
+    QLabel#rowTitle {{ color: {c['text']}; font-size: 13px; }}
+    QLabel#rowNote {{ color: {c['text_muted']}; font-size: 11px; }}
+    QLabel#emptyTitle {{ color: {c['text']}; font-size: 15px; font-weight: 600; }}
+    QLabel#metricValue {{ color: {c['text']}; font-size: 30px; font-weight: 700; }}
+    QLabel#metricLabel {{ color: {c['text_muted']}; font-size: 12px; font-weight: 500; }}
+    QLabel#activityTime {{ color: {c['text_subtle']}; font-size: 11px; }}
+    QLabel#activityMessage {{ color: {c['text']}; font-size: 13px; }}
+    QLabel#rowPrimary {{ color: {c['text']}; font-size: 13px; font-weight: 600; }}
+    QLabel#rowSecondary {{ color: {c['text_muted']}; font-size: 12px; }}
+    QLabel#sidebarStatus {{ color: {c['text_muted']}; font-size: 11px; }}
+    QLabel#sidebarStatusTitle {{ color: {c['text']}; font-size: 12px; font-weight: 600; }}
+    QLabel#detailTitle {{ color: {c['text']}; font-size: 20px; font-weight: 700; }}
+    QLabel#pill {{ border-radius: 10px; padding: 3px 10px; font-size: 11px; font-weight: 600; }}
+    QLabel#callout {{ background: {inset_fill}; color: {c['text']}; border: 1px solid {control_line};
+        border-radius: 12px; padding: 11px 13px; }}
+    QLabel#questions {{ background: {c['amber_soft']}; color: {c['text']}; border-radius: 12px; padding: 11px 13px; }}
+    QLabel#dropHint {{ color: {c['text_muted']}; font-size: 12px; }}
+
+    /* Inputs ------------------------------------------------------------ */
+    QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
+        background-color: {c['fill_control']}; color: {c['text']};
+        border: 1px solid {control_line}; border-radius: 9px; padding: 6px 10px;
+        selection-background-color: {c['accent']}; selection-color: #FFFFFF; }}
+    QLineEdit:hover, QTextEdit:hover, QPlainTextEdit:hover, QSpinBox:hover, QComboBox:hover {{
+        border-color: {control_line_hover}; }}
+    QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{
+        border: 2px solid {c['accent']}; padding: 5px 9px; background-color: {c['fill_control_hover']}; }}
+    QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled, QComboBox:disabled, QSpinBox:disabled {{
+        color: {c['disabled']}; background-color: {c['fill_quiet']}; }}
+    QLineEdit#search {{ border-radius: 15px; padding: 5px 10px 5px 4px; min-height: 18px; }}
+    QLineEdit#search:focus {{ padding: 4px 9px 4px 3px; }}
+    QPlainTextEdit#evidence {{ background: {inset_fill}; border: 1px solid {control_line}; border-radius: 12px;
+        padding: 10px; color: {c['text_muted']}; font-size: 12px; }}
+    QSpinBox {{ padding-right: 22px; min-width: 64px; }}
+    QSpinBox[stepper="true"] {{ padding-right: 10px; min-width: 0; }}
+    QSpinBox[stepper="true"]:focus {{ padding-right: 9px; }}
+    QSpinBox::up-button, QSpinBox::down-button {{ subcontrol-origin: border; width: 18px; border: none;
+        background: transparent; margin-right: 3px; }}
+    QSpinBox::up-button {{ subcontrol-position: top right; margin-top: 3px; }}
+    QSpinBox::down-button {{ subcontrol-position: bottom right; margin-bottom: 3px; }}
+    QSpinBox::up-button:hover, QSpinBox::down-button:hover {{ background: {c['fill_hover']}; border-radius: 4px; }}
+    QSpinBox::up-arrow {{ image: url("{up_icon}"); width: 9px; height: 9px; }}
+    QSpinBox::down-arrow {{ image: url("{down_icon}"); width: 9px; height: 9px; }}
+    QComboBox {{ padding-right: 26px; }}
+    QComboBox::drop-down {{ border: none; width: 24px; }}
+    QComboBox QAbstractItemView {{ background: {c['surface']}; border: 1px solid {control_line}; border-radius: 8px;
+        selection-background-color: {c['accent']}; selection-color: #FFFFFF; padding: 4px; }}
+
+    /* Buttons: capsules ------------------------------------------------- */
+    QPushButton {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {primary_top}, stop:1 {c['button_fill']});
+        color: #FFFFFF; border: 1px solid rgba(0,0,0,0.06); border-radius: 15px;
+        padding: 6px 16px; min-height: 18px; font-weight: 600; }}
+    QPushButton:hover {{ background: {c['button_hover']}; }}
+    QPushButton:pressed {{ background: {c['button_pressed']}; }}
+    QPushButton:focus {{ border: 2px solid rgba(255,255,255,0.55); padding: 5px 15px; }}
+    QPushButton:disabled {{ background: {c['fill_quiet']}; color: {c['disabled']}; border-color: transparent; }}
+    QPushButton#secondary {{ background: {secondary_fill}; color: {c['text']}; border: 1px solid {control_line}; }}
+    QPushButton#secondary:hover {{ background: {secondary_hover}; border-color: {control_line_hover}; }}
+    QPushButton#secondary:pressed {{ background: {secondary_pressed}; }}
+    QPushButton#secondary:focus, QPushButton#quiet:focus, QPushButton#danger:focus {{
+        border: 2px solid {c['accent']}; padding: 5px 15px; }}
+    QPushButton#secondary:disabled {{ background: {c['fill_quiet']}; color: {c['disabled']}; border-color: transparent; }}
+    QPushButton#quiet {{ background: transparent; color: {c['accent_text']}; border: 1px solid transparent; padding: 6px 10px; }}
+    QPushButton#quiet:hover {{ background: {c['fill_hover']}; }}
+    QPushButton#quiet:pressed {{ background: {c['fill_quiet']}; }}
+    QPushButton#danger {{ background: {c['red_soft']}; color: {c['red']}; border: 1px solid transparent; }}
+    QPushButton#danger:hover {{ background: {c['red_soft']}; border-color: {c['red']}; }}
+
+    /* Tables and lists -------------------------------------------------- */
+    QTableWidget#glassTable, QTableView#glassTable {{ background: transparent; border: none; outline: none;
+        gridline-color: transparent; selection-background-color: transparent; selection-color: {c['text']}; }}
+    QTableWidget#glassTable::item {{ border: none; padding: 0 10px; background: transparent; }}
+    QTableWidget#glassTable::item:selected {{ background: transparent; color: {c['text']}; }}
+    QHeaderView {{ background: transparent; border: none; }}
+    QHeaderView::section {{ background: transparent; color: {c['text_muted']}; border: none;
+        border-bottom: 1px solid {c['separator']}; padding: 9px 10px 8px 10px; font-size: 11px; font-weight: 600; }}
+    QTableWidget, QTreeWidget, QTableView, QTreeView {{ background-color: {c['surface']}; color: {c['text']};
+        border: 1px solid {c['border_soft']}; border-radius: 10px; gridline-color: {c['border_soft']};
+        selection-background-color: {c['accent_soft']}; selection-color: {c['text']}; outline: none; }}
+    QListWidget#nav, QListWidget#applicationList, QListWidget#plainList {{ background: transparent; border: none; outline: none; }}
+    QListWidget#nav::item, QListWidget#applicationList::item, QListWidget#plainList::item {{ background: transparent; border: none; }}
+
+    /* Scroll bars: slim overlay style ----------------------------------- */
+    QScrollBar:vertical {{ background: transparent; width: 10px; margin: 4px 2px 4px 0; }}
+    QScrollBar::handle:vertical {{ background: {scroll_handle}; border-radius: 3px; min-height: 36px; margin: 0 2px; }}
+    QScrollBar::handle:vertical:hover {{ background: {scroll_handle_hover}; margin: 0 1px; border-radius: 4px; }}
+    QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 0 4px 2px 4px; }}
+    QScrollBar::handle:horizontal {{ background: {scroll_handle}; border-radius: 3px; min-width: 36px; margin: 2px 0; }}
+    QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page {{
+        background: transparent; border: none; width: 0; height: 0; }}
+
+    /* Stock controls kept consistent ------------------------------------ */
+    QCheckBox, QRadioButton {{ spacing: 8px; padding: 3px 0; color: {c['text']}; background: transparent; }}
+    QCheckBox::indicator {{ width: 16px; height: 16px; border: 1px solid {control_line_hover}; border-radius: 5px;
+        background-color: {c['fill_control']}; }}
+    QCheckBox::indicator:checked {{ border-color: {c['accent']}; background-color: {c['accent']}; image: url("{check_icon}"); }}
+    QTabWidget::pane {{ border: none; background: transparent; }}
+    QTabBar::tab {{ background: transparent; color: {c['text_muted']}; padding: 7px 12px; border: none; }}
+    QTabBar::tab:selected {{ color: {c['text']}; font-weight: 600; }}
+    QProgressBar {{ background-color: {c['fill_quiet']}; border: none; border-radius: 3px; height: 6px; text-align: center; }}
+    QProgressBar::chunk {{ background-color: {c['accent']}; border-radius: 3px; }}
+    QMenu {{ background-color: {c['glass_thick']}; color: {c['text']}; border: 1px solid {control_line};
+        border-radius: 10px; padding: 5px; }}
+    QMenu::item {{ padding: 6px 22px 6px 12px; border-radius: 6px; }}
+    QMenu::item:selected {{ background-color: {c['accent']}; color: #FFFFFF; }}
+    QMenu::item:disabled {{ color: {c['disabled']}; }}
+    QMenu::separator {{ height: 1px; background-color: {c['separator']}; margin: 4px 8px; }}
+    QMenuBar {{ background-color: transparent; color: {c['text']}; }}
+    QToolTip {{ background-color: {c['tooltip']}; color: #FFFFFF; border: none; border-radius: 6px; padding: 5px 8px; }}
+    QMessageBox QLabel {{ font-size: 13px; }}
+    QStatusBar {{ background: transparent; color: {c['text_muted']}; border: none; }}
+    QFrame[frameShape="4"], QFrame[frameShape="5"] {{ color: {c['separator']}; }}
+    """
+
+
+def apply_appearance(app: QApplication, appearance: str = "System") -> str:
+    """Compatibility export for callers that import appearance from styles."""
+    from .theme import apply_appearance as apply
+
+    return apply(app, appearance)
+
+
+def color_for_status(status: str, appearance: str | None = None) -> tuple[str, str]:
+    """Return readable foreground and soft background colors for status labels."""
+    scheme = appearance
+    if scheme is None:
+        app = QApplication.instance()
+        if app is not None:
+            scheme = app.property("jobhubResolvedAppearance") or None
+    c = colors_for(scheme)
+    return {
+        "applied": (c["green"], c["green_soft"]),
+        "needs_human": (c["amber"], c["amber_soft"]),
+        "failed": (c["red"], c["red_soft"]),
+        "queued": (c["accent_text"], c["accent_soft"]),
+        "applying": (c["accent_text"], c["accent_soft"]),
+        "dry_run": (c["indigo"], c["indigo_soft"]),
+    }.get(status, (c["text_muted"], c["fill_quiet"]))
