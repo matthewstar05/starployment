@@ -335,3 +335,44 @@ def test_luna_can_pick_several_options_but_only_real_ones(monkeypatch):
     assert luna.draftable(question)
     assert luna._validated(question, ["python", "C++"]) == ["Python", "C++"]
     assert luna._validated(question, "Python, Rust") is None
+
+
+def test_ai_autofill_answers_every_open_question_with_labeled_assumptions(candidate, monkeypatch):
+    jobs(1)
+    questions = [("Years of Work Experience", "text", []), ("What is your preferred work location?", "select",
+                  ["New York", "Chicago", "Remote"]), ("Have you previously applied to work at Acme?", "select", ["Yes", "No"]),
+                 ("What is your gender?", "select", ["Male", "Female", "Decline to self-identify"]),
+                 ("Interview Code of Conduct", "checkbox", []), ("Resume", "file", [])]
+    monkeypatch.setattr(prepare, "discover_questions", lambda job: (
+        [prepare._question(i + 1, label, kind, options, True) for i, (label, kind, options) in enumerate(questions)],
+        "greenhouse_form"))
+    db.set_settings({"years_experience": 2.0, "agent": {"backend": "claude_cli", "model": ""}})
+    prompts = []
+
+    def fake(prompt, settings, timeout=0):
+        prompts.append(prompt)
+        return json.dumps({"answers": [
+            {"id": "q1", "answer": "2", "assumed": False, "note": "Professional experience: 2 years"},
+            {"id": "q2", "answer": "remote", "assumed": True, "note": "open to remote"},
+            {"id": "q3", "answer": "No", "assumed": True, "note": "new graduate"},
+            {"id": "q4", "answer": "Male"},               # demographics are never sent to the agent
+            {"id": "q5", "answer": "true", "assumed": True, "note": "acknowledgement"}]})
+
+    monkeypatch.setattr("jobhub.luna.complete", fake)
+    prepare.prepare_batch(1, 0, use_luna=False)
+    draft = db.list_drafts()[0]
+    assert prepare.autofill(draft["id"]) == 4          # gender was already declined from saved rules
+    after = {q["label"]: q for q in db.get_draft(draft["id"])["questions"]}
+    assert after["Years of Work Experience"]["answer"] == "2"
+    assert after["What is your preferred work location?"]["answer"] == "Remote"
+    assert after["What is your preferred work location?"]["note"].startswith("Assumption: ")
+    assert after["What is your gender?"]["answer"] == "Decline to self-identify"
+    assert after["Interview Code of Conduct"]["answer"] is True
+    assert all(after[label]["source"] == "autofill" and not after[label]["approved"]
+               for label in ("Years of Work Experience", "Interview Code of Conduct"))
+    assert "gender" not in prompts[0].split("QUESTIONS")[-1].lower()
+    assert "Professional experience: 2 years" in prompts[0]
+    assert db.get_draft(draft["id"])["status"] == "ready"
+    # Autofilled answers stay with this application: not shared, not saved to the question bank.
+    assert prepare.share_answers(draft["id"]) == 0
+    assert "Years of Work Experience" not in db.get_settings()["answers"]["field_answers"]

@@ -26,7 +26,7 @@ from .sources.import_job import parse_job_url
 
 SUPPORTED_ATS = ("greenhouse", "lever", "ashby")
 SOURCE_LABELS = {"saved": "Saved answer", "profile": "From your profile", "resume": "From your resume",
-                 "luna": "Drafted by Luna", "you": "Your answer", "none": "Needs your answer",
+                 "luna": "Drafted by Luna", "autofill": "AI Autofill", "you": "Your answer", "none": "Needs your answer",
                  "declined": "Declined", "file": "Attached"}
 
 
@@ -319,6 +319,35 @@ def luna_ready(settings: dict) -> bool:
     return backend not in ("", "none") and bool((settings.get("luna") or {}).get("draft_answers", True))
 
 
+def autofill(draft_id: int, settings: dict | None = None) -> int:
+    """AI Autofill: realistic answers for every open question on one draft (the candidate reviews them)."""
+    from .luna import autofill_answers
+    draft = db.get_draft(draft_id)
+    if draft is None:
+        raise ValueError("Draft not found")
+    settings = settings or db.get_settings()
+    job, profile = db.get_job(draft["job_id"]), db.get_profile()
+    if job is None or profile is None:
+        raise ValueError("Job or profile no longer exists")
+    open_questions = [q for q in draft["questions"] if blank(q.get("answer")) and q["kind"] != "file"]
+    if not open_questions:
+        return 0
+    filled = autofill_answers(job, profile, settings, open_questions)
+    current = db.get_draft(draft_id)
+    if current is None or current["status"] not in db.DRAFT_OPEN + ("practice", "error"):
+        return 0
+    by_id = {q["id"]: q for q in current["questions"]}
+    for qid, result in filled.items():
+        question = by_id.get(qid)
+        if question is not None and blank(question.get("answer")):
+            question.update(answer=result["answer"], source="autofill", approved=False, note=result.get("note", ""))
+    status = current["status"] if current["status"] in ("approved", "practice", "error") else draft_status(current["questions"])
+    db.update_draft(draft_id, questions=current["questions"], status=status)
+    if filled:
+        db.add_event(f"AI Autofill answered {len(filled)} question(s) for {job.company} / {job.title}", "info", job.id)
+    return len(filled)
+
+
 def luna_fill(draft_id: int, settings: dict | None = None) -> int:
     """Ask Luna for open questions on one draft. Returns how many answers she drafted."""
     from .luna import draft_answers, draftable
@@ -489,7 +518,7 @@ def send_draft(draft_id: int) -> dict:
         value = question.get("answer")
         if blank(value) or not question.get("approved") or question["kind"] == "file":
             continue
-        if question.get("source") in ("luna", "you", "saved"):
+        if question.get("source") in ("luna", "you", "saved", "autofill"):
             extra.update(expand_answer(question, value))
             if question.get("source") in ("luna", "you") and _rememberable(question, value, job):
                 remember[question["label"]] = value

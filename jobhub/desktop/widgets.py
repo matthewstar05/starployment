@@ -1784,6 +1784,7 @@ class Toast(QWidget):
         self.setObjectName("toast")
         self.hide()
         self._host = host
+        self._area: QWidget | None = None
         self._text = ""
         self._tone = "info"
         self._progress = 0.0
@@ -1809,6 +1810,11 @@ class Toast(QWidget):
     @property
     def text(self) -> str:
         return self._text
+
+    def set_area(self, area: QWidget) -> None:
+        """Center over ``area`` (the page column) rather than the whole window."""
+        self._area = area
+        area.installEventFilter(self)
 
     @property
     def tone(self) -> str:
@@ -1859,14 +1865,18 @@ class Toast(QWidget):
 
     def _relayout(self) -> None:
         metrics = QFontMetrics(ui_font(13, QFont.Weight.Medium))
-        available = max(200, self._host.width() - 120)
+        left, span = 0, self._host.width()
+        if self._area is not None and self._area.isVisible():
+            left = self._area.mapTo(self._host, QPoint(0, 0)).x()
+            span = self._area.width()
+        available = max(200, span - 80)
         body_width = min(available, metrics.horizontalAdvance(self._text) + 18 + 12 + 40)
         width = int(body_width + self.MARGIN * 2)
         height = self.HEIGHT + self.MARGIN * 2
-        self.setGeometry((self._host.width() - width) // 2, self._host.height() - height - 6, width, height)
+        self.setGeometry(left + (span - width) // 2, self._host.height() - height - 6, width, height)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        if watched is self._host and event.type() == QEvent.Type.Resize and self._text:
+        if watched in (self._host, self._area) and event.type() in (QEvent.Type.Resize, QEvent.Type.Move) and self._text:
             self._relayout()
         return super().eventFilter(watched, event)
 
@@ -1882,9 +1892,14 @@ class Toast(QWidget):
         painter.setOpacity(min(1.0, self._progress))
         painter.translate(0, (1.0 - self._progress) * 18)
         body = QRectF(self.rect()).adjusted(self.MARGIN, self.MARGIN, -self.MARGIN, -self.MARGIN)
+        # Always back the text with a near-opaque material: a toast floats over
+        # busy lists, and translucent glass alone lets their text show through.
         if not self._native_glass.active:
             paint_soft_shadow(painter, body, body.height() / 2, colors["glass_shadow"], blur=18)
             paint_glass(painter, body, body.height() / 2, material="thick")
+        painter.fillPath(rounded_path(body, body.height() / 2), qcolor(colors["glass_thick"]))
+        painter.setPen(QPen(qcolor(colors["glass_line"]), 1))
+        painter.drawPath(rounded_path(body.adjusted(0.5, 0.5, -0.5, -0.5), body.height() / 2))
         icon_center = QPointF(body.left() + 22, body.center().y())
         if self._tone == "busy":
             paint_activity_indicator(painter, icon_center, 8, self._phase, colors["text_muted"])

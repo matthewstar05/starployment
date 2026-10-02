@@ -48,7 +48,7 @@ from ..widgets import (
 
 NOTE_AUTOSAVE_MS = 900
 SOURCE_TEXT = {"saved": "Saved answer", "profile": "From your profile", "resume": "From your resume",
-               "luna": "Drafted by Luna · review", "you": "Your answer", "none": "Needs your answer",
+               "luna": "Drafted by Luna · review", "autofill": "AI Autofill · check", "you": "Your answer", "none": "Needs your answer",
                "declined": "Declined", "file": "Attached automatically"}
 FILTERS = (("All", "all"), ("To review", "review"), ("Approved", "approved"), ("Sent", "sent"), ("Issues", "issues"))
 OPEN_DRAFT = {"preparing", "ready", "needs_answers", "approved", "sending", "practice", "error"}
@@ -81,7 +81,7 @@ class QuestionRow(QWidget):
         top.addWidget(title, 1)
         source = question.get("source", "none")
         badge = label(SOURCE_TEXT.get(source, source), "sourceBadge", wrap=False)
-        if source == "luna":
+        if source in ("luna", "autofill"):
             badge.setObjectName("lunaNote")
         top.addWidget(badge, 0, Qt.AlignmentFlag.AlignTop)
         column.addLayout(top)
@@ -89,6 +89,8 @@ class QuestionRow(QWidget):
         column.addWidget(self.editor)
         if question.get("note") and source == "luna":
             column.addWidget(label("Luna used: " + str(question["note"]), "lunaNote"))
+        elif question.get("note") and source == "autofill":
+            column.addWidget(label(str(question["note"]), "lunaNote"))
         elif question.get("note") and source == "you":
             column.addWidget(label(str(question["note"]), "rowNote"))
 
@@ -215,8 +217,9 @@ class DraftDetail(QWidget):
         self.approve.clicked.connect(self._approve)
         self.save = button("Save answers", "secondary")
         self.save.clicked.connect(self._save)
-        self.luna = button("Ask Luna", "secondary", icon="luna")
-        self.luna.setToolTip("Let Luna draft answers to the open questions")
+        self.luna = button("AI Autofill", "secondary", icon="luna")
+        self.luna.setToolTip("Fill every open question with a realistic answer from your profile. "
+                             "Assumptions are labeled; check them before you send.")
         self.luna.clicked.connect(lambda: self.draft and self.luna_requested.emit(int(self.draft["id"])))
         self.resume = button("Resume", "quiet", icon="file")
         self.resume.setToolTip("Open the resume prepared for this role")
@@ -253,7 +256,7 @@ class DraftDetail(QWidget):
         self._practice, self._luna_connected = practice, luna_connected
         if self.draft is not None:
             self.practice_note.setVisible(practice)
-            self.luna.setEnabled(luna_connected and self.draft.get("status") in ("ready", "needs_answers", "practice", "error"))
+            self.luna.setEnabled(self.draft.get("status") in ("ready", "needs_answers", "practice", "error"))
 
     def dirty(self) -> bool:
         return any(row.edited() for row in self.rows)
@@ -273,7 +276,7 @@ class DraftDetail(QWidget):
         self.status.set_status(status, status_label(status))
         questions = list(draft.get("questions") or [])
         missing = [q for q in questions if q.get("required") and q.get("answer") in (None, "", []) and q.get("kind") != "file"]
-        luna = [q for q in questions if q.get("source") == "luna" and not q.get("approved")]
+        luna = [q for q in questions if q.get("source") in ("luna", "autofill") and not q.get("approved")]
         source = {"greenhouse_form": "Greenhouse", "lever_form": "Lever", "ashby_form": "Ashby"}.get(
             str(draft.get("question_source") or ""), "")
         meta = [f"Match {float(draft.get('score') or 0):.0f}"]
@@ -296,7 +299,8 @@ class DraftDetail(QWidget):
             text = (f"{plural(len(missing), 'required question')} need{'s' if len(missing) == 1 else ''} your answer"
                     + (f" · {draft['error']}" if draft.get("error") else "") + ".")
         elif luna:
-            text = f"Luna drafted {plural(len(luna), 'answer')}. Read them, edit anything, then Approve & send."
+            text = (f"{plural(len(luna), 'answer')} came from Luna or AI Autofill, including any labeled assumptions. "
+                    "Check them, edit anything, then Approve & send.")
         elif questions:
             text = "Every known question has an answer from your saved facts. Approve & send when ready."
         else:
@@ -307,9 +311,10 @@ class DraftDetail(QWidget):
         self.approve.setEnabled(sendable)
         self.approve.setText("Send now" if status == "approved" else "Approve & send")
         self.save.setEnabled(sendable)
-        self.luna.setEnabled(self._luna_connected and status in ("ready", "needs_answers", "practice", "error"))
-        self.luna.setToolTip("Let Luna draft answers to the open questions" if self._luna_connected
-                             else "Connect Luna in Settings → Connections")
+        self.luna.setEnabled(status in ("ready", "needs_answers", "practice", "error"))
+        self.luna.setToolTip("Fill every open question with a realistic answer from your profile. Assumptions are "
+                             "labeled; check them before you send." if self._luna_connected
+                             else "Connect Luna in Settings → Connections to use AI Autofill")
         self.resume.setVisible(bool(draft.get("resume_path")))
         self.posting.setVisible(bool(draft.get("url")))
         self.remove.setEnabled(status not in ("sending",))
@@ -329,7 +334,7 @@ class DraftDetail(QWidget):
         def priority(q):
             if q.get("answer") in (None, "", []) and q.get("kind") != "file":
                 return 0 if q.get("required") else 2
-            return 1 if q.get("source") == "luna" and not q.get("approved") else 3
+            return 1 if q.get("source") in ("luna", "autofill") and not q.get("approved") else 3
         shown = sorted(shown, key=priority)
         self.show_all.setVisible(bool(routine))
         self.show_all.setText("Hide profile fields" if self._show_all else f"Show all fields (+{len(routine)})")
@@ -646,7 +651,7 @@ class ApplicationsView(QWidget):
                 questions = record.get("questions") or []
                 open_count = sum(1 for q in questions if q.get("required") and q.get("answer") in (None, "", [])
                                  and q.get("kind") != "file")
-                luna = sum(1 for q in questions if q.get("source") == "luna" and not q.get("approved"))
+                luna = sum(1 for q in questions if q.get("source") in ("luna", "autofill") and not q.get("approved"))
                 hint = (f"{plural(open_count, 'answer')} needed" if open_count else
                         f"Luna drafted {luna}" if luna else f"Match {float(record.get('score') or 0):.0f}")
                 when = relative_time(record.get("updated_at") or record.get("created_at"))

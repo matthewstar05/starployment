@@ -520,9 +520,9 @@ class DesktopController(QObject):
             self.window.show_draft_for_job(str(context))
         elif kind == "luna":
             count = int(result or 0)
-            self._status(f"Luna drafted {count} answer{'s' if count != 1 else ''}" if count
-                         else "Luna had nothing to add. The open questions need facts only you know.",
-                         tone="success" if count else "info")
+            self._status(f"AI Autofill answered {count} question{'s' if count != 1 else ''}. "
+                         "Check the labeled assumptions before you send." if count
+                         else "AI Autofill had nothing to fill.", 9000, "success" if count else "info")
         elif kind == "agent_status":
             panel, backend = context
             status = result
@@ -566,7 +566,7 @@ class DesktopController(QObject):
             panel, backend = context
             panel.set_status(backend, False, "Could not check the connection", error[:200], "test")
             return
-        label = {"plan": "Preparing applications", "prepare_one": "Preparing the application", "luna": "Luna",
+        label = {"plan": "Preparing applications", "prepare_one": "Preparing the application", "luna": "AI Autofill",
                  "mail_sync": "Inbox check", "preview": "Resume preview", "import_resume": "Resume import"}.get(kind, kind)
         self._status(f"{label} failed: {error}", 15_000, "error")
         db.add_event(f"Desktop {kind} failed: {error}", "error")
@@ -696,16 +696,17 @@ class DesktopController(QObject):
         practice = db.get_settings().get("dry_run")
         count = len(self._sending)
         self._status(("Practice run" if practice else "Sending") + (f" · {count} application{'s' if count != 1 else ''}"
-                     if count > 1 else "") + "… Starployment confirms each employer's response", 0, "busy")
+                     if count > 1 else "") + "…", 0, "busy")
         self.refresh()
 
     def luna_draft(self, draft_id: int) -> None:
         settings = db.get_settings()
-        if not prepare.luna_ready(settings):
-            self._status("Connect Luna in Settings → Connections first", tone="warning")
+        if (settings.get("agent") or {}).get("backend", "none") in ("", "none"):
+            self._status("Connect Luna in Settings → Connections to use AI Autofill", tone="warning")
+            self.window.show_connections()
             return
-        self._status("Luna is drafting answers…", 0, "busy")
-        self._submit_assist("luna", prepare.luna_fill, draft_id, draft_id, settings)
+        self._status("AI Autofill is filling this application…", 0, "busy")
+        self._submit_assist("luna", prepare.autofill, draft_id, draft_id, settings)
 
     def remove_draft(self, draft_id: int) -> None:
         try:

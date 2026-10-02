@@ -43,8 +43,16 @@ The wizard has five steps: **Resume → About you → What to look for → Answe
    answer your saved facts support, asks Luna to draft the custom questions, and builds the resume for the role.
    Nothing is sent.
 2. **Applications** lists the prepared applications with filters (To review, Approved, Sent, Issues) and search.
-   Each shows its questions, where every answer came from (profile, saved answer, Luna draft, or needs you), the
-   resume, and the posting. Edit anything, then **Approve & send**, or approve several and use **Send approved**.
+   Each shows its questions (what still needs you first), where every answer came from (profile, saved answer, Luna
+   draft, AI Autofill, or needs you), the resume, and the posting. "Select all that apply" questions are checklists.
+   Edit anything, then **Approve & send**, or approve several and use **Send approved**.
+   - **Answer once, fill everywhere:** a general answer you give in one application (offers, prior interviews,
+     languages, office attendance) fills the same question in your other prepared applications and joins your
+     question bank. Legal acknowledgements stay per application. Saving Profile → Answers refills every draft.
+   - **AI Autofill** fills every open question in one application with realistic answers from your profile and
+     settings (for example, years of experience). Where your facts are silent it makes a reasonable assumption and
+     labels it "Assumption:", so you can check before sending. Demographic questions are declined, never guessed,
+     and autofilled answers are never copied to other applications.
 3. Sending runs the browser engine against the live form. It counts as applied only after a new employer
    confirmation and a durable local record. New questions found on the live form come back to Applications.
 4. **Reset unfinished…** removes every prepared application that was not sent (and, optionally, practice runs and

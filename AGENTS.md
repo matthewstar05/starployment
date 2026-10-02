@@ -97,6 +97,14 @@ them to make a feature easier.
    entirely; multiple-choice drafts must match a real option, and resume
    selections are indices validated against the library. The resume builder
    selects and orders the candidate's own wording; it never rewrites it.
+   **AI Autofill** is the one deliberate exception, and only on the
+   candidate's explicit click for one application (`prepare.autofill`,
+   `luna.autofill_answers`): it fills every open question with realistic
+   answers, including labeled assumptions ("Assumption: …"), with
+   `source="autofill"`, `approved=False`. Those answers never leave their
+   application (not shared to other drafts, not saved to the question bank),
+   demographic questions are declined rather than guessed, and nothing is sent
+   until the candidate presses Approve & send. Batch preparation never autofills.
 2. **"Applied" means confirmed.** A submission counts only with a new employer
    confirmation signal *and* a durable local record. `db.finish_application`
    refuses `applied` without `submission_attempted`. A form fill or Submit click

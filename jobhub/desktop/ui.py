@@ -219,6 +219,7 @@ class JobHubWindow(QMainWindow):
         for page in (self.dashboard, self.jobs, self.apps, self.tracker, self.profile, self.settings):
             self.stack.addWidget(page)
         self.toast = Toast(root)
+        self.toast.set_area(self.stack)
 
         # Compatibility aliases used by tests and older controller code.
         self.review_button = self.dashboard.review_button
