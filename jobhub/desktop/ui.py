@@ -48,6 +48,7 @@ from .widgets import (
     label,
     reduced_motion,
 )
+from .console import ActivityConsole
 from .wizard import SetupWizard
 
 __all__ = [
@@ -121,24 +122,18 @@ class Sidebar(GlassPanel):
             self.nav.add_destination(title, icon)
         self.nav.setFixedHeight(self.nav.sizeHintForRow(0) * len(PAGES) + 8)
         column.addWidget(self.nav)
-        column.addStretch(1)
-
-        status = QHBoxLayout()
-        status.setContentsMargins(14, 0, 10, 2)
-        status.setSpacing(10)
-        self.spinner = ActivityIndicator(14)
-        self.spinner.hide()
-        self.status_dot = StatusDot("green", 9)
-        status.addWidget(self.spinner, 0, Qt.AlignmentFlag.AlignTop)
-        status.addWidget(self.status_dot, 0, Qt.AlignmentFlag.AlignTop)
-        text = QVBoxLayout()
-        text.setSpacing(1)
-        self.status_title = label("Ready", "sidebarStatusTitle", wrap=False)
-        self.status_detail = label("", "sidebarStatus")
-        text.addWidget(self.status_title)
-        text.addWidget(self.status_detail)
-        status.addLayout(text, 1)
-        column.addLayout(status)
+        column.addSpacing(6)
+        # A terminal-style log replaces pop-up notices: scans, inbox checks,
+        # applications sent, Luna, and errors, with the scan status on top.
+        self.console = ActivityConsole()
+        console_row = QHBoxLayout()
+        console_row.setContentsMargins(8, 0, 8, 0)
+        console_row.addWidget(self.console)
+        column.addLayout(console_row, 1)
+        self.status_title = self.console.status_title
+        self.status_detail = self.console.status_detail
+        self.spinner = self.console.spinner
+        self.status_dot = self.console.status_dot
         column.addSpacing(8)
         self.scan = button("Refresh jobs", "secondary", icon="refresh")
         self.scan.setToolTip("Scan every configured source now (⌘R)")
@@ -148,16 +143,7 @@ class Sidebar(GlassPanel):
         column.addLayout(refresh_row)
 
     def set_status(self, title: str, detail: str, tone: str, busy: bool) -> None:
-        self.status_title.setText(title)
-        self.status_detail.setText(detail)
-        self.status_detail.setVisible(bool(detail))
-        if busy:
-            self.status_dot.hide()
-            self.spinner.start()
-        else:
-            self.spinner.stop()
-            self.status_dot.set_tone(tone)
-            self.status_dot.show()
+        self.console.set_status(title, detail, tone, busy)
 
 
 class JobHubWindow(QMainWindow):
@@ -353,8 +339,12 @@ class JobHubWindow(QMainWindow):
 
     # ---------------------------------------------------------- feedback
     def notify(self, message: str, tone: str = "info", timeout: int = 4500) -> None:
-        """Show a toast. ``tone``: info, success, warning, error, or busy (timeout 0 keeps it)."""
-        self.toast.show_message(message, tone, timeout)
+        """Log a notice in the sidebar console. ``tone``: info, success, warning, error, or busy.
+
+        A ``busy`` line updates in place until the next message. ``timeout`` is
+        kept for callers written for the old pop-up notices.
+        """
+        self.sidebar.console.write(message, tone)
 
     def crossfade(self, change) -> None:
         """Run ``change`` (e.g. a theme switch) under a brief crossfade of the old frame."""
@@ -466,6 +456,7 @@ class JobHubWindow(QMainWindow):
                 self.dashboard.set_pipeline(counts, focus)
         if events is not None:
             self.dashboard.set_events(events, applications)
+            self.sidebar.console.add_events(events, applications)
 
     @staticmethod
     def _retryable(applications: list[dict[str, Any]]) -> set[str]:

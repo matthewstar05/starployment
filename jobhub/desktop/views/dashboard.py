@@ -246,8 +246,9 @@ class ApplyPlanSheet(QDialog):
         group.add_row("Prepare the top", Stepper(self.count, width=110), "Highest match scores first.")
         group.add_row("Minimum match", Stepper(self.min_score), "Skip roles below this score.")
         group.add_row("One per company", self.one_per_company, "Spread applications across employers.")
-        group.add_row("Luna drafts custom answers", self.use_luna,
-                      "You review every draft." if connected else "Connect Luna in Settings → Connections first.")
+        group.add_row("AI Autofill every question", self.use_luna,
+                      "Each application comes out ready to send; assumptions are labeled for you to check."
+                      if connected else "Connect Luna in Settings → Connections first.")
         strategy = {"tailored": "A one-page resume generated for each role from your resume builder",
                     "library": "The resume file that matches each role type",
                     "original": "Your main resume"}.get(str(settings.get("resume_strategy", "tailored")), "")

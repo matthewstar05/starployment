@@ -66,12 +66,12 @@ def test_skip_and_restore_from_the_jobs_menu(controller):
     db.upsert_jobs([job])
     controller.set_job_status(job.id, "skipped")
     assert db.get_job(job.id).status == "skipped"
-    assert controller.window.toast.tone == "success"
+    assert controller.window.sidebar.console.last_tone == "success"
     controller.set_job_status(job.id, "new")
     assert db.get_job(job.id).status == "new"
 
 
 def test_status_messages_use_toasts_with_tones(controller):
     controller._status("Could not refresh", tone="error")
-    assert controller.window.toast.text == "Could not refresh"
-    assert controller.window.toast.tone == "error"
+    assert controller.window.sidebar.console.last_text == "Could not refresh"
+    assert controller.window.sidebar.console.last_tone == "error"

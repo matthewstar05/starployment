@@ -222,9 +222,12 @@ def test_native_surface_lifecycle_tracks_geometry_opacity_and_theme(monkeypatch,
 
     clip_frame = runtime.frames[surface.clipper]
     glass_frame = runtime.frames[surface.glass]
-    assert (clip_frame.origin.x, clip_frame.origin.y) == (70, 85)
-    assert (clip_frame.size.width, clip_frame.size.height) == (40, 25)
-    assert (glass_frame.origin.x, glass_frame.origin.y) == (2, -18)
+    # The clipper adds room for the material's shadow, then clips to the parent.
+    margin = native_glass.SHADOW_MARGIN
+    assert (clip_frame.origin.x, clip_frame.origin.y) == (72 - margin, 85)
+    assert (clip_frame.size.width, clip_frame.size.height) == (110 - (72 - margin), 115 - (93 - margin))
+    # The glass itself keeps the exact body geometry (72, 93, 50, 40) in window coordinates.
+    assert (glass_frame.origin.x, glass_frame.origin.y) == (margin, 115 - 133)
     assert (glass_frame.size.width, glass_frame.size.height) == (50, 40)
     assert callback_rect == QRectF(2, 3, 50, 40)
     assert ("set_double", surface.glass, b"setAlphaValue:", 0.4) in runtime.calls
@@ -360,8 +363,8 @@ def test_resize_syncs_glass_synchronously_after_layout(monkeypatch, app):
     backend = surface.backend
     backend.refresh()
     window.resize(420, 260)   # no event processing: the window's resize handler must sync by itself
-    frame = runtime.frames[surface.clipper]
-    assert (frame.size.width, frame.size.height) == (panel.width(), panel.height())
+    glass = runtime.frames[surface.glass]
+    assert (glass.size.width, glass.size.height) == (panel.width(), panel.height())
     assert ("set_long", surface.clipper, b"setAutoresizingMask:", native_glass._NS_VIEW_MIN_Y_MARGIN) in runtime.calls
     backend.detach()
     window.close()
@@ -389,7 +392,7 @@ def test_pending_sync_flushes_before_qt_paints(monkeypatch, app):
     backend._hook.eventFilter(window, QEvent(QEvent.Type.UpdateRequest))
     assert not backend._pending
     frame = runtime.frames[surface.clipper]
-    assert frame.origin.x == 40
+    assert frame.origin.x + runtime.frames[surface.glass].origin.x == 40
     backend._hook.eventFilter(window, QPaintEvent(QRect(0, 0, 1, 1)))   # nothing pending: no extra work
     backend.detach()
     window.close()

@@ -105,11 +105,16 @@ class LunaConnection(QWidget):
         self.resume_select.toggled.connect(self.changed)
         self.remember = ToggleSwitch()
         self.remember.toggled.connect(self.changed)
+        self.autofill = ToggleSwitch()
+        self.autofill.toggled.connect(self.changed)
         self.group.add_row("Account", self.backend)
         self.group.add_widget(self.status)
         self.key_row = self.group.add_row("API key", key_row, "Stored in your system credential vault.")
         self.model_row = self.group.add_row("Model", self.model, "Optional. Leave blank for the default.")
         options = [self.group.add_row("Draft custom answers", self.draft_answers, "When preparing applications."),
+                   self.group.add_row("Autofill prepared applications", self.autofill,
+                                      "AI Autofill answers every question so each is ready to send. "
+                                      "Assumptions are labeled."),
                    self.group.add_row("Choose resume content", self.resume_select,
                                       "Luna picks the most relevant entries for each one-page resume."),
                    self.group.add_row("Remember approved answers", self.remember,
@@ -125,7 +130,7 @@ class LunaConnection(QWidget):
         self.key_row.setVisible(backend in ("anthropic_api", "openai_api"))
         self.model_row.setVisible(backend != "none" and not self._compact)
         self.model.setPlaceholderText(spec.default_model if spec and spec.default_model else "Default")
-        for toggle in (self.draft_answers, self.resume_select, self.remember):
+        for toggle in (self.draft_answers, self.resume_select, self.remember, self.autofill):
             toggle.setEnabled(backend != "none")
         if backend == "none":
             self.status.set_status("Luna is off", "Applications still prepare; open questions wait for your answers.",
@@ -164,12 +169,14 @@ class LunaConnection(QWidget):
         luna = settings.get("luna") or {}
         self.draft_answers.setChecked(bool(luna.get("draft_answers", True)))
         self.remember.setChecked(bool(luna.get("remember_approved", True)))
+        self.autofill.setChecked(bool(luna.get("autofill_on_prepare", True)))
         self.resume_select.setChecked(bool((settings.get("resume_builder") or {}).get("luna_select", False)))
         self._backend_changed()
 
     def values(self) -> dict:
         return {"agent": {"backend": str(self.backend.currentData() or "none"), "model": self.model.text().strip()},
-                "luna": {"draft_answers": self.draft_answers.isChecked(), "remember_approved": self.remember.isChecked()},
+                "luna": {"draft_answers": self.draft_answers.isChecked(), "remember_approved": self.remember.isChecked(),
+                         "autofill_on_prepare": self.autofill.isChecked()},
                 "resume_builder": {"luna_select": self.resume_select.isChecked()}}
 
 

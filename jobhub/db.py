@@ -690,6 +690,27 @@ def reset_unfinished(include_attempts: bool = True) -> dict[str, int]:
     return {"drafts": removed_drafts, "attempts": removed_attempts}
 
 
+def mark_not_received(app_id: int, reason: str) -> str:
+    """Clear the submit boundary for an attempt the employer explicitly refused to receive.
+
+    Only for a recorded, explicit rejection (for example a spam-filter message
+    saying the application could not be submitted). Returns the job id.
+    """
+    with conn() as c:
+        row = c.execute("SELECT job_id, status, submission_attempted FROM applications WHERE id=?", (app_id,)).fetchone()
+        if row is None:
+            raise ValueError("Application record not found")
+        if row["status"] != "needs_human" or not row["submission_attempted"]:
+            raise ValueError("Only an unconfirmed submission can be marked as not received")
+        c.execute("UPDATE applications SET status='failed', submission_attempted=0, error=?, finished_at=? WHERE id=?",
+                  (reason, now_iso(), app_id))
+        c.execute("UPDATE drafts SET status='error', error=? WHERE job_id=? AND status='unconfirmed'", (reason, row["job_id"]))
+        c.execute("UPDATE jobs SET status='new', updated_at=? WHERE id=? AND NOT EXISTS (SELECT 1 FROM applications a "
+                  "JOIN jobs j2 ON j2.id=a.job_id WHERE j2.canonical_key=jobs.canonical_key "
+                  "AND (a.status='applied' OR a.submission_attempted=1))", (now_iso(), row["job_id"]))
+        return row["job_id"]
+
+
 # ---------------- tracker (submitted applications and their stage) ----------------
 STAGES = ("applied", "assessment", "interview", "offer", "rejected", "withdrawn")
 STAGE_RANK = {"": 0, "applied": 1, "assessment": 2, "interview": 3, "offer": 4, "rejected": 5, "withdrawn": 5}

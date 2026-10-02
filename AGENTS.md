@@ -104,7 +104,14 @@ them to make a feature easier.
    `source="autofill"`, `approved=False`. Those answers never leave their
    application (not shared to other drafts, not saved to the question bank),
    demographic questions are declined rather than guessed, and nothing is sent
-   until the candidate presses Approve & send. Batch preparation never autofills.
+   until the candidate presses Approve & send (or confirms **Send ready**). It
+   runs when the candidate clicks it, and during preparation when
+   `settings.luna.autofill_on_prepare` is on (the default; Settings →
+   Connections → "Autofill prepared applications").
+   The submit boundary (rule 3) has one narrow, user-initiated exception:
+   `prepare.reopen_rejected` → `db.mark_not_received` clears an unconfirmed
+   attempt only when the employer explicitly refused it (spam-filter message),
+   so it can be prepared and sent again.
 2. **"Applied" means confirmed.** A submission counts only with a new employer
    confirmation signal *and* a durable local record. `db.finish_application`
    refuses `applied` without `submission_attempted`. A form fill or Submit click
@@ -471,6 +478,11 @@ partially clipped material bounds, and dialog close/reopen. Run the regular
 app with a temporary `JOBHUB_DATA_DIR` for broader visual review of pages and
 the setup wizard. Native setup failures must leave the Qt fallback visible and
 must not prevent the app from opening.
+
+Buttons (`CapsuleButton`) are always Qt-painted capsules, never native glass:
+small, tightly packed `NSGlassEffectView`s inside clipping parents render
+rectangular clipped shadows and washed-out tints. Native glass is for panels,
+the sidebar, search fields, and segmented controls.
 
 Glass sync contract (`native_glass.py`): `_WindowHook` is an object-level
 filter on the window and its `QWindow`. It syncs right after layout on the

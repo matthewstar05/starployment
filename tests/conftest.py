@@ -1,9 +1,14 @@
 """Shared fixtures. Every store lives in a temporary directory; nothing touches real data."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
+
+# Human pacing (typing delays, time on page, off-screen headed browser) makes
+# real submissions look like a person; tests use local forms and run fast.
+os.environ.setdefault("JOBHUB_HUMAN_PACING", "0")
 
 from jobhub import config, db
 

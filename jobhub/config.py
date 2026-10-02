@@ -204,7 +204,7 @@ DEFAULT_SETTINGS: dict = {
     "resume_builder": {"one_page": True, "luna_select": False, "max_skills": 28},
     # --- Luna, the optional drafting assistant (needs a connected agent) ---
     "agent": {"backend": "none", "model": ""},
-    "luna": {"draft_answers": True, "remember_approved": True},
+    "luna": {"draft_answers": True, "remember_approved": True, "autofill_on_prepare": True},
     # --- the Overview "Apply" plan ---
     "apply_plan": {"count": 100, "min_score": 60, "one_per_company": True},
     # --- optional inbox tracking for replies (uses the mailbox below) ---
@@ -315,6 +315,7 @@ def validate_settings(settings: dict) -> dict:
     class Luna(StrictModel):
         draft_answers: StrictBool
         remember_approved: StrictBool
+        autofill_on_prepare: StrictBool
 
     class ApplyPlan(StrictModel):
         count: StrictInt = Field(ge=1, le=500)

@@ -108,7 +108,7 @@ def test_prepare_review_approve_send_track_and_reset(store, make_pdf, monkeypatc
         window.apps.select_draft_for_job(jobs[0].id)
         detail = window.apps.draft_detail
         assert detail.draft["company"] == "Fixture Labs"
-        luna_row = next(row for row in detail.rows if row.question["source"] == "luna")
+        luna_row = next(row for row in detail.rows if row.question["source"] == "autofill")
         assert luna_row.value() == LUNA_ANSWER
 
         # 3. One click: approve every answer and send.

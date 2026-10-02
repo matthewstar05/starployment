@@ -131,7 +131,8 @@ def test_greenhouse_lever_and_ashby_forms_are_read(monkeypatch):
 def test_prepare_batch_drafts_top_matches_one_per_company_with_luna(candidate, monkeypatch):
     rows = jobs()
     monkeypatch.setattr(prepare, "discover_questions", fake_discovery)
-    db.set_settings({"agent": {"backend": "claude_cli", "model": ""}})
+    db.set_settings({"agent": {"backend": "claude_cli", "model": ""},
+                     "luna": {"draft_answers": True, "remember_approved": True, "autofill_on_prepare": False}})
     monkeypatch.setattr("jobhub.luna.complete", fake_agent({"answers": [
         {"id": "q4", "answer": "I like Acme's Python services and built Python pipelines.", "note": "experience"},
         {"id": "q5", "answer": "python", "note": "skills"},
@@ -376,3 +377,42 @@ def test_ai_autofill_answers_every_open_question_with_labeled_assumptions(candid
     # Autofilled answers stay with this application: not shared, not saved to the question bank.
     assert prepare.share_answers(draft["id"]) == 0
     assert "Years of Work Experience" not in db.get_settings()["answers"]["field_answers"]
+
+
+
+def test_prepared_applications_are_autofilled_ready_by_default(candidate, monkeypatch):
+    jobs(2)
+    monkeypatch.setattr(prepare, "discover_questions", fake_discovery)
+    db.set_settings({"agent": {"backend": "claude_cli", "model": ""}})
+    assert db.get_settings()["luna"]["autofill_on_prepare"] is True
+    monkeypatch.setattr("jobhub.luna.complete", lambda prompt, settings, timeout=0: json.dumps({"answers": [
+        {"id": "q4", "answer": "I build Python services."}, {"id": "q5", "answer": "Python"},
+        {"id": "q6", "answer": "$120,000", "assumed": True, "note": "typical for the role"}]}))
+    report = prepare.prepare_batch(5, 0)
+    assert report["prepared"] == 1                       # one per company: both jobs are Acme
+    draft = db.list_drafts()[0]
+    assert draft["status"] == "ready"
+    salary = next(q for q in draft["questions"] if q["label"] == "What is your desired salary?")
+    assert salary["source"] == "autofill" and salary["note"].startswith("Assumption")
+    assert prepare.approve_and_queue(draft["id"])["status"] == "approved"
+
+
+def test_spam_rejected_attempt_can_be_prepared_again_but_others_cannot(candidate, monkeypatch):
+    rows = jobs(2)
+    for job, error in ((rows[0], "The employer's spam filter rejected this automated submission, so it was not received."),
+                       (rows[1], "Submit was clicked, but no new confirmation was detected.")):
+        app_id = db.reserve_application(job.id)
+        db.start_application(app_id, job.id)
+        db.mark_submission_attempted(job.id)
+        db.finish_application(app_id, "needs_human", [], [], [], error, submission_attempted=True)
+    spam_app, unsure_app = [a["id"] for a in sorted(db.list_applications(), key=lambda a: a["id"])]
+    with pytest.raises(ValueError):
+        prepare.reopen_rejected(unsure_app)               # an unconfirmed result stays locked
+    assert prepare.reopen_rejected(spam_app) == rows[0].id
+    record = db.get_application(spam_app)
+    assert record["submission_attempted"] == 0 and record["status"] == "failed"
+    assert db.get_job(rows[0].id).status == "new"
+    monkeypatch.setattr(prepare, "discover_questions", lambda job: ([], "unavailable"))
+    prepare.prepare_job(db.get_job(rows[0].id), db.get_profile(), db.get_settings())
+    assert db.draft_for_job(rows[0].id)["status"] == "ready"
+    assert db.reserve_application(rows[0].id)            # sending is allowed again

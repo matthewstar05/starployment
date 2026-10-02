@@ -93,6 +93,8 @@ class DesktopController(QObject):
         window.apps.remove_draft_requested.connect(self.remove_draft)
         window.apps.send_approved_requested.connect(self.send_approved)
         window.apps.reset_requested.connect(self.reset_unfinished)
+        window.apps.autofill_all_requested.connect(self.autofill_all)
+        window.apps.reopen_requested.connect(self.reopen_rejected)
         # Tracker
         window.tracker.stage_change_requested.connect(self.set_stage)
         window.tracker.note_save_requested.connect(self.save_application_note)
@@ -523,6 +525,13 @@ class DesktopController(QObject):
             self._status(f"AI Autofill answered {count} question{'s' if count != 1 else ''}. "
                          "Check the labeled assumptions before you send." if count
                          else "AI Autofill had nothing to fill.", 9000, "success" if count else "info")
+        elif kind == "autofill_all":
+            report = result if isinstance(result, dict) else {}
+            self._status(f"AI Autofill answered {report.get('answers', 0)} questions across "
+                         f"{report.get('applications', 0)} applications"
+                         + (f" · {report['failed']} failed" if report.get("failed") else "")
+                         + ". Check labeled assumptions before sending.", 10_000,
+                         "warning" if report.get("failed") else "success")
         elif kind == "agent_status":
             panel, backend = context
             status = result
@@ -628,7 +637,9 @@ class DesktopController(QObject):
             draft_id = prepare.prepare_job(job, profile, settings)
             if prepare.luna_ready(settings):
                 try:
-                    prepare.luna_fill(draft_id, settings)
+                    fill = (prepare.autofill if (settings.get("luna") or {}).get("autofill_on_prepare", True)
+                            else prepare.luna_fill)
+                    fill(draft_id, settings)
                 except Exception as error:  # noqa: BLE001
                     db.update_draft(draft_id, error=f"Luna could not draft answers: {str(error)[:200]}")
             return draft_id
@@ -669,20 +680,51 @@ class DesktopController(QObject):
         self._queue_send([draft_id])
 
     def send_approved(self) -> None:
-        drafts = [d["id"] for d in db.list_drafts(("approved",)) if d["id"] not in self._sending]
-        if not drafts:
-            self._status("Nothing is approved yet")
+        candidates = [d for d in db.list_drafts(("approved", "ready")) if d["id"] not in self._sending]
+        if not candidates:
+            self._status("Nothing is ready to send. Use Autofill all or answer the open questions first.")
             return
         practice = db.get_settings().get("dry_run")
-        if len(drafts) > 1:
-            answer = QMessageBox.question(
-                self.window, "Send approved applications",
-                f"Send {len(drafts)} approved applications now?" + (
-                    "\n\nPractice mode is on, so forms are filled but not submitted." if practice else
-                    "\n\nEach one is submitted to the employer and confirmed one at a time."))
-            if answer != QMessageBox.StandardButton.Yes:
-                return
-        self._queue_send(drafts)
+        autofilled = sum(1 for d in candidates if any(q.get("source") == "autofill" for q in d["questions"]))
+        answer = QMessageBox.question(
+            self.window, "Send ready applications",
+            f"Approve and send {len(candidates)} application{'s' if len(candidates) != 1 else ''} now?"
+            + (f"\n\n{autofilled} include AI Autofill answers, some of them labeled assumptions. "
+               "Review any you are unsure about first." if autofilled else "")
+            + ("\n\nPractice mode is on, so forms are filled but not submitted." if practice else
+               "\n\nEach one is submitted to the employer and confirmed one at a time."))
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        queued = []
+        for draft in candidates:
+            try:
+                if draft["status"] == "ready":
+                    prepare.approve_and_queue(draft["id"], {})
+                queued.append(draft["id"])
+            except ValueError:
+                continue
+        self._queue_send(queued)
+
+    def autofill_all(self) -> None:
+        settings = db.get_settings()
+        if (settings.get("agent") or {}).get("backend", "none") in ("", "none"):
+            self._status("Connect Luna in Settings → Connections to use AI Autofill", tone="warning")
+            self.window.show_connections()
+            return
+
+        def progress(text: str, done: int, total: int) -> None:
+            self.signals.progress.emit(text, done, total)
+
+        self._status("AI Autofill is filling your prepared applications…", 0, "busy")
+        self._submit_assist("autofill_all", lambda: prepare.autofill_all(progress), None)
+
+    def reopen_rejected(self, app_id: int) -> None:
+        try:
+            job_id = prepare.reopen_rejected(app_id)
+        except ValueError as exc:
+            self._status(str(exc), tone="warning")
+            return
+        self.prepare_job(job_id)
 
     def _queue_send(self, draft_ids: list[int]) -> None:
         if not db.get_settings().get("setup_complete"):

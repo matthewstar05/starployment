@@ -159,7 +159,8 @@ def test_dashboard_sidebar_and_navigation_follow_appearance(appearance, tmp_path
         app.processEvents()
         sidebar = window.findChild(QFrame, "sidebar")
         assert sidebar is not None
-        sidebar_surface = _rendered_surface(sidebar, (24, sidebar.height() // 2))
+        # Sample the sidebar's own glass margin; the activity console beside it is a deliberately dark terminal.
+        sidebar_surface = _rendered_surface(sidebar, (5, sidebar.height() // 2))
         dashboard_surface = _rendered_surface(window.dashboard)
         if appearance == "Dark":
             assert _luminance(sidebar_surface) < 0.28

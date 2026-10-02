@@ -87,6 +87,12 @@ def stylesheet(appearance: str | None = None) -> str:
         border-radius: 12px; padding: 11px 13px; }}
     QLabel#questions {{ background: {c['amber_soft']}; color: {c['text']}; border-radius: 12px; padding: 11px 13px; }}
     QLabel#dropHint {{ color: {c['text_muted']}; font-size: 12px; }}
+    QFrame#console {{ background: #0E0E12; border: 1px solid rgba(255,255,255,0.07); border-radius: 12px; }}
+    QFrame#console QLabel#consoleTitle {{ color: #F2F2F5; font-size: 12px; font-weight: 600; }}
+    QFrame#console QLabel#consoleDetail {{ color: #8E8E96; font-size: 11px; }}
+    QPlainTextEdit#consoleLog {{ background: transparent; border: none; padding: 0; color: #D7D7DE;
+        selection-background-color: #2B4A73; }}
+    QPlainTextEdit#consoleLog:focus {{ border: none; padding: 0; }}
 
     /* Inputs ------------------------------------------------------------ */
     QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{

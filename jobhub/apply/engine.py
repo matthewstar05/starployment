@@ -6,7 +6,10 @@ attempt with a screenshot. No CAPTCHA bypass or guessed factual answers.
 """
 from __future__ import annotations
 
+import os
+import random
 import re
+import sys
 import time
 import uuid
 from pathlib import Path
@@ -185,6 +188,61 @@ ERROR_JS = r"""
 """
 
 
+# Bot filters (reCAPTCHA v3 on Ashby, and similar) score a session on browser
+# fingerprints and on how the page is used. An instantly filled form submitted
+# seconds after load, from a browser that reports navigator.webdriver and a
+# "HeadlessChrome" user agent, is flagged as spam. The engine therefore runs
+# Chromium without automation markers and paces itself like a person. Tests
+# disable pacing with JOBHUB_HUMAN_PACING=0 (it changes timing, never answers).
+STEALTH_ARGS = ["--disable-blink-features=AutomationControlled"]
+STEALTH_SCRIPT = """
+Object.defineProperty(Navigator.prototype, 'webdriver', {get: () => undefined});
+if (!window.chrome) { window.chrome = {runtime: {}}; }
+"""
+MIN_PAGE_SECONDS = 18          # time on the form before Submit, like a quick human
+SPAM_RE = re.compile(r"flagged as (?:possible )?spam|spam|suspicious activity|automated|are you a robot|"
+                     r"recaptcha|verify you are human|bot detected", re.I)
+
+
+def human_pacing() -> bool:
+    return os.environ.get("JOBHUB_HUMAN_PACING", "1").strip().lower() not in {"0", "false", "off", "no"}
+
+
+_HEADLESS_UA: str | None = None
+
+
+def launch_context(playwright, channel: str | None):
+    """Open the persistent browser profile, without automation fingerprints when pacing is on.
+
+    With a desktop available (macOS, Windows), a real browser window opens
+    off-screen: a genuine Chrome fingerprint that stays out of the way. Elsewhere
+    it runs headless with the "HeadlessChrome" user-agent marker removed.
+    """
+    global _HEADLESS_UA
+    options = dict(viewport={"width": 1280, "height": 1000}, locale="en-US",
+                   channel=channel if channel and channel != "chromium" else None)
+    if not human_pacing():
+        return playwright.chromium.launch_persistent_context(str(config.BROWSER_PROFILE), headless=config.HEADLESS,
+                                                             **options)
+    args = list(STEALTH_ARGS)
+    headless = config.HEADLESS
+    if headless and sys.platform in ("darwin", "win32"):
+        headless = False
+        args += ["--window-position=-32000,-32000", "--window-size=1280,1000"]
+    if headless:
+        if _HEADLESS_UA is None:
+            probe = playwright.chromium.launch(headless=True)
+            try:
+                _HEADLESS_UA = probe.new_page().evaluate("navigator.userAgent").replace("HeadlessChrome", "Chrome")
+            finally:
+                probe.close()
+        options["user_agent"] = _HEADLESS_UA
+    ctx = playwright.chromium.launch_persistent_context(str(config.BROWSER_PROFILE), headless=headless, args=args,
+                                                        ignore_default_args=["--enable-automation"], **options)
+    ctx.add_init_script(STEALTH_SCRIPT)
+    return ctx
+
+
 class FormEngine:
     def __init__(self, job: Job, profile: Profile, settings: dict, resume_path: str, adapter: Adapter, dry_run: bool):
         self.job, self.profile, self.settings = job, profile, settings
@@ -202,6 +260,8 @@ class FormEngine:
         self._filled: set[str] = set()
         self._answered_signatures: dict[tuple[str, str, str, str], object] = {}
         self._failures: dict[str, str] = {}
+        self._opened_at = time.monotonic()
+        self._rng = random.Random()
 
     def _log(self, msg: str) -> None:
         self.log.append(f"{time.strftime('%H:%M:%S')} {msg}")
@@ -231,12 +291,10 @@ class FormEngine:
             ctx = None
             page = None
             try:
-                ctx = playwright.chromium.launch_persistent_context(
-                    str(config.BROWSER_PROFILE), headless=config.HEADLESS,
-                    channel=channel if channel != "chromium" else None,
-                    viewport={"width": 1280, "height": 1000}, locale="en-US")
+                ctx = launch_context(playwright, channel)
                 ctx.set_default_timeout(7000)
-                page = ctx.new_page()
+                page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                self._opened_at = time.monotonic()
                 return self._run_page(ctx, page, url)
             except Exception as exc:  # noqa: BLE001
                 if page is not None:
@@ -500,6 +558,8 @@ class FormEngine:
                     self._tried.discard(remaining["idx"])
                 return
             try:
+                if human_pacing():
+                    page.wait_for_timeout(self._rng.randint(250, 750))
                 self._fill_one(page, field, question, answer)
                 self._filled.add(field["idx"])
                 retained_value = answer.value
@@ -571,7 +631,23 @@ class FormEngine:
             page.wait_for_timeout(1000)
             return
         if kind in {"text", "number", "textarea"}:
-            locator.fill(str(value))
+            text = str(value)
+            if locator.input_value() == text:
+                pass   # already correct (for example, the form's own resume autofill)
+            elif human_pacing():
+                # Clear first: typing appends to any existing value, and a click
+                # can leave the cursor in the middle of prefilled text.
+                locator.fill("")
+                locator.click()
+                if len(text) <= 300:
+                    locator.press_sequentially(text, delay=self._rng.randint(18, 45))
+                else:   # long answers: paste most of it, type the end, like pasting a drafted essay
+                    locator.fill(text[:-12])
+                    locator.press_sequentially(text[-12:], delay=self._rng.randint(18, 45))
+                if locator.input_value() != text:
+                    locator.fill(text)   # a widget reformatted keystrokes; set the exact value
+            else:
+                locator.fill(text)
             locator.press("Tab")
             if locator.input_value() != str(value) and not locator.input_value().strip():
                 raise RuntimeError("The form did not retain the supplied value")
@@ -869,6 +945,14 @@ class FormEngine:
                 inbox_unavailable = True
                 self._log("Automatic email verification is unavailable; continuing with one ordinary Submit")
         button.scroll_into_view_if_needed()
+        if human_pacing():
+            # Review the form briefly and move to the button before clicking.
+            remaining = MIN_PAGE_SECONDS - (time.monotonic() - self._opened_at)
+            page.mouse.wheel(0, -400)
+            page.wait_for_timeout(int(max(0.0, remaining) * 1000) + self._rng.randint(600, 1500))
+            button.scroll_into_view_if_needed()
+            button.hover()
+            page.wait_for_timeout(self._rng.randint(300, 800))
         self._shot(page, "before_submit")
         # Record this durably before clicking. An interrupted or unconfirmed
         # request must never be automatically submitted a second time.
@@ -898,6 +982,12 @@ class FormEngine:
                     errors = self.root.evaluate(ERROR_JS)
                     if errors:
                         self._shot(page, "errors")
+                        if SPAM_RE.search(" ".join(errors)):
+                            return self._result(
+                                "needs_human",
+                                "The employer's spam filter rejected this automated submission, so it was not "
+                                "received. Open the posting and submit it yourself; your answers are in this "
+                                "application. (Form message: " + " | ".join(errors[:2])[:240] + ")")
                         return self._result("needs_human", "The form reported: " + " | ".join(errors[:6]))
             except Exception:  # A navigation may briefly detach the previous form.
                 continue

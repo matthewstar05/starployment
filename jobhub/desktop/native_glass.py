@@ -149,6 +149,9 @@ def visible_rect(widget: QWidget, window: QWidget) -> QRectF:
 # lays out from the top-left; MinYMargin keeps a view's distance from the top
 # edge while AppKit resizes the window, so nothing jumps before a resync.
 _NS_VIEW_MIN_Y_MARGIN = 8
+# Room around each material for the soft shadow AppKit draws outside its shape.
+# Zero: neighboring margins overlap and AppKit batches them into visible blocks.
+SHADOW_MARGIN = 0
 
 
 class _WindowHook(QObject):
@@ -435,8 +438,21 @@ class GlassSurface(QObject):
             return
         widget, backend = self.widget, self.backend
         runtime = backend.runtime
-        visible = widget.isVisible() and widget.window() is backend.window
-        clip = visible_rect(widget, backend.window) if visible else QRectF()
+        window = backend.window
+        visible = widget.isVisible() and widget.window() is window
+        clip = QRectF()
+        if visible:
+            origin = widget.mapTo(window, QPoint(0, 0))
+            body = QRectF(self.rect() if self.rect else widget.rect())
+            body.translate(origin.x(), origin.y())
+            parent = widget.parentWidget()
+            ancestors = (visible_rect(parent, window) if parent is not None and widget is not window
+                         else QRectF(0, 0, window.width(), window.height()))
+            if not body.intersected(ancestors).isEmpty():
+                # Leave room for the material's own soft shadow. A clipper the
+                # exact size of the widget cuts that shadow into a visible
+                # rectangle. Ancestor bounds (scroll viewports, panels) still clip.
+                clip = body.adjusted(-SHADOW_MARGIN, -SHADOW_MARGIN, SHADOW_MARGIN, SHADOW_MARGIN).intersected(ancestors)
         if not visible or clip.isEmpty():
             if not self._hidden:
                 runtime.set_bool(self.clipper, runtime.sel(b"setHidden:"), True)
@@ -445,10 +461,8 @@ class GlassSurface(QObject):
         if self._hidden:
             runtime.set_bool(self.clipper, runtime.sel(b"setHidden:"), False)
             self._hidden = False
-        origin = widget.mapTo(backend.window, QPoint(0, 0))
-        body = QRectF(self.rect() if self.rect else widget.rect())
-        body.translate(origin.x(), origin.y())
-        native_parent = backend.clipped_plane if self._scroll_clipped or not clip.contains(body) else backend.plane
+        expanded = body.adjusted(-SHADOW_MARGIN, -SHADOW_MARGIN, SHADOW_MARGIN, SHADOW_MARGIN)
+        native_parent = backend.clipped_plane if self._scroll_clipped or not clip.contains(expanded) else backend.plane
         if self._native_parent != native_parent:
             runtime.set_object(native_parent, runtime.sel(b"addSubview:"), self.clipper)
             self._native_parent = native_parent

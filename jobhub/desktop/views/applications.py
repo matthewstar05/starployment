@@ -11,6 +11,8 @@ Filters narrow the list to what needs you (To review), what is queued
 """
 from __future__ import annotations
 
+import re
+
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -400,6 +402,8 @@ class ApplicationsView(QWidget):
     send_approved_requested = Signal()
     reset_requested = Signal(bool)
     prepare_requested = Signal(str)
+    autofill_all_requested = Signal()
+    reopen_requested = Signal(int)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -421,10 +425,15 @@ class ApplicationsView(QWidget):
         self.reset_button = button("Reset unfinished…", "secondary", icon="reset")
         self.reset_button.setToolTip("Remove prepared applications that were not sent, so you can prepare them again")
         self.reset_button.clicked.connect(self._confirm_reset)
-        self.send_all_button = button("Send approved", icon="applications")
+        self.autofill_all_button = button("Autofill all", "secondary", icon="luna")
+        self.autofill_all_button.setToolTip("Run AI Autofill on every prepared application that still has open questions")
+        self.autofill_all_button.clicked.connect(self.autofill_all_requested)
+        self.send_all_button = button("Send ready", icon="applications")
+        self.send_all_button.setToolTip("Approve and send every application that is ready")
         self.send_all_button.setEnabled(False)
         self.send_all_button.clicked.connect(self.send_approved_requested)
         self.header.add_action(self.reset_button)
+        self.header.add_action(self.autofill_all_button)
         self.header.add_action(self.send_all_button)
         column.addWidget(self.header)
 
@@ -546,6 +555,12 @@ class ApplicationsView(QWidget):
         self.resume_button.clicked.connect(self._open_resume)
         self.continue_button = button("Try again", icon="applications")
         self.continue_button.clicked.connect(self._continue_application)
+        self.reopen_button = button("Prepare again", icon="reset")
+        self.reopen_button.setToolTip("The employer refused this submission, so it was not received. "
+                                      "Prepare it again to answer and send it.")
+        self.reopen_button.clicked.connect(
+            lambda: self.selected_application and self.reopen_requested.emit(int(self.selected_application["id"])))
+        actions.addWidget(self.reopen_button)
         actions.addWidget(self.answer_button)
         actions.addWidget(self.posting_button)
         actions.addWidget(self.resume_button)
@@ -619,8 +634,13 @@ class ApplicationsView(QWidget):
         records += [dict(a, kind="attempt") for a in self.applications if a.get("job_id") not in open_jobs]
         self.records = records
         approved = sum(1 for d in self.drafts if d.get("status") == "approved")
-        self.send_all_button.setText(f"Send approved ({approved})" if approved else "Send approved")
-        self.send_all_button.setEnabled(bool(approved))
+        sendable = sum(1 for d in self.drafts if d.get("status") in ("approved", "ready"))
+        self.send_all_button.setText(f"Send ready ({sendable})" if sendable else "Send ready")
+        self.send_all_button.setEnabled(bool(sendable))
+        self.autofill_all_button.setEnabled(any(
+            d.get("status") in ("ready", "needs_answers") and any(
+                q.get("answer") in (None, "", []) and q.get("kind") != "file" for q in d.get("questions") or [])
+            for d in self.drafts))
         review = sum(1 for d in self.drafts if d.get("status") in ("ready", "needs_answers", "practice"))
         sent = sum(1 for a in self.applications if a.get("status") == "applied")
         self.header.set_subtitle(
@@ -726,7 +746,8 @@ class ApplicationsView(QWidget):
         self.meta_label.clear()
         self.next_step.hide()
         self.questions_label.hide()
-        for widget in (self.answer_button, self.posting_button, self.resume_button, self.continue_button):
+        for widget in (self.answer_button, self.posting_button, self.resume_button, self.continue_button,
+                       self.reopen_button):
             widget.hide()
 
     def _set_detail_enabled(self, enabled: bool) -> None:
@@ -780,8 +801,13 @@ class ApplicationsView(QWidget):
         if application.get("stage") and application.get("stage") != "applied":
             time_parts.append(f"Stage: {status_label(application['stage'])}")
         self.meta_label.setText("  ·  ".join(time_parts))
+        rejected = bool(re.search(r"spam filter rejected|flagged as (?:possible )?spam", str(application.get("error") or ""), re.I))
+        self.reopen_button.setVisible(rejected and bool(application.get("submission_attempted")))
         if status == "applied":
             text = "Employer confirmation recorded. Your application is complete."
+        elif rejected and application.get("submission_attempted"):
+            text = ("The employer's spam filter refused this submission, so it was not received. "
+                    "Choose Prepare again to answer any questions and send it.")
         elif application.get("submission_attempted"):
             text = "The result is unconfirmed. Check the employer site before any retry."
         elif status == "dry_run":

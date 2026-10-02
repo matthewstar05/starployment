@@ -348,6 +348,44 @@ def autofill(draft_id: int, settings: dict | None = None) -> int:
     return len(filled)
 
 
+def autofill_all(progress: Callable[[str, int, int], None] | None = None, workers: int = 3) -> dict:
+    """AI Autofill every open prepared application that still has unanswered questions."""
+    settings = db.get_settings()
+    targets = [d["id"] for d in db.list_drafts(("ready", "needs_answers", "practice", "error"))
+               if any(blank(q.get("answer")) and q["kind"] != "file" for q in d["questions"])]
+    done = filled = failed = 0
+
+    def run(draft_id: int) -> int:
+        nonlocal done, failed
+        try:
+            return autofill(draft_id, settings)
+        except Exception as error:  # noqa: BLE001
+            failed += 1
+            db.update_draft(draft_id, error=f"AI Autofill failed: {str(error)[:200]}")
+            return 0
+        finally:
+            done += 1
+            if progress:
+                progress("AI Autofill", done, len(targets))
+
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        filled = sum(pool.map(run, targets))
+    return {"applications": len(targets), "answers": filled, "failed": failed}
+
+
+SPAM_REJECTION_RE = re.compile(r"spam filter rejected|flagged as (?:possible )?spam", re.I)
+
+
+def reopen_rejected(app_id: int) -> str:
+    """For an attempt the employer's spam filter refused, clear it so it can be prepared and sent again."""
+    record = db.get_application(app_id)
+    if record is None:
+        raise ValueError("Application record not found")
+    if not SPAM_REJECTION_RE.search(str(record.get("error") or "")):
+        raise ValueError("Only an attempt the employer explicitly refused can be prepared again")
+    return db.mark_not_received(app_id, "The employer's spam filter refused this submission; it was not received.")
+
+
 def luna_fill(draft_id: int, settings: dict | None = None) -> int:
     """Ask Luna for open questions on one draft. Returns how many answers she drafted."""
     from .luna import draft_answers, draftable
@@ -441,10 +479,12 @@ def prepare_batch(count: int, min_score: float, one_per_company: bool = True, *,
             failed += 1
     drafted = 0
     use_luna = luna_ready(settings) if use_luna is None else use_luna and luna_ready(settings)
+    fill = autofill if (settings.get("luna") or {}).get("autofill_on_prepare", True) else luna_fill
     if use_luna and prepared and not (stop is not None and stop.is_set()):
         from .luna import draftable
-        needing = [d for d in prepared if any(blank(q.get("answer")) and draftable(q)
-                                              for q in (db.get_draft(d) or {}).get("questions", []))]
+        def needs(q):
+            return blank(q.get("answer")) and (q["kind"] != "file" if fill is autofill else draftable(q))
+        needing = [d for d in prepared if any(needs(q) for q in (db.get_draft(d) or {}).get("questions", []))]
         done = 0
 
         def run(draft_id: int) -> int:
@@ -452,7 +492,7 @@ def prepare_batch(count: int, min_score: float, one_per_company: bool = True, *,
             if stop is not None and stop.is_set():
                 return 0
             try:
-                return luna_fill(draft_id, settings)
+                return fill(draft_id, settings)
             except Exception as error:  # noqa: BLE001
                 db.update_draft(draft_id, error=f"Luna could not draft answers: {str(error)[:200]}")
                 return 0

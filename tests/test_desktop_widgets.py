@@ -263,3 +263,23 @@ def test_profile_edits_are_not_clobbered_by_account_refresh(app):
     window.set_data(profile={"first_name": "Ada", "city": "London"})
     assert window.profile.fields["city"].text() == "Paris"
     window.close()
+
+
+def test_activity_console_logs_messages_and_updates_progress_in_place(app):
+    from jobhub.desktop.console import ActivityConsole
+
+    console = ActivityConsole()
+    console.add_events([{"id": 2, "ts": "2026-10-01T10:05:00Z", "level": "success", "msg": "Scan ok: 10 jobs from 6/6 sources, 2 new"},
+                        {"id": 1, "ts": "2026-10-01T10:04:00Z", "level": "info", "msg": "Scan started: greenhouse"}])
+    console.write("Preparing Notion · 1 of 3", "busy")
+    console.write("Preparing Ramp · 2 of 3", "busy")
+    console.add_events([{"id": 3, "ts": "2026-10-01T10:06:00Z", "level": "success",
+                         "msg": "Inbox update: Ramp · Engineer → interview"}])
+    console.write("Prepared 3 applications", "success")
+    lines = console.log.toPlainText().splitlines()
+    assert [line[6:] for line in lines] == ["Searching for new jobs", "Job search finished",
+                                           "Inbox update: Ramp · Engineer → interview", "Prepared 3 applications"]
+    assert console.last_tone == "success"
+    console.add_events([{"id": 3, "ts": "2026-10-01T10:06:00Z", "level": "success", "msg": "duplicate"}])
+    assert len(console.log.toPlainText().splitlines()) == 4     # each stored event appears once
+    console.close()

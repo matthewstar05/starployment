@@ -1156,11 +1156,10 @@ class CapsuleButton(QPushButton):
         self._icon_name = icon
         self._trailing = trailing
         self.refresh_icon()
-        self._native_glass = GlassSurface(
-            self, lambda: self.height() / 2,
-            tint=lambda: ("accent", 0.9) if role == "primary" else ("red", 0.12) if role == "danger" else None,
-            opacity=lambda: 1.0 if self.isEnabled() else 0.35,
-        )
+        # Buttons are drawn by Qt, not as native glass. Small, closely packed
+        # NSGlassEffectViews in clipping parents render clipped rectangular
+        # shadows and washed-out tints; a painted capsule is crisp in every
+        # container and greys out correctly when disabled.
 
     def sizeHint(self) -> QSize:
         hint = super().sizeHint()
