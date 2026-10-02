@@ -77,7 +77,7 @@ def fetch_boards(slugs: list[str], fetch_one, settings: dict, *, source: str | N
         raise RuntimeError("All company boards failed. " + detail)
     return result
 
-UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36 JobHub/0.1"
+UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36 Starployment/0.4"
 
 
 def client(timeout: float = 25.0, *, follow_redirects: bool = True) -> httpx.Client:

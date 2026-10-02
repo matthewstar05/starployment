@@ -1,4 +1,4 @@
-"""Build a JobHub desktop bundle on the current operating system.
+"""Build a Starployment desktop bundle on the current operating system.
 
 PyInstaller builds are platform-specific. Run this script on each target OS
 with that OS's Python interpreter. It intentionally does not copy user data,
@@ -25,8 +25,8 @@ def run(*args: str, env: dict[str, str] | None = None) -> None:
 def frozen_runtime_root(platform: str = sys.platform, root: Path = ROOT) -> Path:
     """Return the directory exposed as ``sys._MEIPASS`` by PyInstaller."""
     if platform == "darwin":
-        return root / "dist" / "JobHub.app" / "Contents" / "Frameworks"
-    return root / "dist" / "JobHub" / "_internal"
+        return root / "dist" / "Starployment.app" / "Contents" / "Frameworks"
+    return root / "dist" / "Starployment" / "_internal"
 
 
 def install_browser_bundle() -> Path:
@@ -49,14 +49,14 @@ def install_browser_bundle() -> Path:
     driver_destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(playwright_package / "driver", driver_destination, symlinks=True)
     if sys.platform == "darwin":
-        app_bundle = ROOT / "dist" / "JobHub.app"
+        app_bundle = ROOT / "dist" / "Starployment.app"
         run("/usr/bin/codesign", "--force", "--deep", "--sign", "-", str(app_bundle))
     return destination
 
 
 def main() -> int:
     if sys.version_info[:2] != (3, 12):
-        raise SystemExit("JobHub packaging requires Python 3.12, matching pyproject.toml.")
+        raise SystemExit("Starployment packaging requires Python 3.12, matching pyproject.toml.")
     entrypoint = ROOT / "jobhub" / "desktop" / "__main__.py"
     if not entrypoint.is_file():
         raise SystemExit("jobhub/desktop/__main__.py is missing. Add the native entrypoint before packaging.")

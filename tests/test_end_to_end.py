@@ -52,6 +52,7 @@ def test_resume_upload_to_confirmed_application_and_duplicate_block(tmp_path, mo
             assert upload.json()['email'] == 'ada@example.test'
             job = Job(source='fixture', ats='greenhouse', company='Fixture employer', title='Software Engineer',
                       url='https://job-boards.greenhouse.io/fixture/jobs/123', description='Python and SQL engineering')
+            monkeypatch.setattr('jobhub.sources.import_job.fetch_job', lambda url: job)
             db.upsert_jobs([job])
             practice = client.post(f'/api/jobs/{job.id}/apply?dry_run=true')
             assert practice.status_code == 200, practice.text
@@ -117,6 +118,7 @@ def test_desktop_setup_answers_reach_a_local_employer_form(tmp_path, monkeypatch
     monkeypatch.setattr(dispatcher, 'adapter_for', lambda job: Adapter('local-fixture', form.as_uri(), settle_ms=0))
     job = Job(source='fixture', ats='greenhouse', company='Fixture employer', title='Product Manager',
               url='https://job-boards.greenhouse.io/fixture/jobs/456', description='Product launch planning')
+    monkeypatch.setattr('jobhub.sources.import_job.fetch_job', lambda url: job)
     db.upsert_jobs([job])
     try:
         result = scheduler.apply_one(job.id)

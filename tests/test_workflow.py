@@ -1,5 +1,6 @@
 """Isolated workflow regressions. These tests never contact employers or run a scheduler."""
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -21,6 +22,9 @@ def isolated_store(tmp_path, monkeypatch):
     config.TAILORED.mkdir()
     config.SCREENSHOTS.mkdir()
     db.init()
+    # Workflow behavior tests use fictional local postings. Current-public
+    # metadata refresh has dedicated mocked coverage in test_posting_refresh.
+    monkeypatch.setattr(scheduler, "enrich_job", lambda job: job)
     scheduler.STATE.stop = False
     scheduler.STATE.running_scan = False
     scheduler.STATE.running_apply = None
@@ -152,7 +156,9 @@ def test_dry_run_leaves_job_available_and_stores_resume(monkeypatch):
     result = scheduler.apply_one(job.id, dry_run=True)
     assert result["status"] == "dry_run"
     assert db.get_job(job.id).status == "new"
-    assert db.get_application(result["application_id"])["resume_path"] == resume
+    snapshot = db.get_application(result["application_id"])["resume_path"]
+    assert snapshot != resume
+    assert Path(snapshot).read_bytes() == Path(resume).read_bytes()
 
 
 def test_restart_recovers_dead_worker_without_losing_submit_boundary():
@@ -270,7 +276,7 @@ def test_auto_apply_respects_eligibility_and_current_toggle(monkeypatch):
     db.set_settings({"auto_apply": True, "setup_complete": True})
     monkeypatch.setattr(scheduler, "rescore", lambda: None)
     seen = []
-    def apply(job_id):
+    def apply(job_id, **kwargs):
         seen.append(job_id)
         return {"status": "dry_run"}
     monkeypatch.setattr(scheduler, "apply_one", apply)
@@ -305,10 +311,46 @@ def test_auto_apply_preflight_skips_missing_facts_and_uses_next_slot(monkeypatch
         return Readiness("missing_facts", ("Work authorization",)) if job.id == blocked.id else Readiness("ready")
     monkeypatch.setattr(scheduler, "preflight_job", preflight)
     submitted = []
-    monkeypatch.setattr(scheduler, "apply_one", lambda job_id: submitted.append(job_id) or {"status": "dry_run"})
+    monkeypatch.setattr(scheduler, "apply_one", lambda job_id, **kwargs: submitted.append(job_id) or {"status": "dry_run"})
     assert scheduler.auto_apply_batch() == [{"status": "dry_run"}]
     assert checked == [blocked.id, ready.id]
     assert submitted == [ready.id]
+    assert db.list_applications() == []
+
+
+def test_auto_apply_rotates_bounded_preflight_window_across_scans(monkeypatch):
+    from jobhub.readiness import Readiness
+
+    jobs = [
+        Job(source="lever", ats="lever", company=f"Company {index}", title="Software Engineer",
+            url=f"https://jobs.lever.co/company-{index}/{index}", location="United States",
+            score=100 - index, score_json={"auto_apply_eligible": True})
+        for index in range(25)
+    ]
+    db.upsert_jobs(jobs)
+    db.set_settings({"auto_apply": True, "setup_complete": True, "max_apply_per_run": 1})
+    monkeypatch.setattr(scheduler, "rescore", lambda: None)
+    checked = []
+
+    def preflight(job, profile, settings):
+        checked.append(job.id)
+        return Readiness("ready") if job.id == jobs[24].id else Readiness("missing_facts", ("Work authorization",))
+
+    monkeypatch.setattr(scheduler, "preflight_job", preflight)
+    submitted = []
+    monkeypatch.setattr(scheduler, "apply_one", lambda job_id, **kwargs:
+                        submitted.append(job_id) or {"status": "dry_run"})
+
+    first_run = db.create_run()
+    assert scheduler.auto_apply_batch() == []
+    db.finish_run(first_run, 0, 0, 0, "ok", [])
+    assert checked == [job.id for job in jobs[:24]]
+
+    second_run = db.create_run()
+    assert scheduler.auto_apply_batch() == [{"status": "dry_run"}]
+    db.finish_run(second_run, 0, 0, 0, "ok", [])
+    assert jobs[24].id in checked[24:]
+    assert submitted == [jobs[24].id]
     assert db.list_applications() == []
 
 
@@ -325,7 +367,7 @@ def test_auto_apply_batch_tries_distinct_employers_before_repeating_one(monkeypa
     db.set_settings({"auto_apply": True, "setup_complete": True, "max_apply_per_run": 3})
     monkeypatch.setattr(scheduler, "rescore", lambda: None)
     attempted = []
-    monkeypatch.setattr(scheduler, "apply_one", lambda job_id:
+    monkeypatch.setattr(scheduler, "apply_one", lambda job_id, **kwargs:
                         attempted.append(job_id) or {"status": "needs_human"})
 
     assert len(scheduler.auto_apply_batch()) == 3

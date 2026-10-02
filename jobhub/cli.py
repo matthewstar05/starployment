@@ -42,9 +42,14 @@ def main(argv: list[str] | None = None) -> int:
         for line in res.get("log", []): print("  ", line)
         return 0 if res.get("status") in ("applied", "dry_run") else 1
     if args.cmd == "tailor":
+        from .scheduler import PostingRefreshError, enrich_job
         from .tailor import resume_for_job
         job = db.get_job(args.job_id); prof = db.get_profile()
         if not job or not prof: print("missing job or profile"); return 1
+        try:
+            job = enrich_job(job)
+        except PostingRefreshError as error:
+            print(str(error)); return 1
         print(resume_for_job(prof, job, db.get_settings())); return 0
     if args.cmd == "profile":
         from .profile import ingest_resume

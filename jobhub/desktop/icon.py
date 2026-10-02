@@ -1,4 +1,4 @@
-"""Locate and apply JobHub's desktop icon in source and frozen builds."""
+"""Locate and apply Starployment's desktop icon in source and frozen builds."""
 from __future__ import annotations
 
 import sys
@@ -9,9 +9,9 @@ def icon_path() -> Path:
     """Return the bundled 256px PNG path, supporting source and PyInstaller runs."""
     frozen_root = getattr(sys, "_MEIPASS", None)
     if frozen_root:
-        candidate = Path(frozen_root) / "assets" / "jobhub-icon-256.png"
+        candidate = Path(frozen_root) / "assets" / "starployment-icon-256.png"
     else:
-        candidate = Path(__file__).resolve().parents[2] / "packaging" / "assets" / "jobhub-icon-256.png"
+        candidate = Path(__file__).resolve().parents[2] / "packaging" / "assets" / "starployment-icon-256.png"
     return candidate
 
 

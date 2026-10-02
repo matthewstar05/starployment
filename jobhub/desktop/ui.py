@@ -1,4 +1,4 @@
-"""Native Qt Widgets shell for JobHub.
+"""Native Qt Widgets shell for Starployment.
 
 The window is intentionally controller-friendly. It does not import or call
 the scheduler. A controller connects the public signals and feeds refreshed
@@ -25,14 +25,16 @@ from PySide6.QtWidgets import (
 )
 
 from .format import activity_label as _activity_label
-from .format import countdown, local_time as _local_time
+from .format import countdown, local_time as _local_time, retryable_job_ids
 from .icon import icon_path
 from .native import TITLE_BAR_HEIGHT, configure_window_chrome, style_title_bar
+from .native_glass import prepare_window, window_has_native_glass
 from .views.applications import ApplicationsView
 from .views.dashboard import DashboardView
 from .views.jobs import JobsView
 from .views.profile import ProfileView
 from .views.settings import SettingsView
+from .views.tracker import TrackerView
 from .widgets import (
     ActivityIndicator,
     AmbientBackdrop,
@@ -49,18 +51,19 @@ from .widgets import (
 from .wizard import SetupWizard
 
 __all__ = [
-    "ApplicationsView", "DashboardView", "JobHubWindow", "JobsView", "ProfileView",
-    "SettingsView", "SetupWizard", "_activity_label", "_local_time",
+    "ApplicationsView", "DashboardView", "JobHubWindow", "JobsView", "ProfileView", "SettingsView",
+    "SetupWizard", "StarploymentWindow", "TrackerView", "_activity_label", "_local_time",
 ]
 
 PAGES = (
     ("Overview", "dashboard"),
     ("Jobs", "jobs"),
     ("Applications", "applications"),
+    ("Tracker", "tracker"),
     ("Profile", "profile"),
     ("Settings", "settings"),
 )
-OVERVIEW, JOBS, APPLICATIONS, PROFILE, SETTINGS = range(len(PAGES))
+OVERVIEW, JOBS, APPLICATIONS, TRACKER, PROFILE, SETTINGS = range(len(PAGES))
 
 
 class ShellBackdrop(AmbientBackdrop):
@@ -110,7 +113,7 @@ class Sidebar(GlassPanel):
             mark.setPixmap(pixmap.scaled(56, 56, Qt.AspectRatioMode.KeepAspectRatio,
                                          Qt.TransformationMode.SmoothTransformation))
             brand.addWidget(mark)
-        brand.addWidget(label("JobHub", "brand", wrap=False))
+        brand.addWidget(label("Starployment", "brand", wrap=False))
         brand.addStretch()
         column.addLayout(brand)
         self.nav = GlassNavList()
@@ -183,7 +186,8 @@ class JobHubWindow(QMainWindow):
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
-        self.setWindowTitle("JobHub")
+        self.setWindowTitle("Starployment")
+        prepare_window(self)
         self.resize(1280, 820)
         self.setMinimumSize(1000, 680)
         self._native_chrome = configure_window_chrome(self)
@@ -209,9 +213,10 @@ class JobHubWindow(QMainWindow):
         self.dashboard = DashboardView()
         self.jobs = JobsView()
         self.apps = ApplicationsView()
+        self.tracker = TrackerView()
         self.profile = ProfileView()
         self.settings = SettingsView()
-        for page in (self.dashboard, self.jobs, self.apps, self.profile, self.settings):
+        for page in (self.dashboard, self.jobs, self.apps, self.tracker, self.profile, self.settings):
             self.stack.addWidget(page)
         self.toast = Toast(root)
 
@@ -232,11 +237,17 @@ class JobHubWindow(QMainWindow):
         self.dashboard.applications_requested.connect(self.show_application)
         self.dashboard.apply_requested.connect(self.apply_requested)
         self.dashboard.open_url_requested.connect(self.open_url_requested)
+        self.dashboard.review_requested.connect(lambda: self.show_applications("review"))
+        self.dashboard.tracker_requested.connect(lambda: self.nav.setCurrentRow(TRACKER))
+        self.jobs.review_requested.connect(self.show_draft_for_job)
+        self.tracker.open_requested.connect(self.open_url_requested)
+        self.tracker.connections_requested.connect(self.show_connections)
         self.jobs.apply_requested.connect(self.apply_requested)
         self.jobs.open_requested.connect(self.open_url_requested)
         self.jobs.import_requested.connect(self.import_requested)
         self.jobs.status_requested.connect(self.status_requested)
         self.apps.open_requested.connect(self.open_url_requested)
+        self.apps.apply_requested.connect(self.apply_requested)
         self.apps.answer_questions_requested.connect(self.answer_questions_requested)
         self.profile.save_requested.connect(self._profile_save)
         self.settings.save_requested.connect(self._settings_save)
@@ -262,6 +273,7 @@ class JobHubWindow(QMainWindow):
             return item
 
         self.refresh_action = action("Refresh Jobs", "Ctrl+R", self.scan_requested.emit)
+        self.apply_action = action("Apply…", "Ctrl+Shift+A", self.dashboard._open_plan)
         self.add_posting_action = action("Add Posting…", "Ctrl+N", self._add_posting)
         self.find_action = action("Find Jobs", QKeySequence.StandardKey.Find, self._find_jobs)
         self.setup_action = action("Edit Setup…", "Ctrl+Shift+E", self.setup_requested.emit)
@@ -277,7 +289,7 @@ class JobHubWindow(QMainWindow):
         if sys.platform == "darwin" and QGuiApplication.platformName() == "cocoa":
             bar = self.menuBar()
             file_menu = bar.addMenu("File")
-            for item in (self.refresh_action, self.add_posting_action, self.setup_action, self.save_action):
+            for item in (self.refresh_action, self.apply_action, self.add_posting_action, self.setup_action, self.save_action):
                 file_menu.addAction(item)
             file_menu.addAction(self.preferences_action)
             edit_menu = bar.addMenu("Edit")
@@ -325,6 +337,19 @@ class JobHubWindow(QMainWindow):
         if app_id is not None:
             self.apps.select_application_id(app_id)
 
+    def show_applications(self, filter_value: str = "all") -> None:
+        self.apps.show_filter(filter_value)
+        self.nav.setCurrentRow(APPLICATIONS)
+
+    def show_draft_for_job(self, job_id: str) -> None:
+        self.apps.show_filter("all")
+        self.nav.setCurrentRow(APPLICATIONS)
+        self.apps.select_draft_for_job(job_id)
+
+    def show_connections(self) -> None:
+        self.nav.setCurrentRow(SETTINGS)
+        self.settings.show_connections()
+
     # ---------------------------------------------------------- feedback
     def notify(self, message: str, tone: str = "info", timeout: int = 4500) -> None:
         """Show a toast. ``tone``: info, success, warning, error, or busy (timeout 0 keeps it)."""
@@ -333,7 +358,7 @@ class JobHubWindow(QMainWindow):
     def crossfade(self, change) -> None:
         """Run ``change`` (e.g. a theme switch) under a brief crossfade of the old frame."""
         root = self.centralWidget()
-        if reduced_motion() or not self.isVisible() or root is None:
+        if reduced_motion() or not self.isVisible() or root is None or window_has_native_glass(self):
             change()
             return
         if self._crossfade is not None:
@@ -383,6 +408,7 @@ class JobHubWindow(QMainWindow):
     def set_data(
         self, *, profile=None, settings=None, jobs=None, total_jobs=None,
         applications=None, stats=None, events=None, top_jobs=None,
+        drafts=None, tracker=None, resume_files=None, mail=None,
     ) -> None:
         if profile is not None:
             if not self.profile.dirty:
@@ -391,9 +417,21 @@ class JobHubWindow(QMainWindow):
         if settings is not None:
             if not self.settings.dirty:
                 self.settings.set_settings(settings)
+            if not self.profile.dirty:
+                self.profile.set_settings(settings)
             self._setup_complete = bool(settings.get("setup_complete"))
             self._auto_apply = bool(settings.get("auto_apply"))
             self.dashboard.set_setup_complete(self._setup_complete)
+            self.dashboard.set_settings(settings)
+            backend = (settings.get("agent") or {}).get("backend", "none")
+            self.apps.set_context(practice=bool(settings.get("dry_run")), luna_connected=backend not in ("", "none"))
+            tracking = settings.get("email_tracking") or {}
+            self.tracker.set_email_state(bool(tracking.get("enabled")), (mail or {}).get("last_checked"),
+                                         int((mail or {}).get("unmatched", 0)))
+        if resume_files is not None:
+            self.profile.files.set_files(resume_files)
+        if top_jobs is not None:
+            self.profile.builder.set_preview_jobs([(job.id, f"{job.company} · {job.title}") for job in top_jobs])
         retryable = self._retryable(applications or [])
         if jobs is not None:
             self.jobs.set_jobs(jobs, retryable, total_count=total_jobs)
@@ -403,25 +441,39 @@ class JobHubWindow(QMainWindow):
             self.dashboard.set_stats(stats)
             new = int(stats.get("new", 0) or 0)
             self.nav.set_badge(JOBS, f"{new:,}" if new else "", "neutral")
-            review = int(stats.get("needs_human", 0) or 0)
-            self.nav.set_badge(APPLICATIONS, str(review) if review else "", "amber")
+            if drafts is None:
+                review = int(stats.get("needs_human", 0) or 0)
+                self.nav.set_badge(APPLICATIONS, str(review) if review else "", "amber")
         if applications is not None:
-            self.apps.set_applications(applications)
+            self.apps.set_applications(applications, drafts)
             self.dashboard.set_applications(applications, stats)
+        elif drafts is not None:
+            self.apps.set_applications(self.apps.applications, drafts)
+        if drafts is not None:
+            counts: dict[str, int] = {}
+            for draft in drafts:
+                counts[draft.get("status", "")] = counts.get(draft.get("status", ""), 0) + 1
+            review = sum(counts.get(key, 0) for key in ("ready", "needs_answers", "practice"))
+            self.nav.set_badge(APPLICATIONS, str(review) if review else "", "accent")
+        else:
+            counts = None
+        if tracker is not None:
+            self.tracker.set_rows(tracker)
+            focus = [row for row in tracker if row.get("stage") in ("assessment", "interview", "offer")]
+            self.nav.set_badge(TRACKER, str(len(focus)) if focus else "", "amber")
+            if counts is not None:
+                self.dashboard.set_pipeline(counts, focus)
         if events is not None:
             self.dashboard.set_events(events, applications)
 
     @staticmethod
     def _retryable(applications: list[dict[str, Any]]) -> set[str]:
-        latest: dict[str, dict] = {}
-        for app in applications:
-            latest.setdefault(app.get("job_id"), app)
-        return {
-            job_id for job_id, app in latest.items()
-            if job_id and app.get("status") in {"needs_human", "failed"} and not app.get("submission_attempted")
-        }
+        return retryable_job_ids(applications)
 
-    def show_setup(self, profile=None, settings=None) -> None:
+    def show_setup(self, profile=None, settings=None) -> None:  # noqa: D102
         wizard = SetupWizard(profile, settings, self)
         wizard.completed.connect(self.setup_completed)
         wizard.exec()
+
+
+StarploymentWindow = JobHubWindow

@@ -1,4 +1,4 @@
-"""Semantic, appearance-aware stylesheet for the native JobHub desktop client.
+"""Semantic, appearance-aware stylesheet for the native Starployment desktop client.
 
 Stylesheet rules cover stock Qt controls (labels, inputs, buttons, tables,
 scroll bars, menus). Glass surfaces, the sidebar pill, switches, segmented
@@ -52,6 +52,8 @@ def stylesheet(appearance: str | None = None) -> str:
     /* Base ------------------------------------------------------------- */
     QWidget {{ color: {c['text']}; {font_rule} font-size: 13px; }}
     QMainWindow, QDialog {{ background-color: {c['window']}; color: {c['text']}; }}
+    QMainWindow[jobhubNativeGlassPrepared="true"], QDialog[jobhubNativeGlassPrepared="true"] {{
+        background: transparent; }}
     QLabel {{ background-color: transparent; }}
     QWidget#page, QWidget#formPage, QWidget#formViewport, QScrollArea#formScroll,
     QScrollArea, QScrollArea > QWidget > QWidget, QStackedWidget, QSplitter,
@@ -99,6 +101,8 @@ def stylesheet(appearance: str | None = None) -> str:
         color: {c['disabled']}; background-color: {c['fill_quiet']}; }}
     QLineEdit#search {{ border-radius: 15px; padding: 5px 10px 5px 4px; min-height: 18px; }}
     QLineEdit#search:focus {{ padding: 4px 9px 4px 3px; }}
+    QLineEdit#search[nativeGlass="true"], QLineEdit#search[nativeGlass="true"]:hover,
+    QLineEdit#search[nativeGlass="true"]:focus {{ background: transparent; }}
     QPlainTextEdit#evidence {{ background: {inset_fill}; border: 1px solid {control_line}; border-radius: 12px;
         padding: 10px; color: {c['text_muted']}; font-size: 12px; }}
     QSpinBox {{ padding-right: 22px; min-width: 64px; }}
@@ -111,6 +115,19 @@ def stylesheet(appearance: str | None = None) -> str:
     QSpinBox::up-button:hover, QSpinBox::down-button:hover {{ background: {c['fill_hover']}; border-radius: 4px; }}
     QSpinBox::up-arrow {{ image: url("{up_icon}"); width: 9px; height: 9px; }}
     QSpinBox::down-arrow {{ image: url("{down_icon}"); width: 9px; height: 9px; }}
+    QLineEdit#tagInput {{ background: transparent; border: 1px dashed {control_line_hover}; border-radius: 13px;
+        padding: 2px 10px; font-size: 12px; }}
+    QLineEdit#tagInput:focus {{ border: 1px solid {c['accent']}; padding: 2px 10px; background: {c['fill_control_hover']}; }}
+    QToolButton#rowRemove {{ background: transparent; border: none; border-radius: 10px; padding: 4px; }}
+    QToolButton#rowRemove:hover {{ background: {c['fill_quiet']}; }}
+    QLabel#heroTitle {{ color: #FFFFFF; font-size: 24px; font-weight: 700; }}
+    QLabel#heroText {{ color: rgba(255,255,255,0.74); font-size: 13px; }}
+    QLabel#heroStat {{ color: rgba(255,255,255,0.86); font-size: 12px; font-weight: 600; }}
+    QLabel#sourceBadge {{ color: {c['text_muted']}; font-size: 11px; font-weight: 600; }}
+    QLabel#questionLabel {{ color: {c['text']}; font-size: 13px; font-weight: 600; }}
+    QLabel#lunaNote {{ color: {c['indigo']}; font-size: 11px; }}
+    QLabel#statValue {{ color: {c['text']}; font-size: 22px; font-weight: 700; }}
+    QLabel#statLabel {{ color: {c['text_muted']}; font-size: 11px; font-weight: 600; }}
     QComboBox {{ padding-right: 26px; }}
     QComboBox::drop-down {{ border: none; width: 24px; }}
     QComboBox QAbstractItemView {{ background: {c['surface']}; border: 1px solid {control_line}; border-radius: 8px;
@@ -134,7 +151,25 @@ def stylesheet(appearance: str | None = None) -> str:
     QPushButton#quiet:hover {{ background: {c['fill_hover']}; }}
     QPushButton#quiet:pressed {{ background: {c['fill_quiet']}; }}
     QPushButton#danger {{ background: {c['red_soft']}; color: {c['red']}; border: 1px solid transparent; }}
+    QPushButton#star {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #FFD866, stop:1 {c['star']});
+        color: #14110A; border: 1px solid rgba(0,0,0,0.10); border-radius: 22px; padding: 10px 30px;
+        min-height: 22px; font-size: 16px; font-weight: 700; }}
+    QPushButton#star:hover {{ background: #FFE07A; }}
+    QPushButton#star:pressed {{ background: {c['star']}; }}
+    QPushButton#star:focus {{ border: 2px solid #FFFFFF; padding: 9px 29px; }}
+    QPushButton#star:disabled {{ background: rgba(255,255,255,0.18); color: rgba(255,255,255,0.5); }}
     QPushButton#danger:hover {{ background: {c['red_soft']}; border-color: {c['red']}; }}
+    QPushButton[nativeGlass="true"], QPushButton[nativeGlass="true"]:hover,
+    QPushButton[nativeGlass="true"]:pressed, QPushButton[nativeGlass="true"]:disabled,
+    QPushButton#secondary[nativeGlass="true"], QPushButton#secondary[nativeGlass="true"]:hover,
+    QPushButton#secondary[nativeGlass="true"]:pressed, QPushButton#secondary[nativeGlass="true"]:disabled,
+    QPushButton#quiet[nativeGlass="true"], QPushButton#quiet[nativeGlass="true"]:hover,
+    QPushButton#quiet[nativeGlass="true"]:pressed,
+    QPushButton#danger[nativeGlass="true"], QPushButton#danger[nativeGlass="true"]:hover {{
+        background: transparent; border-color: transparent; }}
+    QPushButton[nativeGlass="true"]:focus, QPushButton#secondary[nativeGlass="true"]:focus,
+    QPushButton#quiet[nativeGlass="true"]:focus, QPushButton#danger[nativeGlass="true"]:focus {{
+        border-color: {c['accent']}; }}
 
     /* Tables and lists -------------------------------------------------- */
     QTableWidget#glassTable, QTableView#glassTable {{ background: transparent; border: none; outline: none;
@@ -205,4 +240,20 @@ def color_for_status(status: str, appearance: str | None = None) -> tuple[str, s
         "queued": (c["accent_text"], c["accent_soft"]),
         "applying": (c["accent_text"], c["accent_soft"]),
         "dry_run": (c["indigo"], c["indigo_soft"]),
+        # prepared applications
+        "prepared": (c["accent_text"], c["accent_soft"]),
+        "ready": (c["accent_text"], c["accent_soft"]),
+        "needs_answers": (c["amber"], c["amber_soft"]),
+        "approved": (c["indigo"], c["indigo_soft"]),
+        "sending": (c["accent_text"], c["accent_soft"]),
+        "sent": (c["green"], c["green_soft"]),
+        "practice": (c["indigo"], c["indigo_soft"]),
+        "unconfirmed": (c["amber"], c["amber_soft"]),
+        "error": (c["red"], c["red_soft"]),
+        # hiring stages
+        "assessment": (c["indigo"], c["indigo_soft"]),
+        "interview": (c["amber"], c["amber_soft"]),
+        "offer": (c["green"], c["green_soft"]),
+        "rejected": (c["red"], c["red_soft"]),
+        "withdrawn": (c["text_muted"], c["fill_quiet"]),
     }.get(status, (c["text_muted"], c["fill_quiet"]))

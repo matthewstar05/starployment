@@ -31,6 +31,7 @@ from ..delegates import (
     configure_columns,
 )
 from ..format import salary, status_label
+from ..native_glass import prepare_window
 from ..widgets import (
     EmptyState,
     GlassPanel,
@@ -49,6 +50,7 @@ class AddPostingSheet(QDialog):
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
         self.setWindowTitle("Add a posting")
+        prepare_window(self)
         self.setModal(True)
         self.setMinimumWidth(480)
         column = QVBoxLayout(self)
@@ -56,7 +58,7 @@ class AddPostingSheet(QDialog):
         column.setSpacing(10)
         column.addWidget(label("Add a posting", "sheetTitle"))
         column.addWidget(label("Paste a public Greenhouse, Lever, or Ashby job link. "
-                               "JobHub imports it, scores it, and adds it to Jobs.", "subtitle"))
+                               "Starployment imports it, scores it, and adds it to Jobs.", "subtitle"))
         self.url = QLineEdit()
         self.url.setPlaceholderText("https://job-boards.greenhouse.io/company/jobs/123")
         self.url.textChanged.connect(self._validate)
@@ -105,6 +107,8 @@ class AddPostingSheet(QDialog):
 
 class JobsView(QWidget):
     apply_requested = Signal(str)
+    prepare_requested = Signal(str)
+    review_requested = Signal(str)
     status_requested = Signal(str, str)
     open_requested = Signal(str)
     import_requested = Signal(str)
@@ -112,7 +116,7 @@ class JobsView(QWidget):
     page_size = 100
 
     ROLE, SALARY, MATCH, STATUS, ACTION = range(5)
-    FILTERS = (("All", "all"), ("New", "new"), ("Applied", "applied"),
+    FILTERS = (("All", "all"), ("New", "new"), ("Prepared", "prepared"), ("Applied", "applied"),
                ("Review", "needs_human"), ("Skipped", "skipped"))
 
     def __init__(self, parent: QWidget | None = None):
@@ -277,11 +281,18 @@ class JobsView(QWidget):
             status.setData(STATUS_ROLE, job.status)
             status.setData(Qt.ItemDataRole.UserRole, job.status)
             can_apply = job.status == "new" or job.id in retryable_ids
-            kind = "apply" if job.status == "new" else "retry" if can_apply else "view"
-            action = QTableWidgetItem({"apply": "Apply", "retry": "Retry", "view": "View"}[kind])
-            action.setData(ACTION_ROLE, kind)
-            action.setToolTip({"apply": "Queue this application", "retry": "Try this application again",
-                               "view": "Open the posting"}[kind])
+            if job.status == "prepared":
+                kind = "review"
+            elif can_apply and job.status in {"new", "dry_run"}:
+                kind = "apply" if job.ats in ("greenhouse", "lever", "ashby") else "view"
+            else:
+                kind = "retry" if can_apply else "view"
+            action = QTableWidgetItem({"apply": "Prepare", "review": "Review", "retry": "Retry", "view": "View"}[kind])
+            action.setData(ACTION_ROLE, "apply" if kind == "review" else kind)
+            action.setData(Qt.ItemDataRole.UserRole, kind)
+            action.setToolTip({"apply": "Prepare this application for your review",
+                               "review": "Review the prepared application",
+                               "retry": "Try this application again", "view": "Open the posting"}[kind])
             for column, item in enumerate((role, pay, match, status, action)):
                 self.table.setItem(row, column, item)
             if job.id == selected:
@@ -341,7 +352,12 @@ class JobsView(QWidget):
         job = self.job_at(row)
         if item is None or job is None:
             return
-        if item.data(ACTION_ROLE) in ("apply", "retry"):
+        kind = item.data(Qt.ItemDataRole.UserRole) or item.data(ACTION_ROLE)
+        if kind == "apply":
+            self.prepare_requested.emit(job.id)
+        elif kind == "review":
+            self.review_requested.emit(job.id)
+        elif kind == "retry":
             self.apply_requested.emit(job.id)
         else:
             self.open_requested.emit(job.url)
@@ -363,8 +379,14 @@ class JobsView(QWidget):
         menu = QMenu(self)
         menu.addAction("Open posting", lambda: self.open_requested.emit(job.url))
         action_item = self.table.item(row, self.ACTION)
-        if action_item is not None and action_item.data(ACTION_ROLE) in ("apply", "retry"):
-            menu.addAction(action_item.text(), lambda: self.apply_requested.emit(job.id))
+        kind = action_item.data(Qt.ItemDataRole.UserRole) if action_item is not None else None
+        if kind == "apply":
+            menu.addAction("Prepare application", lambda: self.prepare_requested.emit(job.id))
+            menu.addAction("Apply now, without review", lambda: self.apply_requested.emit(job.id))
+        elif kind == "review":
+            menu.addAction("Review prepared application", lambda: self.review_requested.emit(job.id))
+        elif kind == "retry":
+            menu.addAction("Retry", lambda: self.apply_requested.emit(job.id))
         menu.addAction("Copy link", lambda: QGuiApplication.clipboard().setText(job.url))
         menu.addSeparator()
         if job.status == "skipped":

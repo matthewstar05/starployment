@@ -36,6 +36,21 @@ CREATE TABLE IF NOT EXISTS runs (
   new_jobs INTEGER DEFAULT 0, applied INTEGER DEFAULT 0, status TEXT, log TEXT DEFAULT '[]'
 );
 CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, level TEXT, msg TEXT, job_id TEXT);
+CREATE TABLE IF NOT EXISTS drafts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT UNIQUE, status TEXT DEFAULT 'preparing',
+  created_at TEXT, updated_at TEXT, resume_path TEXT DEFAULT '', resume_note TEXT DEFAULT '',
+  questions TEXT DEFAULT '[]', question_source TEXT DEFAULT '', error TEXT DEFAULT '',
+  application_id INTEGER, approved_at TEXT
+);
+CREATE TABLE IF NOT EXISTS mail_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, message_key TEXT UNIQUE, received_at TEXT, sender TEXT,
+  subject TEXT, stage TEXT, application_id INTEGER, confidence REAL DEFAULT 0, created_at TEXT,
+  dismissed INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS resume_files (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT UNIQUE, label TEXT, category TEXT DEFAULT 'general',
+  is_default INTEGER DEFAULT 0, added_at TEXT
+);
 """
 
 # Preserve every historical ID/application while presenting one vacancy per ATS posting.
@@ -45,7 +60,7 @@ WITH ranked_jobs AS (
   SELECT jobs.*, ROW_NUMBER() OVER (
     PARTITION BY COALESCE(canonical_key, url, id)
     ORDER BY CASE status WHEN 'applied' THEN 0 WHEN 'applying' THEN 1 WHEN 'queued' THEN 2
-      WHEN 'needs_human' THEN 3 WHEN 'failed' THEN 4 WHEN 'skipped' THEN 5 ELSE 6 END,
+      WHEN 'needs_human' THEN 3 WHEN 'prepared' THEN 4 WHEN 'failed' THEN 5 WHEN 'skipped' THEN 6 ELSE 7 END,
       score DESC, discovered_at DESC, id
   ) AS posting_rank FROM jobs
 )
@@ -94,7 +109,9 @@ def init() -> None:
         for table, fields in {
             "jobs": {"canonical_key": "TEXT"},
             "applications": {"submission_attempted": "INTEGER DEFAULT 0", "worker_pid": "INTEGER",
-                              "candidate_note": "TEXT DEFAULT ''"},
+                              "candidate_note": "TEXT DEFAULT ''", "stage": "TEXT DEFAULT ''",
+                              "stage_source": "TEXT DEFAULT ''", "stage_updated_at": "TEXT",
+                              "questions": "TEXT DEFAULT '[]'"},
             "runs": {"worker_pid": "INTEGER"},
         }.items():
             existing = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
@@ -195,6 +212,32 @@ def upsert_jobs(jobs: list[Job]) -> int:
                  json.dumps(j.score_json), j.status, json.dumps(j.raw), now_iso()))
             c.execute("UPDATE jobs SET canonical_key=? WHERE id=?", (key, j.id))
     return new
+
+
+def refresh_job_metadata(job_id: str, fresh: Job) -> Job:
+    """Replace public posting metadata while preserving the local vacancy record.
+
+    Unlike discovery upserts, this accepts empty public fields as authoritative
+    so stale title/description/salary data cannot survive a successful refresh.
+    The existing ID, canonical key, status, discovery time, and application
+    history remain attached to the same vacancy.
+    """
+    with conn() as c:
+        row = c.execute("SELECT id, canonical_key FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if row is None:
+            raise ValueError("Job not found")
+        key = job_fingerprint(fresh)
+        if row["canonical_key"] and row["canonical_key"] != key:
+            raise ValueError("Refreshed posting does not match the stored vacancy")
+        c.execute(
+            "UPDATE jobs SET source=?, ats=?, company=?, title=?, location=?, remote=?, "
+            "salary_min=?, salary_max=?, url=?, apply_url=?, description=?, posted_at=?, raw=?, updated_at=? "
+            "WHERE id=?",
+            (fresh.source, fresh.ats, fresh.company, fresh.title, fresh.location, int(fresh.remote),
+             fresh.salary_min, fresh.salary_max, fresh.url, fresh.apply_url, fresh.description,
+             fresh.posted_at, json.dumps(fresh.raw), now_iso(), job_id),
+        )
+    return get_job(job_id)
 
 
 def update_scores(scores: dict[str, tuple[float, dict]]) -> None:
@@ -376,7 +419,7 @@ def create_application(job_id: str, method: str, resume_path: str = "") -> int:
 
 def finish_application(app_id: int, status: str, log: list[str], screenshots: list[str],
                        unanswered: list[str], error: str = "", resume_path: str | None = None,
-                       submission_attempted: bool = False) -> None:
+                       submission_attempted: bool = False, questions: list[dict] | None = None) -> None:
     with conn() as c:
         if status == "applied":
             row = c.execute("SELECT submission_attempted FROM applications WHERE id=?", (app_id,)).fetchone()
@@ -386,9 +429,12 @@ def finish_application(app_id: int, status: str, log: list[str], screenshots: li
                 raise ValueError("Cannot record an applied status without a durable submission attempt")
         c.execute(
             "UPDATE applications SET status=?, finished_at=?, log=?, screenshots=?, unanswered=?, error=?, "
-            "resume_path=COALESCE(?, resume_path),submission_attempted=MAX(submission_attempted,?) WHERE id=?",
+            "resume_path=COALESCE(?, resume_path),submission_attempted=MAX(submission_attempted,?), "
+            "questions=?, stage=CASE WHEN ?='applied' AND COALESCE(stage,'')='' THEN 'applied' ELSE stage END, "
+            "stage_updated_at=CASE WHEN ?='applied' AND COALESCE(stage,'')='' THEN ? ELSE stage_updated_at END "
+            "WHERE id=?",
             (status, now_iso(), json.dumps(log), json.dumps(screenshots), json.dumps(unanswered), error,
-             resume_path, int(submission_attempted), app_id))
+             resume_path, int(submission_attempted), json.dumps(questions or []), status, status, now_iso(), app_id))
         new_status = {"applied": "applied", "dry_run": "new", "needs_human": "needs_human", "failed": "failed"}[status]
         c.execute("UPDATE jobs SET status=?,updated_at=? WHERE id=(SELECT job_id FROM applications WHERE id=?)",
                   (new_status, now_iso(), app_id))
@@ -397,22 +443,27 @@ def finish_application(app_id: int, status: str, log: list[str], screenshots: li
 def list_applications(limit: int = 100) -> list[dict]:
     with conn() as c:
         rows = c.execute(
-            "SELECT a.*, j.company, j.title, j.url, j.location, j.ats FROM applications a "
+            "SELECT a.*, j.company, j.title, j.url, j.location, j.ats, j.canonical_key FROM applications a "
             "LEFT JOIN jobs j ON j.id = a.job_id ORDER BY a.id DESC LIMIT ?", (limit,)).fetchall()
-    out = []
-    for r in rows:
-        d = dict(r)
-        for k in ("log", "screenshots", "unanswered"):
+    return [_application_dict(r) for r in rows]
+
+
+def _application_dict(row: sqlite3.Row) -> dict:
+    d = dict(row)
+    for k in ("log", "screenshots", "unanswered", "questions"):
+        try:
             d[k] = json.loads(d.get(k) or "[]")
-        out.append(d)
-    return out
+        except (TypeError, json.JSONDecodeError):
+            d[k] = []
+    return d
 
 
 def get_application(app_id: int) -> dict | None:
-    for a in list_applications(limit=10000):
-        if a["id"] == app_id:
-            return a
-    return None
+    with conn() as c:
+        row = c.execute(
+            "SELECT a.*, j.company, j.title, j.url, j.location, j.ats, j.canonical_key FROM applications a "
+            "LEFT JOIN jobs j ON j.id = a.job_id WHERE a.id=?", (app_id,)).fetchone()
+    return _application_dict(row) if row else None
 
 
 def set_application_note(app_id: int, note: str) -> None:
@@ -462,3 +513,317 @@ def add_event(msg: str, level: str = "info", job_id: str | None = None) -> None:
 def list_events(limit: int = 200) -> list[dict]:
     with conn() as c:
         return [dict(r) for r in c.execute("SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()]
+
+
+# ---------------- prepared applications (drafts) ----------------
+# A draft is pre-application work: a chosen resume plus the questions the
+# employer's form is known to ask, each with a proposed answer. Nothing in a
+# draft has been sent. Sending goes through scheduler.apply_one, so every
+# submission still crosses the durable submit boundary above.
+DRAFT_OPEN = ("preparing", "ready", "needs_answers", "approved")
+DRAFT_STATUSES = DRAFT_OPEN + ("sending", "sent", "practice", "unconfirmed", "error")
+
+
+def _draft_dict(row: sqlite3.Row) -> dict:
+    d = dict(row)
+    try:
+        d["questions"] = json.loads(d.get("questions") or "[]")
+    except (TypeError, json.JSONDecodeError):
+        d["questions"] = []
+    return d
+
+
+_DRAFT_SELECT = (
+    "SELECT d.*, j.company, j.title, j.location, j.remote, j.url, j.apply_url, j.ats, j.score, "
+    "j.salary_min, j.salary_max, j.status AS job_status, j.canonical_key "
+    "FROM drafts d LEFT JOIN jobs j ON j.id=d.job_id"
+)
+
+
+def upsert_draft(job_id: str, *, status: str, resume_path: str = "", resume_note: str = "",
+                 questions: list[dict] | None = None, question_source: str = "", error: str = "") -> int:
+    """Create or refresh the open draft for a job. Sent drafts are never rewritten."""
+    if status not in DRAFT_STATUSES:
+        raise ValueError(f"Unknown draft status: {status}")
+    with conn() as c:
+        job = c.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if job is None:
+            raise ValueError("Job not found")
+        existing = c.execute("SELECT id, status FROM drafts WHERE job_id=?", (job_id,)).fetchone()
+        if existing and existing["status"] not in DRAFT_OPEN + ("error", "practice"):
+            raise ValueError("This application was already sent")
+        payload = (status, now_iso(), resume_path, resume_note, json.dumps(questions or []), question_source, error)
+        if existing:
+            c.execute("UPDATE drafts SET status=?, updated_at=?, resume_path=?, resume_note=?, questions=?, "
+                      "question_source=?, error=?, approved_at=NULL WHERE id=?", (*payload, existing["id"]))
+            draft_id = int(existing["id"])
+        else:
+            cur = c.execute("INSERT INTO drafts(status, updated_at, resume_path, resume_note, questions, "
+                            "question_source, error, job_id, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                            (*payload, job_id, now_iso()))
+            draft_id = int(cur.lastrowid)
+        if job["status"] in ("new", "needs_human", "failed"):
+            c.execute("UPDATE jobs SET status='prepared', updated_at=? WHERE id=?", (now_iso(), job_id))
+    return draft_id
+
+
+def get_draft(draft_id: int) -> dict | None:
+    with conn() as c:
+        row = c.execute(_DRAFT_SELECT + " WHERE d.id=?", (draft_id,)).fetchone()
+    return _draft_dict(row) if row else None
+
+
+def draft_for_job(job_id: str) -> dict | None:
+    with conn() as c:
+        row = c.execute(_DRAFT_SELECT + " WHERE d.job_id=?", (job_id,)).fetchone()
+    return _draft_dict(row) if row else None
+
+
+def list_drafts(statuses: tuple[str, ...] | None = None, limit: int = 1000) -> list[dict]:
+    sql, args = _DRAFT_SELECT, []
+    if statuses:
+        sql += f" WHERE d.status IN ({','.join('?' * len(statuses))})"
+        args.extend(statuses)
+    sql += " ORDER BY COALESCE(j.score, 0) DESC, d.id LIMIT ?"
+    args.append(limit)
+    with conn() as c:
+        return [_draft_dict(r) for r in c.execute(sql, args).fetchall()]
+
+
+def update_draft(draft_id: int, **fields: Any) -> None:
+    allowed = {"status", "resume_path", "resume_note", "questions", "question_source", "error",
+               "application_id", "approved_at"}
+    unknown = set(fields) - allowed
+    if unknown:
+        raise ValueError("Unsupported draft fields: " + ", ".join(sorted(unknown)))
+    if "status" in fields and fields["status"] not in DRAFT_STATUSES:
+        raise ValueError(f"Unknown draft status: {fields['status']}")
+    if "questions" in fields:
+        fields["questions"] = json.dumps(fields["questions"] or [])
+    if not fields:
+        return
+    columns = ", ".join(f"{key}=?" for key in fields)
+    with conn() as c:
+        cur = c.execute(f"UPDATE drafts SET {columns}, updated_at=? WHERE id=?", (*fields.values(), now_iso(), draft_id))
+        if not cur.rowcount:
+            raise ValueError("Draft not found")
+
+
+def draft_counts() -> dict[str, int]:
+    with conn() as c:
+        rows = c.execute("SELECT status, COUNT(*) n FROM drafts GROUP BY status").fetchall()
+    return {r["status"]: r["n"] for r in rows}
+
+
+def delete_draft(draft_id: int) -> None:
+    """Remove an unsent draft and return its job to New."""
+    with conn() as c:
+        row = c.execute("SELECT job_id, status, resume_path FROM drafts WHERE id=?", (draft_id,)).fetchone()
+        if row is None:
+            raise ValueError("Draft not found")
+        if row["status"] in ("sending", "sent", "unconfirmed"):
+            raise ValueError("A sent application cannot be removed")
+        c.execute("DELETE FROM drafts WHERE id=?", (draft_id,))
+        c.execute("UPDATE jobs SET status='new', updated_at=? WHERE id=? AND status='prepared'", (now_iso(), row["job_id"]))
+    _remove_draft_resume(row["resume_path"])
+
+
+def _remove_draft_resume(path: str | None) -> None:
+    """Delete a generated draft resume, never a candidate upload or a sent snapshot."""
+    if not path:
+        return
+    from pathlib import Path
+    candidate = Path(path)
+    drafts_dir = (config.TAILORED / "drafts").resolve()
+    try:
+        if candidate.resolve().parent == drafts_dir and candidate.is_file() and not candidate.is_symlink():
+            candidate.unlink()
+    except OSError:
+        pass
+
+
+def recover_drafts() -> None:
+    """Drafts caught mid-send by a shutdown wait for the candidate, never auto-resend."""
+    with conn() as c:
+        for row in c.execute("SELECT d.id, d.application_id, a.submission_attempted, a.status AS app_status FROM drafts d "
+                             "LEFT JOIN applications a ON a.id=d.application_id WHERE d.status='sending'").fetchall():
+            if row["submission_attempted"]:
+                status, error = "unconfirmed", "Sending was interrupted after Submit. Check the employer site before retrying."
+            else:
+                status, error = "approved", "Sending was interrupted before Submit. Send again when ready."
+            c.execute("UPDATE drafts SET status=?, error=?, updated_at=? WHERE id=?", (status, error, now_iso(), row["id"]))
+        c.execute("UPDATE drafts SET status='error', error='Preparation was interrupted. Prepare it again.', updated_at=? "
+                  "WHERE status='preparing'", (now_iso(),))
+
+
+def reset_unfinished(include_attempts: bool = True) -> dict[str, int]:
+    """Clear unsent work so it can be prepared again with new resume or answers.
+
+    Removes every draft that was not sent, and (optionally) practice runs and
+    attempts that stopped before Submit. Anything that crossed the submit
+    boundary, or was confirmed, is kept: those are history, not drafts.
+    """
+    removed_drafts = removed_attempts = 0
+    resumes: list[str] = []
+    with conn() as c:
+        rows = c.execute("SELECT id, job_id, resume_path FROM drafts WHERE status NOT IN ('sending','sent','unconfirmed')").fetchall()
+        for row in rows:
+            c.execute("DELETE FROM drafts WHERE id=?", (row["id"],))
+            c.execute("UPDATE jobs SET status='new', updated_at=? WHERE id=? AND status='prepared'", (now_iso(), row["job_id"]))
+            resumes.append(row["resume_path"])
+            removed_drafts += 1
+        if include_attempts:
+            attempts = c.execute(
+                "SELECT a.id, a.job_id FROM applications a WHERE a.status IN ('dry_run','failed','needs_human') "
+                "AND COALESCE(a.submission_attempted,0)=0").fetchall()
+            for row in attempts:
+                c.execute("DELETE FROM applications WHERE id=?", (row["id"],))
+                removed_attempts += 1
+            # Return those vacancies to New unless any record for the same
+            # posting reached Submit (those must stay review-only).
+            c.execute(
+                "UPDATE jobs SET status='new', updated_at=? WHERE status IN ('needs_human','failed') AND NOT EXISTS ("
+                "SELECT 1 FROM applications a JOIN jobs j2 ON j2.id=a.job_id WHERE j2.canonical_key=jobs.canonical_key "
+                "AND (a.status IN ('applied','queued','running') OR a.submission_attempted=1))", (now_iso(),))
+    for path in resumes:
+        _remove_draft_resume(path)
+    return {"drafts": removed_drafts, "attempts": removed_attempts}
+
+
+# ---------------- tracker (submitted applications and their stage) ----------------
+STAGES = ("applied", "assessment", "interview", "offer", "rejected", "withdrawn")
+STAGE_RANK = {"": 0, "applied": 1, "assessment": 2, "interview": 3, "offer": 4, "rejected": 5, "withdrawn": 5}
+
+
+def list_tracker(limit: int = 5000) -> list[dict]:
+    """One row per vacancy with a submitted (or attempted) application, newest first."""
+    with conn() as c:
+        rows = c.execute(
+            "SELECT a.id, a.job_id, a.status, a.method, a.started_at, a.finished_at, a.submission_attempted, "
+            "a.stage, a.stage_source, a.stage_updated_at, a.candidate_note, a.resume_path, "
+            "j.company, j.title, j.location, j.remote, j.salary_min, j.salary_max, j.url, j.ats, j.source, "
+            "j.score, j.posted_at, j.canonical_key FROM applications a JOIN jobs j ON j.id=a.job_id "
+            "WHERE (a.status='applied' OR a.submission_attempted=1) "
+            "AND a.id=(SELECT MAX(a2.id) FROM applications a2 JOIN jobs j3 ON j3.id=a2.job_id "
+            "          WHERE j3.canonical_key=j.canonical_key AND (a2.status='applied' OR a2.submission_attempted=1)) "
+            "ORDER BY COALESCE(a.finished_at, a.started_at) DESC LIMIT ?", (limit,)).fetchall()
+    out = []
+    for row in rows:
+        d = dict(row)
+        d["remote"] = bool(d.get("remote"))
+        d["stage"] = d.get("stage") or ("applied" if d["status"] == "applied" else "")
+        out.append(d)
+    return out
+
+
+def set_application_stage(app_id: int, stage: str, source: str = "manual") -> bool:
+    """Record a hiring stage. Email updates only move forward and never override a manual choice."""
+    if stage not in STAGES:
+        raise ValueError(f"Unknown stage: {stage}")
+    if source not in ("manual", "email"):
+        raise ValueError("Unknown stage source")
+    with conn() as c:
+        row = c.execute("SELECT stage, stage_source, status, submission_attempted FROM applications WHERE id=?",
+                        (app_id,)).fetchone()
+        if row is None:
+            raise ValueError("Application record not found")
+        if row["status"] != "applied" and not row["submission_attempted"]:
+            raise ValueError("Only submitted applications have a hiring stage")
+        current = row["stage"] or ""
+        # An inbox signal can only advance a record. It never reopens an
+        # offer or a closed application, and never undoes a manual choice.
+        if source == "email" and (current in ("offer", "rejected", "withdrawn")
+                                  or STAGE_RANK[stage] <= STAGE_RANK.get(current, 0)):
+            return False
+        c.execute("UPDATE applications SET stage=?, stage_source=?, stage_updated_at=? WHERE id=?",
+                  (stage, source, now_iso(), app_id))
+    return True
+
+
+def add_manual_application(*, company: str, title: str, url: str = "", location: str = "",
+                           salary_min: int | None = None, salary_max: int | None = None,
+                           applied_at: str | None = None, stage: str = "applied") -> int:
+    """Track an application the candidate sent outside Starployment."""
+    from .models import Job
+    company, title = company.strip(), title.strip()
+    if not company or not title:
+        raise ValueError("Company and role are required")
+    if stage not in STAGES:
+        raise ValueError(f"Unknown stage: {stage}")
+    import hashlib
+    stamp = applied_at or now_iso()
+    link = url.strip() or f"manual://{hashlib.sha1(f'{company}|{title}|{stamp}'.encode()).hexdigest()[:16]}"
+    job = Job(source="manual", ats="unknown", company=company, title=title, url=link, location=location.strip(),
+              salary_min=salary_min, salary_max=salary_max, status="applied")
+    upsert_jobs([job])
+    with conn() as c:
+        c.execute("UPDATE jobs SET status='applied', updated_at=? WHERE id=?", (now_iso(), job.id))
+        cur = c.execute(
+            "INSERT INTO applications(job_id, status, method, started_at, finished_at, submission_attempted, stage, "
+            "stage_source, stage_updated_at, log) VALUES (?, 'applied', 'manual', ?, ?, 1, ?, 'manual', ?, ?)",
+            (job.id, stamp, stamp, stage, now_iso(), json.dumps(["Recorded manually by the candidate"])))
+        return int(cur.lastrowid)
+
+
+# ---------------- inbox events ----------------
+def record_mail_event(*, message_key: str, received_at: str, sender: str, subject: str, stage: str,
+                      application_id: int | None, confidence: float) -> bool:
+    """Store only the sender, subject, date, and classification; never message bodies."""
+    with conn() as c:
+        cur = c.execute(
+            "INSERT OR IGNORE INTO mail_events(message_key, received_at, sender, subject, stage, application_id, "
+            "confidence, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (message_key, received_at, sender[:320], subject[:300], stage, application_id, confidence, now_iso()))
+        return bool(cur.rowcount)
+
+
+def known_mail_keys() -> set[str]:
+    with conn() as c:
+        return {r["message_key"] for r in c.execute("SELECT message_key FROM mail_events").fetchall()}
+
+
+def list_mail_events(limit: int = 200) -> list[dict]:
+    with conn() as c:
+        rows = c.execute(
+            "SELECT m.*, j.company, j.title FROM mail_events m LEFT JOIN applications a ON a.id=m.application_id "
+            "LEFT JOIN jobs j ON j.id=a.job_id WHERE m.dismissed=0 ORDER BY m.received_at DESC LIMIT ?", (limit,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---------------- resume files (role-specific uploads) ----------------
+def add_resume_file(path: str, label: str, category: str = "general") -> int:
+    with conn() as c:
+        first = c.execute("SELECT COUNT(*) FROM resume_files").fetchone()[0] == 0
+        cur = c.execute("INSERT OR REPLACE INTO resume_files(path, label, category, is_default, added_at) "
+                        "VALUES (?,?,?,?,?)", (path, label, category, int(first), now_iso()))
+        return int(cur.lastrowid)
+
+
+def list_resume_files() -> list[dict]:
+    with conn() as c:
+        rows = c.execute("SELECT * FROM resume_files ORDER BY is_default DESC, category, label").fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_resume_file(file_id: int, *, category: str | None = None, label: str | None = None,
+                       is_default: bool | None = None) -> None:
+    with conn() as c:
+        if c.execute("SELECT 1 FROM resume_files WHERE id=?", (file_id,)).fetchone() is None:
+            raise ValueError("Resume file not found")
+        if category is not None:
+            c.execute("UPDATE resume_files SET category=? WHERE id=?", (category, file_id))
+        if label is not None:
+            c.execute("UPDATE resume_files SET label=? WHERE id=?", (label.strip() or "Resume", file_id))
+        if is_default:
+            c.execute("UPDATE resume_files SET is_default=CASE WHEN id=? THEN 1 ELSE 0 END", (file_id,))
+
+
+def remove_resume_file(file_id: int) -> str | None:
+    with conn() as c:
+        row = c.execute("SELECT path, is_default FROM resume_files WHERE id=?", (file_id,)).fetchone()
+        if row is None:
+            return None
+        c.execute("DELETE FROM resume_files WHERE id=?", (file_id,))
+        if row["is_default"]:
+            c.execute("UPDATE resume_files SET is_default=1 WHERE id=(SELECT MIN(id) FROM resume_files)")
+        return row["path"]

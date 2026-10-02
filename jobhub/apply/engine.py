@@ -192,6 +192,7 @@ class FormEngine:
         self.log: list[str] = []
         self.screenshots: list[str] = []
         self.unanswered: list[str] = []
+        self.question_details: list[dict] = []
         self.answered: dict[str, str] = {}
         self.submission_attempted = False
         self._attempt_id = uuid.uuid4().hex[:10]
@@ -242,7 +243,7 @@ class FormEngine:
                     self._shot(page, "exception")
                 detail = str(exc).splitlines()[0][:240]
                 if re.search(r"ProcessSingleton|SingletonLock|profile.*in use", str(exc), re.I):
-                    return self._result("needs_human", "The JobHub browser profile is already in use. Close the other JobHub browser and retry.")
+                    return self._result("needs_human", "The Starployment browser profile is already in use. Close the other Starployment browser and retry.")
                 return self._result("needs_human" if self.submission_attempted else "failed", f"Browser could not complete the application: {detail}")
             finally:
                 if ctx is not None:
@@ -433,9 +434,23 @@ class FormEngine:
         return bool(field["empty"])
 
     def _collect_unanswered(self, fields: list[dict]) -> None:
+        missing = [f for f in fields
+                   if self._missing(f) and (f["required"] or (f["idx"] not in self._filled and f["kind"] not in {"file", "checkbox"}))]
         self.unanswered = list(dict.fromkeys(
-            f.get("groupLabel", f["label"]) + (" (required)" if f["required"] else "") for f in fields
-            if self._missing(f) and (f["required"] or (f["idx"] not in self._filled and f["kind"] not in {"file", "checkbox"}))))
+            f.get("groupLabel", f["label"]) + (" (required)" if f["required"] else "") for f in missing))
+        # The question text, type, and choices let a reviewer answer later
+        # without reopening the employer's form. Values are never recorded.
+        details: dict[str, dict] = {}
+        for f in missing:
+            label = f.get("groupLabel", f["label"])
+            entry = details.setdefault(label, {"label": label, "kind": f["kind"], "required": bool(f["required"]),
+                                               "options": list(f.get("options") or [])})
+            if "groupLabel" in f:
+                entry["kind"] = "checkbox"
+                member = f["label"].rpartition(" - ")[-1]
+                if member and member not in entry["options"]:
+                    entry["options"].append(member)
+        self.question_details = list(details.values())
 
     def _fill_fields(self, page: Page, fields: list[dict]) -> None:
         questions = [Q(label=f["label"], kind=f["kind"], options=f.get("options") or [],
@@ -893,4 +908,4 @@ class FormEngine:
         self._log(f"Result: {status}: {message}")
         return ApplyResult(status=status, message=message, screenshots=self.screenshots, log=self.log,
                            unanswered=self.unanswered, resume_path=self.resume_path,
-                           submission_attempted=self.submission_attempted)
+                           submission_attempted=self.submission_attempted, questions=self.question_details)

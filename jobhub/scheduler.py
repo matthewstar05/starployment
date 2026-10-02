@@ -15,7 +15,7 @@ from .models import ApplyResult, Job, job_fingerprint
 from .readiness import preflight_job
 from .scoring import score_all
 from .sources import SOURCES
-from .tailor import resume_for_job
+from .tailor import resume_for_job, snapshot_resume_for_application
 
 _apply_lock = threading.Lock()
 _scan_lock = threading.Lock()
@@ -34,6 +34,10 @@ STATE = State()
 log = logging.getLogger(__name__)
 
 
+class PostingRefreshError(RuntimeError):
+    """The current public ATS posting could not be verified safely."""
+
+
 def rescore() -> None:
     """Refresh existing rankings after candidate or targeting preferences change."""
     jobs = db.list_jobs(status="all", limit=100000)
@@ -41,18 +45,30 @@ def rescore() -> None:
 
 
 def enrich_job(job: Job) -> Job:
-    """Fill a missing ATS description from its fixed public posting API."""
-    if job.description.strip() or job.ats not in ("greenhouse", "lever", "ashby"):
+    """Refresh supported ATS metadata before drafting or applying.
+
+    The public endpoint is derived from the validated board URL. A successful
+    response must still identify the same vacancy; otherwise the stored posting
+    is left untouched and the caller must stop.
+    """
+    if job.ats not in ("greenhouse", "lever", "ashby"):
         return job
     try:
         from .sources.import_job import fetch_job
         enriched = fetch_job(job.url)
-        db.upsert_jobs([enriched])
-        return db.get_job(job.id) or enriched
+        if enriched.ats != job.ats or job_fingerprint(enriched) != job_fingerprint(job):
+            raise PostingRefreshError("The public posting no longer matches this saved vacancy. Review it before continuing.")
+        refreshed = db.refresh_job_metadata(job.id, enriched)
+        score, detail = score_all([refreshed], db.get_profile(), db.get_settings())[refreshed.id]
+        db.update_scores({refreshed.id: (score, detail)})
+        refreshed.score, refreshed.score_json = score, detail
+        return refreshed
     except Exception as error:  # noqa: BLE001
-        log.warning("Could not enrich job %s before tailoring: %s", job.id, error)
-        db.add_event(f"Description enrichment failed: {error}", "warn", job.id)
-        return job
+        log.warning("Could not refresh public posting %s: %s", job.id, error)
+        db.add_event(f"Current posting refresh failed: {error}", "warn", job.id)
+        if isinstance(error, PostingRefreshError):
+            raise
+        raise PostingRefreshError("Could not verify the current public posting. Review the listing before continuing.") from error
 
 
 def scan_once() -> dict:
@@ -133,8 +149,15 @@ def queue_application(job_id: str) -> int:
     return db.reserve_application(job_id)
 
 
-def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | None = None) -> dict:
-    """Reserve once, record before submitting, and persist the outcome atomically."""
+def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | None = None,
+              require_eligible: bool = False, extra_answers: dict | None = None,
+              resume_override: str | None = None) -> dict:
+    """Reserve once, record before submitting, and persist the outcome atomically.
+
+    ``extra_answers`` are answers the candidate approved for this one
+    application (question label -> answer). They apply to this attempt only.
+    ``resume_override`` is the resume chosen when the application was prepared.
+    """
     if application_id is None:
         try:
             application_id = queue_application(job_id)
@@ -151,15 +174,37 @@ def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | No
             if job is None or profile is None:
                 raise ValueError("Job or profile no longer exists")
             settings = db.get_settings()
+            if extra_answers:
+                import copy
+                settings = copy.deepcopy(settings)
+                answers = settings.setdefault("answers", {})
+                answers["field_answers"] = {**(answers.get("field_answers") or {}), **extra_answers}
             job = enrich_job(job)
+            if require_eligible:
+                settings = db.get_settings()
+                min_score = float(settings.get("min_score_to_apply", 60))
+                if (job.score_json.get("auto_apply_eligible") is not True or job.score < min_score
+                        or not settings.get("auto_apply") or not settings.get("setup_complete")):
+                    raise PostingRefreshError(
+                        "The current posting no longer meets your automatic application criteria. "
+                        "Review the refreshed role before applying."
+                    )
             db.add_event(f"Applying: {job.company} / {job.title}", "info", job_id)
-            resume = resume_for_job(profile, job, settings)
+            from pathlib import Path
+            chosen = resume_override if resume_override and Path(resume_override).is_file() else None
+            resume = snapshot_resume_for_application(
+                chosen or resume_for_job(profile, job, settings), application_id,
+            )
             result = apply_to_job(job, profile, settings, resume, dry_run=dry_run)
             if result.status not in ("applied", "dry_run", "needs_human", "failed"):
                 raise ValueError(f"Unknown application outcome: {result.status}")
         except Exception as error:  # noqa: BLE001
-            result = ApplyResult(status="failed", message=str(error), resume_path=resume,
-                                 log=[traceback.format_exc()[-2000:]])
+            if isinstance(error, PostingRefreshError):
+                result = ApplyResult(status="needs_human", message=str(error), resume_path=resume,
+                                     log=[traceback.format_exc()[-2000:]])
+            else:
+                result = ApplyResult(status="failed", message=str(error), resume_path=resume,
+                                     log=[traceback.format_exc()[-2000:]])
         try:
             # If an exception follows a submit click, preserve the uncertainty rather than offering a retry.
             record = db.get_application(application_id)
@@ -179,7 +224,8 @@ def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | No
                 )
             db.finish_application(application_id, result.status, result.log, result.screenshots, result.unanswered,
                                   "" if result.status in ("applied", "dry_run") else result.message,
-                                  result.resume_path or resume or None, result.submission_attempted)
+                                  result.resume_path or resume or None, result.submission_attempted,
+                                  questions=result.questions)
             level = {"applied": "success", "dry_run": "info", "needs_human": "warn", "failed": "error"}[result.status]
             db.add_event(f"{result.status}: {job_id}: {result.message}", level, job_id)
             return {"application_id": application_id, **result.model_dump()}
@@ -187,12 +233,36 @@ def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | No
             STATE.running_apply = None
 
 
+def _auto_apply_preflight_window(candidates: list[Job], budget: int) -> list[Job]:
+    """Return a bounded, rotating slice of ranked candidates for public preflight.
+
+    The scan run id is durable across restarts and advances once per scheduled
+    scan. Rotating the probe window prevents a fixed set of high-ranked forms
+    with missing answers from starving roles later in the ranked list. The
+    returned slice remains in match order so answerable roles in the slice keep
+    the normal ranking preference.
+    """
+    if len(candidates) <= budget:
+        return candidates
+    with db.conn() as connection:
+        row = connection.execute("SELECT COALESCE(MAX(id), 0) AS id FROM runs").fetchone()
+    scan_id = int(row["id"] if row else 0)
+    start = (max(0, scan_id - 1) * budget) % len(candidates)
+    end = start + budget
+    if end <= len(candidates):
+        return candidates[start:end]
+    # Wrap at the end of the ranked list, then restore its original order.
+    selected = candidates[start:] + candidates[:end - len(candidates)]
+    positions = {job.id: index for index, job in enumerate(candidates)}
+    return sorted(selected, key=lambda job: positions[job.id])
+
+
 def auto_apply_batch() -> list[dict]:
     settings = db.get_settings()
     if not settings.get("auto_apply") or not settings.get("setup_complete"):
         return []
     rescore()
-    candidates = [job for job in db.list_jobs(status="new", min_score=float(settings.get("min_score_to_apply", 60)), limit=1000)
+    candidates = [job for job in db.list_jobs(status="new", min_score=float(settings.get("min_score_to_apply", 60)), limit=100000)
                   if job.ats in ("greenhouse", "ashby", "lever") and job.score_json.get("auto_apply_eligible", True)]
     results = []
     attempted_companies: set[str] = set()
@@ -201,7 +271,8 @@ def auto_apply_batch() -> list[dict]:
     # A public Greenhouse preflight can reject an unanswerable form without
     # reserving the browser or using one of this cycle's application slots.
     # Bound public API requests even when the candidate has few saved answers.
-    for job in candidates[:max(24, max_applications * 8)]:
+    preflight_budget = max(24, max_applications * 8)
+    for job in _auto_apply_preflight_window(candidates, preflight_budget):
         if len(results) >= max_applications:
             break
         if not db.get_settings().get("auto_apply") or STATE.stop:
@@ -214,7 +285,7 @@ def auto_apply_batch() -> list[dict]:
             log.info("Skipped %s before application: required answers missing for %s",
                      job.id, ", ".join(readiness.missing))
             continue
-        result = apply_one(job.id)
+        result = apply_one(job.id, require_eligible=True)
         results.append(result)
         if company_key:
             attempted_companies.add(company_key)

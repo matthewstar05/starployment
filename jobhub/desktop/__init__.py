@@ -1,4 +1,4 @@
-"""Qt desktop client for JobHub."""
+"""Qt desktop client for Starployment."""
 
 from .ui import JobHubWindow, SetupWizard
 

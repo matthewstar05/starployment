@@ -7,13 +7,13 @@ from pathlib import Path
 from PySide6.QtCore import QPointF, QRectF, Qt, QVariantAnimation, Signal
 from PySide6.QtGui import QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QFileDialog,
     QFrame,
     QHBoxLayout,
     QLineEdit,
     QMessageBox,
-    QPlainTextEdit,
     QScrollArea,
     QSpinBox,
     QTextEdit,
@@ -21,7 +21,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from .editors import SUGGESTED_FACTS, SUGGESTED_QUESTIONS, KeyValueEditor, TagEditor, yes_no_control
 from .icons import icon_pixmap
+from .native_glass import prepare_window
 from .theme import current_colors
 from .widgets import (
     FadeStack,
@@ -41,11 +43,21 @@ from .widgets import (
 )
 
 STEPS = (
-    ("Resume", "Start with your resume", "JobHub reads it on this computer and fills in what it can."),
-    ("About you", "Confirm your details", "Employers see these facts. Correct anything the resume parser missed."),
-    ("Targeting", "Choose what to look for", "Titles, places, and sources decide which roles JobHub ranks for you."),
-    ("Answers", "Answer common questions", "Only answers you enter are used. Unknown facts stay blank and pause an application."),
+    ("Resume", "Start with your resume", "Starployment reads it on this computer and fills in what it can. "
+                                        "Your jobs, projects, and skills become your resume builder."),
+    ("About you", "Confirm your details", "Employers see these facts. Correct anything the resume reader missed."),
+    ("Targeting", "Choose what to look for", "Type a title or place and press Return. Starployment ranks every role "
+                                              "it finds against these."),
+    ("Answers", "Answer common questions", "Only answers you set are used. Anything left unset pauses an application "
+                                            "and asks you."),
+    ("Connect", "Connect your accounts", "Optional, and you can do it later in Settings."),
 )
+TITLE_SUGGESTIONS = ["Software Engineer", "Software Developer", "Backend Engineer", "Frontend Engineer",
+                     "Full Stack Engineer", "Data Scientist", "Data Analyst", "Data Engineer", "Machine Learning Engineer",
+                     "Quantitative Developer", "Quantitative Researcher", "Research Engineer", "Product Manager",
+                     "New Grad", "Entry Level"]
+PLACE_SUGGESTIONS = ["Remote", "San Francisco", "New York", "Seattle", "Los Angeles", "Chicago", "Boston", "Austin",
+                     "Denver", "Washington, DC", "Atlanta", "San Diego", "Toronto", "London"]
 
 
 def _scroll(widget: QWidget) -> QScrollArea:
@@ -249,7 +261,8 @@ class SetupWizard(QDialog):
         pending_questions: list[str] | None = None,
     ):
         super().__init__(parent)
-        self.setWindowTitle("Set up JobHub")
+        self.setWindowTitle("Set up Starployment")
+        prepare_window(self)
         self.resize(860, 700)
         self.setMinimumSize(720, 560)
         self.profile = profile or {}
@@ -275,12 +288,14 @@ class SetupWizard(QDialog):
         self.personal = QWidget()
         self.targeting = QWidget()
         self.answers = QWidget()
-        for page in (self.resume, self.personal, self.targeting, self.answers):
+        self.connect_page = QWidget()
+        for page in (self.resume, self.personal, self.targeting, self.answers, self.connect_page):
             self.tabs.addWidget(_scroll(page))
         self._build_personal()
         self._build_resume()
         self._build_targeting()
         self._build_answers()
+        self._build_connect()
 
         actions = QHBoxLayout()
         actions.setSpacing(8)
@@ -345,9 +360,10 @@ class SetupWizard(QDialog):
             self.resume_note.setText("Saved resume. Choose another PDF to replace it.")
         lay.addWidget(self.drop_zone)
         lay.addWidget(label(
-            "Choose a text-based PDF. Review what JobHub extracts on the next step.", "subtitle"))
+            "Choose a text-based PDF. Review what Starployment extracts on the next step.", "subtitle"))
         lay.addWidget(label(
-            "Next: confirm your details, choose target roles, then add application answers.", "caption"))
+            "Next: confirm your details, choose what to look for, add common answers, and optionally connect Luna "
+            "and your inbox.", "caption"))
         lay.addStretch()
 
     def _build_personal(self) -> None:
@@ -371,17 +387,16 @@ class SetupWizard(QDialog):
                 self.fields[key] = edit
                 group.add_row(name, edit)
             lay.addWidget(group)
-        more = FormGroup("More about you", "Custom facts: one per line, as Fact name | value.")
+        more = FormGroup("More about you")
         more.add_row("Summary", self._text_field("summary"))
-        self.custom_facts = QTextEdit()
-        self.custom_facts.setAcceptRichText(False)
-        self.custom_facts.setFixedHeight(86)
-        self.custom_facts.setPlaceholderText("Optional facts, one per line: Fact name | value")
-        self.custom_facts.setPlainText(
-            "\n".join(f"{k} | {v}" for k, v in (self.profile.get("custom_facts") or {}).items())
-        )
-        more.add_row("Custom facts", self.custom_facts)
         lay.addWidget(more)
+        facts = FormGroup("Other facts", "Anything an application might ask that is not above. Pick a label or "
+                                         "type your own, then fill in the value.")
+        self.custom_facts = KeyValueEditor(suggestions=SUGGESTED_FACTS, key_placeholder="Label",
+                                           value_placeholder="Your answer", add_text="Add a fact")
+        self.custom_facts.set_values(dict(self.profile.get("custom_facts") or {}))
+        facts.add_widget(self.custom_facts)
+        lay.addWidget(facts)
         lay.addStretch()
 
     def _text_field(self, key: str, rows: int = 3) -> QTextEdit:
@@ -394,23 +409,17 @@ class SetupWizard(QDialog):
     def _build_targeting(self) -> None:
         s = self.settings
         lay = _page_layout(self.targeting)
-
-        def lines(values, height: int) -> QPlainTextEdit:
-            edit = QPlainTextEdit("\n".join(values))
-            edit.setFixedHeight(height)
-            return edit
-
-        self.target_titles = lines(s.get("target_titles", []), 88)
-        self.target_titles.setPlaceholderText("One title per line, e.g. Software Engineer")
-        self.locations = lines(s.get("preferred_locations", []), 88)
-        self.locations.setPlaceholderText("One place per line, e.g. San Francisco, CA")
-        self.exclude_words = lines(s.get("exclude_title_words", []), 70)
-        self.exclude_words.setPlaceholderText("Words that rule a title out, e.g. Senior")
+        self.target_titles = TagEditor("Add a title", TITLE_SUGGESTIONS)
+        self.target_titles.set_values(list(s.get("target_titles") or []))
+        self.locations = TagEditor("Add a place", PLACE_SUGGESTIONS)
+        self.locations.set_values(list(s.get("preferred_locations") or []))
+        self.exclude_words = TagEditor("Add a word")
+        self.exclude_words.set_values(list(s.get("exclude_title_words") or []))
         self.remote_ok = ToggleSwitch("Include remote roles")
         self.remote_ok.setChecked(bool(s.get("remote_ok", True)))
         self.include_internships = ToggleSwitch("Include internships and co-ops")
         self.include_internships.setChecked(bool(s.get("include_internships", False)))
-        self.auto_apply = ToggleSwitch("Allow unattended applications when eligible")
+        self.auto_apply = ToggleSwitch("Also apply automatically to eligible matches, without review")
         self.auto_apply.setChecked(bool(s.get("auto_apply", False)))
         self.min_salary = QSpinBox()
         self.min_salary.setRange(0, 10_000_000)
@@ -427,20 +436,10 @@ class SetupWizard(QDialog):
         self.confirm_years_experience.setChecked(
             "years_experience" in saved_answers.get("confirmed_fields", [])
         )
-        jobspy = s.get("jobspy", {})
-        self.jobspy_terms = lines(jobspy.get("search_terms", []), 76)
-        self.jobspy_location = QLineEdit(str(jobspy.get("location", "")))
-        self.jobspy_location.setPlaceholderText("Blank rotates through your preferred locations")
-        self.jobspy_country = QLineEdit(str(jobspy.get("country_indeed", "usa")))
-        companies = s.get("companies", {})
-        self.greenhouse_companies = lines(companies.get("greenhouse", []), 70)
-        self.lever_companies = lines(companies.get("lever", []), 70)
-        self.ashby_companies = lines(companies.get("ashby", []), 70)
-
         roles = FormGroup("Roles")
-        roles.add_row("Target titles", self.target_titles)
-        roles.add_row("Preferred locations", self.locations)
-        roles.add_row("Exclude title words", self.exclude_words)
+        roles.add_row("Job titles", self.target_titles)
+        roles.add_row("Places", self.locations)
+        roles.add_row("Leave out titles with", self.exclude_words)
         roles.add_widget(self.remote_ok)
         roles.add_widget(self.include_internships)
         lay.addWidget(roles)
@@ -449,15 +448,10 @@ class SetupWizard(QDialog):
         experience.add_row("Professional experience", Stepper(self.years_experience, width=104))
         experience.add_widget(self.confirm_years_experience)
         lay.addWidget(experience)
-        sources = FormGroup("Sources", "Board slugs are the company part of a public job-board URL, one per line.")
-        sources.add_row("JobSpy search terms", self.jobspy_terms)
-        sources.add_row("JobSpy location", self.jobspy_location)
-        sources.add_row("Indeed country", self.jobspy_country)
-        sources.add_row("Greenhouse boards", self.greenhouse_companies)
-        sources.add_row("Lever boards", self.lever_companies)
-        sources.add_row("Ashby boards", self.ashby_companies)
-        lay.addWidget(sources)
-        autonomy = FormGroup("Autonomy", "Off by default. You can change this any time in Settings.")
+        lay.addWidget(label("Starployment scans dozens of public Greenhouse, Lever, and Ashby company boards plus "
+                            "major job sites. Edit the list any time in Settings → Company job boards.", "caption"))
+        autonomy = FormGroup("Autonomy", "Off by default. With it off, press Apply on Overview to prepare "
+                                         "applications and approve each one before it is sent.")
         autonomy.add_widget(self.auto_apply)
         lay.addWidget(autonomy)
         lay.addStretch()
@@ -466,46 +460,65 @@ class SetupWizard(QDialog):
         a = self.settings.get("answers", {})
         lay = _page_layout(self.answers)
         self.pending_hint = label(
-            "These questions came from an application. Fill only answers you know; blank lines are ignored.",
+            "These questions came from an application. Answer only what you know; blank answers are ignored.",
             "questions",
         )
         self.pending_hint.hide()
         lay.addWidget(self.pending_hint)
+        eligibility = FormGroup("Eligibility", "Leave “Not set” if you are unsure.")
+        self.yes_no = {}
+        for key, title in (("work_authorized_us", "Authorized to work in the US"),
+                           ("requires_sponsorship", "Needs visa sponsorship"),
+                           ("us_citizen_or_permanent_resident", "US citizen or permanent resident"),
+                           ("willing_to_relocate", "Willing to relocate")):
+            control = yes_no_control()
+            control.setAccessibleName(title)
+            control.setCurrentIndex(max(0, control.findData(str(a.get(key) or ""))))
+            self.yes_no[key] = control
+            eligibility.add_row(title, control)
+        lay.addWidget(eligibility)
         common = FormGroup("Common questions", "Leave anything you are unsure of blank.")
-        self.answer_fields: dict[str, QLineEdit] = {}
-        for key, title, placeholder in [
-            ("work_authorized_us", "Authorized to work in the US", "Yes or No"),
-            ("requires_sponsorship", "Requires sponsorship", "Yes or No"),
-            ("us_citizen_or_permanent_resident", "US citizen or permanent resident", "Yes or No"),
-            ("salary_expectation", "Salary expectation", "e.g. $120,000"),
-            ("available_start", "Available start date", "e.g. June 2026"),
-            ("how_heard", "How did you hear about us?", "e.g. Company website"),
-            ("willing_to_relocate", "Willing to relocate", "Yes or No"),
-            ("preferred_name", "Preferred name", ""),
-            ("pronouns", "Pronouns", ""),
+        self.answer_fields: dict[str, QLineEdit | QComboBox] = {}
+        for key, title, placeholder, suggestions in [
+            ("salary_expectation", "Salary expectation", "e.g. $120,000 or Negotiable", ()),
+            ("available_start", "Available start date", "e.g. June 2026", ()),
+            ("how_heard", "How did you hear about us?", "Choose or type",
+             ("Company website", "LinkedIn", "Job board", "Referral", "University career site")),
+            ("preferred_name", "Preferred name", "Only if different from your first name", ()),
+            ("pronouns", "Pronouns", "Optional", ("she/her", "he/him", "they/them")),
         ]:
-            edit = QLineEdit(str(a.get(key, "")))
-            edit.setPlaceholderText(placeholder)
+            if suggestions:
+                edit = QComboBox()
+                edit.setEditable(True)
+                edit.addItems(["", *suggestions])
+                edit.setCurrentText(str(a.get(key, "")))
+                edit.lineEdit().setPlaceholderText(placeholder)
+            else:
+                edit = QLineEdit(str(a.get(key, "")))
+                edit.setPlaceholderText(placeholder)
             edit.setAccessibleName(title)
             self.answer_fields[key] = edit
             common.add_row(title, edit)
         lay.addWidget(common)
-        bank = FormGroup(
-            "Custom question bank",
-            "One per line: Question | Answer. Use true or false for checkboxes and \\n for longer answers.",
-        )
-        self.custom_answers = QTextEdit()
-        self.custom_answers.setAcceptRichText(False)
-        self.custom_answers.setMinimumHeight(190)
-        self.custom_answers.setPlaceholderText("Why do you want to work here? | …")
-        self.custom_answers.setPlainText(
-            "\n".join(
-                f"{k} | {str(v).replace(chr(10), r'\n')}"
-                for k, v in a.get("field_answers", {}).items()
-            )
-        )
+        bank = FormGroup("Question bank", "Questions employers ask word for word, with your answers. Pick a "
+                                          "common question or type your own.")
+        self.custom_answers = KeyValueEditor(suggestions=SUGGESTED_QUESTIONS, multiline=True,
+                                             key_placeholder="Question", value_placeholder="Your answer",
+                                             add_text="Add a question")
+        self.custom_answers.set_values(dict(a.get("field_answers") or {}))
         bank.add_widget(self.custom_answers)
         lay.addWidget(bank)
+        lay.addStretch()
+
+    def _build_connect(self) -> None:
+        from .views.connections import EmailConnection, LunaConnection
+        lay = _page_layout(self.connect_page)
+        self.luna = LunaConnection(title="Luna (optional)", compact=True)
+        self.luna.set_values(self.settings)
+        self.email = EmailConnection(compact=True)
+        self.email.set_values(self.settings)
+        lay.addWidget(self.luna)
+        lay.addWidget(self.email)
         lay.addStretch()
 
     # ------------------------------------------------------------- behavior
@@ -536,82 +549,61 @@ class SetupWizard(QDialog):
             self._summary_edit.setPlainText(preview.summary.strip())
         self.resume_path.setText(path)
         self.resume_file_label.setText(Path(path).name)
-        self.resume_note.setText("Ready. Review what JobHub found in About you.")
+        self.resume_note.setText("Ready. Review what Starployment found in About you.")
         self.resume_requested.emit(path)
         self.resume_selected.emit(path)
         self.tabs.setCurrentIndex(1)
 
     def add_pending_questions(self, questions: list[str]) -> None:
         """Place unanswered employer prompts into the candidate's answer bank."""
-        lines = self.custom_answers.toPlainText().splitlines()
-        known = {line.split("|", 1)[0].strip().casefold() for line in lines if "|" in line}
+        known = {row.pair()[0].casefold() for row in self.custom_answers.rows}
         added = 0
         for question in questions:
             text = re.sub(r"\s*\(required\)\s*$", "", str(question), flags=re.I)
             text = " ".join(text.split()).strip()
-            if not text or text.casefold() in known or "|" in text:
+            if not text or text.casefold() in known:
                 continue
-            lines.append(f"{text} | ")
+            self.custom_answers.add_row(text, "")
             known.add(text.casefold())
             added += 1
         if added:
-            self.custom_answers.setPlainText("\n".join(lines))
             self.pending_hint.show()
-
-    @staticmethod
-    def _lines(edit: QPlainTextEdit) -> list[str]:
-        return [x.strip() for x in edit.toPlainText().splitlines() if x.strip()]
 
     def _submit(self) -> None:
         profile = {key: edit.text().strip() for key, edit in self.fields.items()}
         profile["summary"] = self._summary_edit.toPlainText().strip()
         profile["resume_path"] = self.resume_path.text().strip()
-        facts = {}
-        for line in self.custom_facts.toPlainText().splitlines():
-            if "|" in line:
-                k, v = line.split("|", 1)
-                if k.strip():
-                    facts[k.strip()] = v.strip()
-        profile["custom_facts"] = facts
+        profile["custom_facts"] = self.custom_facts.values()
         custom = {}
-        for line in self.custom_answers.toPlainText().splitlines():
-            if "|" in line:
-                k, v = line.split("|", 1)
-                if k.strip() and v.strip():
-                    answer = v.strip()
-                    custom[k.strip()] = (
-                        answer.casefold() == "true"
-                        if answer.casefold() in {"true", "false"}
-                        else answer.replace(r"\n", "\n")
-                    )
-        answers = {key: edit.text().strip() for key, edit in self.answer_fields.items()}
+        for question, answer in self.custom_answers.values().items():
+            lowered = answer.casefold()
+            custom[question] = lowered == "true" if lowered in {"true", "false"} else answer
+        answers = {key: str(control.currentData() or "") for key, control in self.yes_no.items()}
+        for key, edit in self.answer_fields.items():
+            answers[key] = (edit.currentText() if isinstance(edit, QComboBox) else edit.text()).strip()
         answers["years_experience"] = (
             str(self.years_experience.value()) if self.confirm_years_experience.isChecked() else ""
         )
         answers["field_answers"] = custom
-        answers["confirmed_fields"] = [key for key, edit in self.answer_fields.items() if edit.text().strip()]
+        answers["confirmed_fields"] = [key for key, value in answers.items()
+                                       if key not in ("field_answers", "years_experience") and value]
         if self.confirm_years_experience.isChecked():
             answers["confirmed_fields"].append("years_experience")
         settings = {
             "setup_complete": True,
             "auto_apply": self.auto_apply.isChecked(),
-            "target_titles": self._lines(self.target_titles),
-            "preferred_locations": self._lines(self.locations),
-            "exclude_title_words": self._lines(self.exclude_words),
+            "target_titles": self.target_titles.values(),
+            "preferred_locations": self.locations.values(),
+            "exclude_title_words": self.exclude_words.values(),
             "remote_ok": self.remote_ok.isChecked(),
             "include_internships": self.include_internships.isChecked(),
             "min_salary": self.min_salary.value(),
             "years_experience": float(self.years_experience.value()),
-            "jobspy": {
-                "search_terms": self._lines(self.jobspy_terms),
-                "location": self.jobspy_location.text().strip(),
-                "country_indeed": self.jobspy_country.text().strip(),
-            },
-            "companies": {
-                "greenhouse": self._lines(self.greenhouse_companies),
-                "lever": self._lines(self.lever_companies),
-                "ashby": self._lines(self.ashby_companies),
-            },
             "answers": answers,
         }
+        luna = self.luna.values()
+        settings["agent"] = luna["agent"]
+        settings["luna"] = luna["luna"]
+        settings["resume_builder"] = luna["resume_builder"]
+        settings.update(self.email.values())
         self.completed.emit({"profile": profile, "settings": settings, "resume_path": profile["resume_path"]})

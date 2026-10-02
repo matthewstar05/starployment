@@ -25,9 +25,9 @@ SMOKE_SPEC.loader.exec_module(smoke_bundle)
 def test_browser_copy_target_matches_frozen_runtime_hook(tmp_path: Path, monkeypatch, platform: str):
     runtime_root = build_desktop.frozen_runtime_root(platform, tmp_path)
     if platform == "darwin":
-        assert runtime_root == tmp_path / "dist" / "JobHub.app" / "Contents" / "Frameworks"
+        assert runtime_root == tmp_path / "dist" / "Starployment.app" / "Contents" / "Frameworks"
     else:
-        assert runtime_root == tmp_path / "dist" / "JobHub" / "_internal"
+        assert runtime_root == tmp_path / "dist" / "Starployment" / "_internal"
 
     browser_dir = runtime_root / "playwright-browsers"
     browser_dir.mkdir(parents=True)
@@ -47,14 +47,14 @@ def test_browser_copy_target_matches_frozen_runtime_hook(tmp_path: Path, monkeyp
     [(b"MZ\x90\x00", "win32"), (b"\x7fELF", "linux"), (b"\xcf\xfa\xed\xfe", "darwin")],
 )
 def test_bundle_smoke_accepts_native_executable_format(tmp_path: Path, header: bytes, platform: str):
-    executable = tmp_path / "JobHub"
+    executable = tmp_path / "Starployment"
     executable.write_bytes(header + bytes(32))
 
     smoke_bundle.validate_executable_platform(executable, platform)
 
 
 def test_bundle_smoke_rejects_bundle_from_another_operating_system(tmp_path: Path):
-    executable = tmp_path / "JobHub"
+    executable = tmp_path / "Starployment"
     executable.write_bytes(b"\xcf\xfa\xed\xfe" + bytes(32))
 
     with pytest.raises(SystemExit, match="expects linux"):

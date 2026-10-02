@@ -1,28 +1,35 @@
 """Overview page: greeting, metric tiles, top matches, attention list, activity."""
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from typing import Any
 
-from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtGui import QFont, QPainter, QPen
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen, QRadialGradient
+from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget
 
 from ..delegates import score_color
 from ..format import activity_label, activity_tone, greeting, local_time, plural, relative_time, salary
 from ..theme import current_colors
+from ..native_glass import prepare_window
 from ..widgets import (
     ActionRow,
     Card,
     ClickableGlass,
     CountUpLabel,
     ElidedLabel,
+    FormGroup,
     IconBadge,
     PageHeader,
     StatusDot,
+    Stepper,
+    ToggleSwitch,
     button,
     label,
+    paint_backdrop,
     qcolor,
+    rounded_path,
     ui_font,
 )
 
@@ -81,12 +88,215 @@ class MetricTile(ClickableGlass):
         column.addWidget(self.caption)
 
 
+def paint_star(painter: QPainter, center: QPointF, radius: float, color: QColor) -> None:
+    """A four-point sparkle: the Starployment mark in miniature."""
+    from PySide6.QtGui import QPainterPath
+    path = QPainterPath()
+    inner = radius * 0.22
+    points = []
+    for index in range(8):
+        angle = index * math.pi / 4 - math.pi / 2
+        r = radius if index % 2 == 0 else inner
+        points.append(QPointF(center.x() + r * math.cos(angle), center.y() + r * math.sin(angle)))
+    path.moveTo(points[0])
+    for point in points[1:]:
+        path.lineTo(point)
+    path.closeSubpath()
+    painter.fillPath(path, color)
+
+
+class ApplyHero(QWidget):
+    """The Overview's call to action: a night-sky card with a glowing star and the Apply button."""
+
+    apply_clicked = Signal()
+    review_clicked = Signal()
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("applyHero")
+        self.setMinimumHeight(176)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(28, 24, 28, 24)
+        row.setSpacing(24)
+        text = QVBoxLayout()
+        text.setSpacing(6)
+        self.eyebrow = label("APPLY", "heroStat")
+        self.title = label("Ready when you are", "heroTitle")
+        self.text = label("Prepare applications for your best matches. Starployment builds a one-page resume for "
+                          "each role and fills every answer it knows; Luna drafts the custom ones. Nothing is sent "
+                          "until you approve it.", "heroText")
+        self.stats = label("", "heroStat")
+        self.text.setMaximumWidth(640)
+        text.addWidget(self.eyebrow)
+        text.addWidget(self.title)
+        text.addWidget(self.text)
+        text.addSpacing(4)
+        text.addWidget(self.stats)
+        text.addStretch(1)
+        row.addLayout(text, 1)
+        actions = QVBoxLayout()
+        actions.setSpacing(10)
+        actions.addStretch(3)
+        self.apply_button = QPushButton("Apply")
+        self.apply_button.setObjectName("star")
+        self.apply_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.apply_button.setMinimumWidth(168)
+        self.apply_button.setToolTip("Choose how many applications to prepare")
+        self.apply_button.clicked.connect(self.apply_clicked)
+        actions.addWidget(self.apply_button, 0, Qt.AlignmentFlag.AlignRight)
+        self.review_button = QPushButton("Review applications")
+        self.review_button.setObjectName("heroLink")
+        self.review_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.review_button.setStyleSheet("QPushButton#heroLink { background: transparent; border: none; "
+                                         "color: rgba(255,255,255,0.78); font-weight: 600; padding: 4px 8px; }"
+                                         "QPushButton#heroLink:hover { color: #FFFFFF; }")
+        self.review_button.clicked.connect(self.review_clicked)
+        actions.addWidget(self.review_button, 0, Qt.AlignmentFlag.AlignRight)
+        actions.addStretch(1)
+        row.addLayout(actions)
+
+    def set_counts(self, review: int, approved: int, focus: int, new: int) -> None:
+        parts = []
+        if new:
+            parts.append(f"{new:,} new matches")
+        if review:
+            parts.append(f"{review} to review")
+        if approved:
+            parts.append(f"{approved} approved")
+        if focus:
+            parts.append(f"{focus} in interviews or assessments")
+        self.stats.setText("  ·  ".join(parts))
+        self.stats.setVisible(bool(parts))
+        self.review_button.setVisible(bool(review or approved))
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
+        path = rounded_path(rect, 20)
+        base = QLinearGradient(rect.topLeft(), rect.bottomRight())
+        base.setColorAt(0.0, QColor("#0E0E14"))
+        base.setColorAt(1.0, QColor("#050507"))
+        painter.fillPath(path, base)
+        painter.save()
+        painter.setClipPath(path)
+        # The star sits above the Apply button; its trail runs up and left, off the card.
+        glow_center = QPointF(rect.right() - 112, rect.top() + 40)
+        glow = QRadialGradient(glow_center, 230)
+        glow.setColorAt(0.0, QColor(255, 196, 51, 120))
+        glow.setColorAt(0.35, QColor(255, 196, 51, 38))
+        glow.setColorAt(1.0, QColor(255, 196, 51, 0))
+        painter.fillRect(rect, glow)
+        # A faint trail behind the star.
+        tail = QPointF(glow_center.x() - 190, glow_center.y() - 70)
+        trail = QLinearGradient(tail, glow_center)
+        trail.setColorAt(0.0, QColor(255, 210, 90, 0))
+        trail.setColorAt(1.0, QColor(255, 210, 90, 170))
+        pen = QPen(trail, 2.4)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.drawLine(tail, glow_center)
+        paint_star(painter, glow_center, 15, QColor("#FFD24D"))
+        paint_star(painter, glow_center, 6, QColor("#FFF6D8"))
+        for x, y, r in ((0.08, 0.22, 1.2), (0.33, 0.12, 0.9), (0.52, 0.80, 1.1), (0.64, 0.30, 0.8),
+                        (0.90, 0.78, 1.0), (0.44, 0.48, 0.7), (0.20, 0.86, 0.9)):
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(255, 255, 255, 110))
+            painter.drawEllipse(QPointF(rect.left() + rect.width() * x, rect.top() + rect.height() * y), r, r)
+        painter.restore()
+        painter.setPen(QPen(QColor(255, 255, 255, 26), 1))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPath(path)
+        painter.end()
+
+
+class ApplyPlanSheet(QDialog):
+    """Choose how many applications to prepare and how."""
+
+    def __init__(self, settings: dict, new_matches: int, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("Prepare applications")
+        prepare_window(self)
+        self.setModal(True)
+        self.setMinimumWidth(560)
+        plan = settings.get("apply_plan") or {}
+        column = QVBoxLayout(self)
+        column.setContentsMargins(26, 24, 26, 22)
+        column.setSpacing(12)
+        column.addWidget(label("Prepare applications", "sheetTitle"))
+        column.addWidget(label(
+            "Starployment reads each employer's form, builds your resume for the role, and fills every answer "
+            "you have saved. Luna drafts the custom questions. Each application waits in Applications until you "
+            "approve and send it.", "subtitle"))
+        group = FormGroup()
+        self.count = QSpinBox()
+        self.count.setRange(1, 500)
+        self.count.setValue(int(plan.get("count", 100)))
+        self.count.setSuffix(" jobs")
+        self.min_score = QSpinBox()
+        self.min_score.setRange(0, 100)
+        self.min_score.setValue(int(plan.get("min_score", 60)))
+        self.one_per_company = ToggleSwitch()
+        self.one_per_company.setChecked(bool(plan.get("one_per_company", True)))
+        self.use_luna = ToggleSwitch()
+        backend = (settings.get("agent") or {}).get("backend", "none")
+        connected = backend not in ("", "none")
+        self.use_luna.setChecked(connected and bool((settings.get("luna") or {}).get("draft_answers", True)))
+        self.use_luna.setEnabled(connected)
+        group.add_row("Prepare the top", Stepper(self.count, width=110), "Highest match scores first.")
+        group.add_row("Minimum match", Stepper(self.min_score), "Skip roles below this score.")
+        group.add_row("One per company", self.one_per_company, "Spread applications across employers.")
+        group.add_row("Luna drafts custom answers", self.use_luna,
+                      "You review every draft." if connected else "Connect Luna in Settings → Connections first.")
+        strategy = {"tailored": "A one-page resume generated for each role from your resume builder",
+                    "library": "The resume file that matches each role type",
+                    "original": "Your main resume"}.get(str(settings.get("resume_strategy", "tailored")), "")
+        group.add_row("Resume", label(strategy, "rowNote"), "Change this in Settings → Resume.")
+        column.addWidget(group)
+        column.addWidget(label(f"You have {new_matches:,} new matches. Greenhouse, Lever, and Ashby roles can be "
+                               "prepared; others stay in Jobs.", "caption"))
+        if settings.get("dry_run"):
+            column.addWidget(label("Practice mode is on, so sending fills forms without clicking Submit. "
+                                   "Turn it off in Settings when you are ready to submit for real.", "questions"))
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        cancel = button("Cancel", "secondary")
+        cancel.clicked.connect(self.reject)
+        self.go = QPushButton()
+        self.go.setObjectName("star")
+        self.go.setDefault(True)
+        self.go.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.go.clicked.connect(self.accept)
+        self.count.valueChanged.connect(self._label)
+        self._label()
+        actions.addWidget(cancel)
+        actions.addWidget(self.go)
+        column.addLayout(actions)
+
+    def _label(self, *_args) -> None:
+        count = self.count.value()
+        self.go.setText(f"Prepare {count} application{'s' if count != 1 else ''}")
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        paint_backdrop(painter, self)
+        painter.end()
+
+    def plan(self) -> dict:
+        return {"count": self.count.value(), "min_score": float(self.min_score.value()),
+                "one_per_company": self.one_per_company.isChecked(), "use_luna": self.use_luna.isChecked()}
+
+
 class DashboardView(QWidget):
+    apply_plan_requested = Signal(dict)
+    review_requested = Signal()
+    prepare_requested = Signal(str)
     setup_requested = Signal()
     jobs_requested = Signal(str)          # filter: all | new | applied | needs_human
     applications_requested = Signal(object)  # application id or None
     apply_requested = Signal(str)
     open_url_requested = Signal(str)
+    tracker_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -95,6 +305,8 @@ class DashboardView(QWidget):
         self._setup_complete = True
         self._salary_labels: list[QWidget] = []
         self._signatures: dict[str, object] = {}
+        self._settings: dict = {}
+        self._new_matches = 0
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea()
@@ -115,6 +327,11 @@ class DashboardView(QWidget):
         self.header.add_action(self.edit_button)
         column.addWidget(self.header)
 
+        self.hero = ApplyHero()
+        self.hero.apply_clicked.connect(self._open_plan)
+        self.hero.review_clicked.connect(self.review_requested)
+        column.addWidget(self.hero)
+
         # Onboarding hero, shown until candidate setup is complete.
         self.onboarding = Card(radius=20, tint="accent", padding=(22, 20, 22, 20))
         self.onboarding.title_label.hide()
@@ -127,7 +344,7 @@ class DashboardView(QWidget):
         hero_text.addWidget(label("Build your application profile", "sectionTitle"))
         hero_text.addWidget(label(
             "Add your resume, contact details, target roles, and the answers employers ask for. "
-            "JobHub only uses facts you confirm.", "subtitle"))
+            "Starployment only uses facts you confirm.", "subtitle"))
         begin = button("Complete setup", icon="chevron-right", trailing=True)
         begin.clicked.connect(self.setup_requested)
         actions = QHBoxLayout()
@@ -185,6 +402,11 @@ class DashboardView(QWidget):
         self.more_attention.hide()
         side.addWidget(self.review_card)
 
+        self.focus_card = Card("In progress")
+        self.focus_card.title_label.setToolTip("Applications with an assessment, interview, or offer")
+        self.focus_card.hide()
+        side.addWidget(self.focus_card)
+
         self.activity_card = Card("Recent activity")
         self.empty_activity = label("Scans and application updates will appear here.", "subtitle")
         self.activity_card.body.addWidget(self.empty_activity)
@@ -213,14 +435,49 @@ class DashboardView(QWidget):
     def set_setup_complete(self, complete: bool) -> None:
         self._setup_complete = complete
         self.onboarding.setVisible(not complete)
+        self.hero.setVisible(complete)
         self.edit_button.setText("Edit setup" if complete else "Set up")
 
+    def set_settings(self, settings: dict) -> None:
+        self._settings = dict(settings or {})
+
+    def set_pipeline(self, drafts: dict[str, int], focus: list[dict]) -> None:
+        """Counts of prepared applications and the applications needing your focus."""
+        review = sum(drafts.get(s, 0) for s in ("ready", "needs_answers", "practice"))
+        self.hero.set_counts(review, drafts.get("approved", 0), len(focus), self._new_matches)
+        signature = tuple((r.get("id"), r.get("stage")) for r in focus[:5])
+        if not self._changed("focus", signature):
+            return
+        self.focus_card.clear_rows()
+        self.focus_card.setVisible(bool(focus))
+        for record in focus[:5]:
+            row = ActionRow()
+            stage = str(record.get("stage") or "")
+            tone = {"interview": "amber", "assessment": "indigo", "offer": "green"}.get(stage, "accent")
+            icon = {"interview": "clock", "assessment": "code", "offer": "award"}.get(stage, "info")
+            row.layout_.addWidget(IconBadge(icon, tone, 28))
+            text = QVBoxLayout()
+            text.setSpacing(1)
+            text.addWidget(ElidedLabel(f"{record.get('company', 'Employer')} · {record.get('title', 'Role')}", "rowPrimary"))
+            text.addWidget(ElidedLabel({"interview": "Interview", "assessment": "Online assessment",
+                                        "offer": "Offer"}.get(stage, stage.title()), "rowSecondary"))
+            row.layout_.addLayout(text, 1)
+            row.finish()
+            row.clicked.connect(lambda: self.tracker_requested.emit())
+            self.focus_card.add_row(row)
+
+    def _open_plan(self) -> None:
+        sheet = ApplyPlanSheet(self._settings, self._new_matches, self.window())
+        if sheet.exec() == QDialog.DialogCode.Accepted:
+            self.apply_plan_requested.emit(sheet.plan())
+
     def set_stats(self, stats: dict) -> None:
+        self._new_matches = int(stats.get("new", 0) or 0)
         for key, tile in self.tiles.items():
             tile.value.set_value(int(stats.get(key, 0) or 0))
         new, review = int(stats.get("new", 0) or 0), int(stats.get("needs_human", 0) or 0)
         if not self._setup_complete:
-            text = "Finish setup and JobHub will start finding roles for you."
+            text = "Finish setup and Starployment will start finding roles for you."
         elif new or review:
             parts = []
             if new:
@@ -229,7 +486,7 @@ class DashboardView(QWidget):
                 parts.append(f"{plural(review, 'application')} waiting on you")
             text = " and ".join(parts) + "."
         else:
-            text = "You're all caught up. JobHub keeps searching in the background."
+            text = "You're all caught up. Starployment keeps searching in the background."
         self.header.set_subtitle(text)
         self.header.set_eyebrow(_today())
 
@@ -256,9 +513,9 @@ class DashboardView(QWidget):
                 self._salary_labels.append(pay_label)
                 row.layout_.addWidget(pay_label)
             if job.status == "new":
-                apply = button("Apply", "secondary")
-                apply.setToolTip("Queue this application")
-                apply.clicked.connect(lambda _=False, jid=job.id: self.apply_requested.emit(jid))
+                apply = button("Prepare", "secondary")
+                apply.setToolTip("Prepare this application for your review")
+                apply.clicked.connect(lambda _=False, jid=job.id: self.prepare_requested.emit(jid))
                 row.layout_.addWidget(apply)
             row.clicked.connect(lambda url=job.url: self.open_url_requested.emit(url))
             self.matches_card.add_row(row)

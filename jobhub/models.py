@@ -75,9 +75,11 @@ class Education(BaseModel):
     school: str = ""
     degree: str = ""
     field: str = ""
+    location: str = ""
     start: str = ""
     end: str = ""
     gpa: str = ""
+    details: list[str] = Field(default_factory=list)   # honors, relevant coursework
 
 
 class Experience(BaseModel):
@@ -87,6 +89,9 @@ class Experience(BaseModel):
     start: str = ""
     end: str = ""
     bullets: list[str] = Field(default_factory=list)
+    tech: list[str] = Field(default_factory=list)
+    pinned: bool = False     # always include on generated resumes
+    hidden: bool = False     # keep in the library, never print
 
 
 class Project(BaseModel):
@@ -96,6 +101,9 @@ class Project(BaseModel):
     end: str = ""
     bullets: list[str] = Field(default_factory=list)
     tech: list[str] = Field(default_factory=list)
+    link: str = ""
+    pinned: bool = False
+    hidden: bool = False
 
 
 class Profile(BaseModel):
@@ -119,6 +127,7 @@ class Profile(BaseModel):
     experience: list[Experience] = Field(default_factory=list)
     projects: list[Project] = Field(default_factory=list)
     skills: list[str] = Field(default_factory=list)
+    awards: list[str] = Field(default_factory=list)   # awards, certifications, leadership one-liners
     raw_text: str = ""
     resume_path: str = ""
     custom_facts: dict[str, str] = Field(default_factory=dict)
@@ -140,3 +149,6 @@ class ApplyResult(BaseModel):
     unanswered: list[str] = Field(default_factory=list)
     resume_path: str = ""
     submission_attempted: bool = False
+    # Details (label, kind, options, required) for questions left unanswered,
+    # so a reviewer can answer them without reopening the employer form.
+    questions: list[dict[str, Any]] = Field(default_factory=list)

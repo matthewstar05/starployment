@@ -13,64 +13,82 @@ from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
 
+APP_NAME = "Starployment"
+# Installed builds before the rename kept candidate data under this name.
+LEGACY_APP_NAME = "JobHub"
 
-def _data_dir() -> Path:
-    """Keep source checkouts compatible and give installed apps private user data."""
-    override = os.environ.get("JOBHUB_DATA_DIR")
-    if override:
-        return Path(override).expanduser()
-    if not getattr(sys, "frozen", False):
-        return ROOT / "data"
+
+def _platform_data_base() -> tuple[Path, str, str]:
+    """Return the per-user data base directory and the new/legacy folder names."""
     home = Path.home()
     if sys.platform == "darwin":
-        return home / "Library" / "Application Support" / "JobHub"
+        return home / "Library" / "Application Support", APP_NAME, LEGACY_APP_NAME
     if sys.platform == "win32":
         local = os.environ.get("LOCALAPPDATA", "").strip()
         base = Path(local).expanduser() if local else home / "AppData" / "Local"
         if not base.is_absolute():
             base = home / "AppData" / "Local"
-        return base / "JobHub"
+        return base, APP_NAME, LEGACY_APP_NAME
     xdg = os.environ.get("XDG_DATA_HOME", "").strip()
     base = Path(xdg).expanduser() if xdg else home / ".local" / "share"
     if not base.is_absolute():
         base = home / ".local" / "share"
-    return base / "jobhub"
+    return base, APP_NAME.lower(), LEGACY_APP_NAME.lower()
+
+
+def _data_dir() -> Path:
+    """Keep source checkouts compatible and give installed apps private user data.
+
+    The app was renamed from JobHub to Starployment. An existing JobHub data
+    folder keeps being used in place (never moved or copied), so an upgrade
+    cannot lose or duplicate candidate data.
+    """
+    override = os.environ.get("STARPLOYMENT_DATA_DIR") or os.environ.get("JOBHUB_DATA_DIR")
+    if override:
+        return Path(override).expanduser()
+    if not getattr(sys, "frozen", False):
+        return ROOT / "data"
+    base, name, legacy = _platform_data_base()
+    current, previous = base / name, base / legacy
+    if not current.exists() and previous.is_dir() and (previous / "jobhub.db").exists():
+        return previous
+    return current
 
 
 def _validate_data_root(root: Path) -> Path:
     root = Path(root).expanduser()
     if root.is_symlink():
-        raise ValueError(f"Refusing to use a symlink as the JobHub data root: {root}")
+        raise ValueError(f"Refusing to use a symlink as the Starployment data root: {root}")
     root = root.resolve()
     home = Path.home().resolve()
     if root == root.parent or root == home or home.is_relative_to(root):
-        raise ValueError(f"Refusing to use an unsafe JobHub data root: {root}")
+        raise ValueError(f"Refusing to use an unsafe Starployment data root: {root}")
     if root.is_dir():
         children = list(root.iterdir())
         managed = {"resumes", "tailored", "screenshots", "browser_profile", "jobhub.db",
-                   "jobhub.db-wal", "jobhub.db-shm", ".env", ".checkout-import.json"}
+                   "jobhub.db-wal", "jobhub.db-shm", ".env", ".checkout-import.json", "agent_scratch"}
         if children and not any(item.name in managed for item in children):
-            raise ValueError(f"Refusing to use an unrecognized JobHub data directory: {root}")
+            raise ValueError(f"Refusing to use an unrecognized Starployment data directory: {root}")
     return root
 
 
 def secure_data_tree(root: Path | None = None) -> None:
-    """Make JobHub's private data tree accessible only to its owner on POSIX."""
+    """Make the private data tree accessible only to its owner on POSIX."""
     if os.name == "nt":
         return
     requested_root = Path(root or DATA).expanduser()
     if requested_root.is_symlink():
-        raise ValueError(f"Refusing to secure a symlink as the JobHub data root: {requested_root}")
+        raise ValueError(f"Refusing to secure a symlink as the Starployment data root: {requested_root}")
     root = _validate_data_root(requested_root)
     if not root.exists():
         root.mkdir(parents=True, mode=0o700, exist_ok=True)
-    managed_dirs = {"resumes", "tailored", "screenshots", "browser_profile"}
+    managed_dirs = {"resumes", "tailored", "screenshots", "browser_profile", "agent_scratch"}
     managed_files = {"jobhub.db", "jobhub.db-wal", "jobhub.db-shm", ".env", ".checkout-import.json"}
     children = list(root.iterdir())
     if children and not any(item.name in managed_dirs | managed_files for item in children):
         raise ValueError(f"Refusing to change permissions on an unrecognized data directory: {root}")
     paths = [root]
-    # Only touch JobHub-owned paths. User overrides may point inside a directory
+    # Only touch app-owned paths. User overrides may point inside a directory
     # that also contains unrelated files, so never recursively chmod the root.
     for child in children:
         if child.name in managed_files:
@@ -99,10 +117,12 @@ RESUMES = DATA / "resumes"
 TAILORED = DATA / "tailored"
 SCREENSHOTS = DATA / "screenshots"
 BROWSER_PROFILE = DATA / "browser_profile"
+RESUME_LIBRARY = RESUMES / "library"
+AGENT_SCRATCH = DATA / "agent_scratch"
 DB_PATH = DATA / "jobhub.db"
 WEB = ROOT / "web"
 
-for _p in (DATA, RESUMES, TAILORED, SCREENSHOTS, BROWSER_PROFILE):
+for _p in (DATA, RESUMES, TAILORED, SCREENSHOTS, BROWSER_PROFILE, RESUME_LIBRARY, AGENT_SCRATCH):
     _p.mkdir(parents=True, mode=0o700, exist_ok=True)
 secure_data_tree(DATA)
 
@@ -119,7 +139,7 @@ PORT = int(env("JOBHUB_PORT", "8765"))
 HEADLESS = env("JOBHUB_HEADLESS", "1") not in ("0", "false", "no")
 LLM_BACKEND = env("JOBHUB_LLM_BACKEND", "auto")  # auto | anthropic | claude_cli | codex_cli | none
 ANTHROPIC_API_KEY = env("ANTHROPIC_API_KEY")
-ANTHROPIC_MODEL = env("JOBHUB_ANTHROPIC_MODEL", "claude-sonnet-5")
+ANTHROPIC_MODEL = env("JOBHUB_ANTHROPIC_MODEL", "claude-sonnet-5-5")
 CLAUDE_CLI_MODEL = env("JOBHUB_CLAUDE_CLI_MODEL", "sonnet")
 CODEX_MODEL = env("JOBHUB_CODEX_MODEL", "gpt-5.5")  # codex CLI default model may be unsupported on ChatGPT plans
 
@@ -177,7 +197,18 @@ DEFAULT_SETTINGS: dict = {
     "companies": {"greenhouse": GREENHOUSE_COMPANIES, "lever": LEVER_COMPANIES,
                   "ashby": ASHBY_COMPANIES},
     # --- resume ---
-    "resume_strategy": "tailored",  # original | tailored
+    # tailored: a one-page PDF generated from the resume builder for each role
+    # library:  the uploaded resume file whose role type best matches the job
+    # original: always the main resume PDF
+    "resume_strategy": "tailored",
+    "resume_builder": {"one_page": True, "luna_select": False, "max_skills": 28},
+    # --- Luna, the optional drafting assistant (needs a connected agent) ---
+    "agent": {"backend": "none", "model": ""},
+    "luna": {"draft_answers": True, "remember_approved": True},
+    # --- the Overview "Apply" plan ---
+    "apply_plan": {"count": 100, "min_score": 60, "one_per_company": True},
+    # --- optional inbox tracking for replies (uses the mailbox below) ---
+    "email_tracking": {"enabled": False, "lookback_days": 30, "use_luna": False},
     # --- canned answers (edit in the UI; used when a form asks) ---
     "answers": {
         "work_authorized_us": "",
@@ -263,6 +294,38 @@ def validate_settings(settings: dict) -> dict:
         enabled: StrictBool
         backend: Literal["codex_cli", "claude_cli"]
 
+    class ResumeBuilder(StrictModel):
+        one_page: StrictBool
+        luna_select: StrictBool
+        max_skills: StrictInt = Field(ge=5, le=80)
+
+    class Agent(StrictModel):
+        backend: Literal["none", "claude_cli", "codex_cli", "anthropic_api", "openai_api"]
+        model: StrictStr = Field(max_length=80)
+
+        @field_validator("model")
+        @classmethod
+        def simple_model_name(cls, value):
+            import re
+            value = value.strip()
+            if value and not re.fullmatch(r"[A-Za-z0-9._:/-]{1,80}", value):
+                raise ValueError("Model names may contain letters, numbers, dots, dashes, colons, and slashes")
+            return value
+
+    class Luna(StrictModel):
+        draft_answers: StrictBool
+        remember_approved: StrictBool
+
+    class ApplyPlan(StrictModel):
+        count: StrictInt = Field(ge=1, le=500)
+        min_score: float = Field(ge=0, le=100, allow_inf_nan=False)
+        one_per_company: StrictBool
+
+    class EmailTracking(StrictModel):
+        enabled: StrictBool
+        lookback_days: StrictInt = Field(ge=1, le=365)
+        use_luna: StrictBool
+
     class EmailVerification(StrictModel):
         enabled: StrictBool
         imap_host: StrictStr = Field(max_length=253)
@@ -280,6 +343,8 @@ def validate_settings(settings: dict) -> dict:
         @model_validator(mode="after")
         def configured_when_enabled(self):
             import re
+            if self.imap_host and not re.fullmatch(r"[A-Za-z0-9.-]+", self.imap_host):
+                raise ValueError("The IMAP server must be a host name such as imap.gmail.com")
             if self.enabled and not (
                 re.fullmatch(r"[A-Za-z0-9.-]+", self.imap_host)
                 and self.imap_username
@@ -306,7 +371,12 @@ def validate_settings(settings: dict) -> dict:
         sources: dict[Literal["greenhouse", "lever", "ashby", "simplify", "remoteok", "jobspy"], StrictBool]
         jobspy: JobSpy
         companies: dict[Literal["greenhouse", "lever", "ashby"], list[StrictStr]]
-        resume_strategy: Literal["original", "tailored"]
+        resume_strategy: Literal["original", "tailored", "library"]
+        resume_builder: ResumeBuilder
+        agent: Agent
+        luna: Luna
+        apply_plan: ApplyPlan
+        email_tracking: EmailTracking
         answers: Answers
         email_verification: EmailVerification
         harness: Harness

@@ -1,4 +1,4 @@
-"""Build JobHub's platform icon assets from the canonical SVG artwork."""
+"""Build Starployment's platform icon assets from the canonical SVG artwork."""
 from __future__ import annotations
 
 import argparse
@@ -15,11 +15,11 @@ from PySide6.QtSvg import QSvgRenderer
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / "packaging" / "assets"
-SVG = ASSETS / "jobhub-icon.svg"
-PNG = ASSETS / "jobhub-icon-1024.png"
-PNG_256 = ASSETS / "jobhub-icon-256.png"
-ICO = ASSETS / "jobhub.ico"
-ICNS = ASSETS / "jobhub.icns"
+SVG = ASSETS / "starployment-icon.svg"
+PNG = ASSETS / "starployment-icon-1024.png"
+PNG_256 = ASSETS / "starployment-icon-256.png"
+ICO = ASSETS / "starployment.ico"
+ICNS = ASSETS / "starployment.icns"
 
 
 def render_png(size: int) -> QImage:
@@ -27,6 +27,8 @@ def render_png(size: int) -> QImage:
     image = QImage(size, size, QImage.Format.Format_ARGB32)
     image.fill(Qt.GlobalColor.transparent)
     painter = QPainter(image)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
     renderer.render(painter)
     painter.end()
     return image
@@ -43,8 +45,8 @@ def make_icns() -> bool:
     iconutil = shutil.which("iconutil")
     if not iconutil:
         return False
-    with tempfile.TemporaryDirectory(prefix="jobhub.iconset.") as temp:
-        iconset = Path(temp) / "JobHub.iconset"
+    with tempfile.TemporaryDirectory(prefix="starployment.iconset.") as temp:
+        iconset = Path(temp) / "Starployment.iconset"
         iconset.mkdir()
         for size in (16, 32, 128, 256, 512):
             image = Image.open(PNG).convert("RGBA")

@@ -89,9 +89,12 @@ def test_setup_wizard_emits_candidate_owned_payload(local_store, monkeypatch):
     app = QApplication.instance() or QApplication([])
     wizard = SetupWizard({}, db.get_settings())
     wizard.fields["first_name"].setText("Ada")
-    wizard.custom_facts.setPlainText("Favorite domain | accessibility")
-    wizard.custom_answers.setPlainText("I agree to this notice | true\nPreferred team | Platform")
-    wizard.target_titles.setPlainText("product manager")
+    # Structured rows replace "label | value" typing.
+    wizard.custom_facts.add_row("Favorite domain", "accessibility")
+    wizard.custom_answers.add_row("I agree to this notice", "true")
+    wizard.custom_answers.add_row("Preferred team", "Platform")
+    wizard.target_titles.set_values(["product manager"])
+    wizard.yes_no["requires_sponsorship"].setCurrentIndex(wizard.yes_no["requires_sponsorship"].findData("No"))
     wizard.auto_apply.setChecked(True)
     wizard.years_experience.setValue(4)
     wizard.confirm_years_experience.setChecked(True)
@@ -103,6 +106,11 @@ def test_setup_wizard_emits_candidate_owned_payload(local_store, monkeypatch):
     assert captured[0]["settings"]["auto_apply"] is True
     assert captured[0]["settings"]["answers"]["years_experience"] == "4"
     assert "years_experience" in captured[0]["settings"]["answers"]["confirmed_fields"]
+    assert captured[0]["settings"]["answers"]["requires_sponsorship"] == "No"
+    assert "requires_sponsorship" in captured[0]["settings"]["answers"]["confirmed_fields"]
+    assert captured[0]["settings"]["answers"]["field_answers"]["Preferred team"] == "Platform"
+    assert captured[0]["settings"]["target_titles"] == ["product manager"]
+    assert captured[0]["settings"]["agent"]["backend"] == "none"
     wizard.close()
 
 
@@ -135,12 +143,11 @@ def test_application_questions_open_in_answer_bank_without_saving_blanks(local_s
     ])
     assert wizard.tabs.currentIndex() == 3
     assert wizard.pending_hint.isHidden() is False
-    assert wizard.custom_answers.toPlainText().count("What is your work pattern? | ") == 1
-    wizard.custom_answers.setPlainText(
-        wizard.custom_answers.toPlainText().replace(
-            "What is your work pattern? | ", "What is your work pattern? | Hybrid"
-        )
-    )
+    questions = [row.pair()[0] for row in wizard.custom_answers.rows]
+    assert questions.count("What is your work pattern?") == 1
+    assert "Why this company?" in questions
+    row = next(r for r in wizard.custom_answers.rows if r.pair()[0] == "What is your work pattern?")
+    row.value.setPlainText("Hybrid")
     captured = []
     wizard.completed.connect(captured.append)
     wizard._submit()
@@ -172,17 +179,20 @@ def test_jobs_view_review_filter_and_safe_retry_button(local_store, monkeypatch)
     app = QApplication.instance() or QApplication([])
     review = Job(source="fixture", company="Example", title="Product Manager",
                  url="https://example.test/review", status="needs_human")
-    fresh = Job(source="fixture", company="Another", title="Product Manager",
-                url="https://example.test/new", status="new")
+    fresh = Job(source="fixture", ats="greenhouse", company="Another", title="Product Manager",
+                url="https://job-boards.greenhouse.io/another/jobs/9", status="new")
     view = JobsView()
     view.set_jobs([review, fresh], retryable_ids={review.id})
     assert view.table.item(0, JobsView.ACTION).text() == "Retry"
-    assert view.table.item(1, JobsView.ACTION).text() == "Apply"
-    requested = []
+    assert view.table.item(1, JobsView.ACTION).text() == "Prepare"
+    requested, prepared = [], []
     view.apply_requested.connect(requested.append)
+    view.prepare_requested.connect(prepared.append)
     view._cell_clicked(0, JobsView.ACTION)
+    view._cell_clicked(1, JobsView.ACTION)
     assert requested == [review.id]
-    view.filter.setCurrentIndex(3)
+    assert prepared == [fresh.id]
+    view.set_filter("needs_human")
     assert view.selected_status == "needs_human"
     assert not view.table.isRowHidden(0)
     assert view.table.isRowHidden(1)

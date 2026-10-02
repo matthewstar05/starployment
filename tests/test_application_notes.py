@@ -79,3 +79,45 @@ def test_application_detail_distinguishes_confirmed_from_uncertain_attempts():
     assert "Email code" in view.questions_label.text()
     assert view.answer_button.isHidden()
     view.close()
+
+
+def test_practice_application_can_continue_but_a_submission_alias_cannot():
+    from PySide6.QtWidgets import QApplication
+    from jobhub.desktop.ui import JobHubWindow
+
+    app = QApplication.instance() or QApplication([])
+    window = JobHubWindow()
+    practice = {"id": 7, "job_id": "practice", "canonical_key": "greenhouse:example:123",
+                "title": "Engineer", "company": "Example", "status": "dry_run",
+                "submission_attempted": False, "unanswered": ["LinkedIn (optional)"]}
+    window.set_data(applications=[practice])
+    assert not window.apps.continue_button.isHidden()
+    assert window.apps.continue_button.text() == "Apply"
+    assert "Unanswered questions" in window.apps.questions_label.text()
+    requested = []
+    window.apply_requested.connect(requested.append)
+    window.apps.continue_button.click()
+    assert requested == ["practice"]
+    submitted = dict(practice, id=8, job_id="alias", status="needs_human", submission_attempted=True)
+    window.set_data(applications=[submitted, practice])
+    window.apps.select_application_id(7)
+    assert window.apps.continue_button.isHidden()
+    window.apps._continue_application()
+    assert requested == ["practice"]
+    assert not window._retryable([practice, submitted])
+    window.close()
+
+
+def test_application_details_refresh_when_posting_metadata_changes():
+    from PySide6.QtWidgets import QApplication
+    from jobhub.desktop.ui import ApplicationsView
+
+    app = QApplication.instance() or QApplication([])
+    view = ApplicationsView()
+    record = {"id": 1, "job_id": "example", "title": "Old title", "company": "Example",
+              "status": "dry_run", "submission_attempted": False}
+    view.set_applications([record])
+    view.set_applications([dict(record, title="Current title", location="Seattle")])
+    assert view.detail_title.text() == "Current title"
+    assert "Seattle" in view.detail_company.text()
+    view.close()

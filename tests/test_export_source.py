@@ -38,9 +38,9 @@ def test_source_archive_uses_allowlist_and_excludes_candidate_data(tmp_path: Pat
     with zipfile.ZipFile(archive_path) as archive:
         names = set(archive.namelist())
         assert names == {
-            "JobHub/README.md", "JobHub/jobhub/__init__.py", "JobHub/jobhub/app.py",
-            "JobHub/packaging/build_desktop.py",
+            "Starployment/README.md", "Starployment/jobhub/__init__.py", "Starployment/jobhub/app.py",
+            "Starployment/packaging/build_desktop.py",
         }
-        assert archive.read("JobHub/jobhub/app.py") == b"safe"
+        assert archive.read("Starployment/jobhub/app.py") == b"safe"
     assert count == 4
     assert len(digest) == 64

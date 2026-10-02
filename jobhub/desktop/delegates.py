@@ -289,3 +289,39 @@ def configure_columns(table: QTableWidget, stretch: int, fixed: dict[int, int]) 
     for column, width in fixed.items():
         header.setSectionResizeMode(column, QHeaderView.ResizeMode.Fixed)
         table.setColumnWidth(column, width)
+
+
+class TwoLineDelegate(QStyledItemDelegate):
+    """A plain two-line list row: bold first line, muted second line, rounded highlight."""
+
+    HEIGHT = 54
+
+    def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
+        return QSize(max(1, option.rect.width()), self.HEIGHT)
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
+        colors = current_colors()
+        text = str(index.data(Qt.ItemDataRole.DisplayRole) or "")
+        first, _, second = text.partition("\n")
+        rect = QRectF(option.rect).adjusted(4, 2, -4, -2)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if item_state_selected(option):
+            painter.fillPath(rounded_path(rect, 10), qcolor(colors["fill_selected"]))
+        elif item_state_hover(option):
+            painter.fillPath(rounded_path(rect, 10), qcolor(colors["fill_hover"]))
+        width = int(rect.width() - 24)
+        primary = ui_font(13, QFont.Weight.DemiBold)
+        painter.setFont(primary)
+        painter.setPen(qcolor(colors["text"]))
+        painter.drawText(QRectF(rect.left() + 12, rect.top() + 8, width, 18),
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                         QFontMetrics(primary).elidedText(first, Qt.TextElideMode.ElideRight, width))
+        if second:
+            secondary = ui_font(12)
+            painter.setFont(secondary)
+            painter.setPen(qcolor(colors["text_muted"]))
+            painter.drawText(QRectF(rect.left() + 12, rect.top() + 27, width, 17),
+                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                             QFontMetrics(secondary).elidedText(second, Qt.TextElideMode.ElideRight, width))
+        painter.restore()

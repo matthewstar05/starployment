@@ -37,7 +37,7 @@ async def lifespan(app: FastAPI):
                 await task
 
 
-app = FastAPI(title="JobHub", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Starployment", version="0.4.0", lifespan=lifespan)
 app.mount("/screenshots", StaticFiles(directory=str(config.SCREENSHOTS)), name="screenshots")
 app.mount("/static", StaticFiles(directory=str(config.WEB)), name="static")
 
@@ -46,7 +46,7 @@ app.mount("/static", StaticFiles(directory=str(config.WEB)), name="static")
 async def local_requests_only(request: Request, call_next):
     """Reject DNS rebinding and web pages attempting to operate this local agent."""
     if request.url.hostname not in ("localhost", "127.0.0.1", "::1"):
-        return JSONResponse({"detail": "JobHub only accepts localhost requests"}, status_code=403)
+        return JSONResponse({"detail": "Starployment only accepts localhost requests"}, status_code=403)
     origin = request.headers.get("origin")
     if origin:
         parsed = urlsplit(origin)
@@ -148,7 +148,10 @@ async def tailor(job_id: str):
     j, p = db.get_job(job_id), db.get_profile()
     if not j or not p:
         raise HTTPException(404)
-    j = await asyncio.to_thread(scheduler.enrich_job, j)
+    try:
+        j = await asyncio.to_thread(scheduler.enrich_job, j)
+    except scheduler.PostingRefreshError as error:
+        raise HTTPException(409, str(error)) from error
     path = await asyncio.to_thread(resume_for_job, p, j, db.get_settings())
     return {"path": path, "url": f"/api/resume/file?path={quote(str(path), safe='')}"}
 

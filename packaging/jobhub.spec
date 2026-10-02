@@ -1,4 +1,4 @@
-"""PyInstaller spec for the native JobHub desktop application.
+"""PyInstaller spec for the native Starployment desktop application.
 
 Build with ``packaging/build_desktop.py``. The build script downloads Chromium
 to ``packaging/playwright-browsers`` first, so the result does not depend on a
@@ -18,9 +18,9 @@ browser_dir = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", ROOT / "packaging"
 
 datas = [(str(web_dir), "web")]
 lucide_dir = ROOT / "packaging" / "assets" / "lucide"
-icon_png = ROOT / "packaging" / "assets" / "jobhub-icon-256.png"
+icon_png = ROOT / "packaging" / "assets" / "starployment-icon-256.png"
 icon_file = ROOT / "packaging" / "assets" / (
-    "jobhub.icns" if sys.platform == "darwin" else "jobhub.ico" if os.name == "nt" else "jobhub-icon-256.png"
+    "starployment.icns" if sys.platform == "darwin" else "starployment.ico" if os.name == "nt" else "starployment-icon-256.png"
 )
 datas.append((str(icon_png), "assets"))
 datas.append((str(lucide_dir), "assets/lucide"))
@@ -62,7 +62,7 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
-    name="JobHub",
+    name="Starployment",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -78,10 +78,12 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=False,
-    name="JobHub",
+    name="Starployment",
 )
 
 if sys.platform == "darwin":
-    app = BUNDLE(coll, name="JobHub.app", icon=str(icon_file), bundle_identifier="local.jobhub.desktop")
+    app = BUNDLE(coll, name="Starployment.app", icon=str(icon_file), bundle_identifier="local.starployment.desktop",
+             info_plist={"CFBundleDisplayName": "Starployment", "CFBundleName": "Starployment",
+                         "NSHighResolutionCapable": True})
 else:
     app = coll

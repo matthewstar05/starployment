@@ -1,17 +1,23 @@
-# AGENTS.md — working on JobHub
+# AGENTS.md — working on Starployment
 
 This file is for coding agents (Claude Code, Codex, Cursor, and others) and for
-humans new to the codebase. It explains what JobHub is, the rules that keep a
+humans new to the codebase. It explains what Starployment (formerly JobHub) is,
+the rules that keep a
 candidate safe, how the code is organized, and how to change the desktop UI
 without breaking its design language. Read the whole "Ground rules" section
 before touching anything under `jobhub/apply/`, `jobhub/scheduler.py`, or
 `jobhub/db.py`.
 
-- **Product:** a local, private job-search workspace. It imports a resume,
-  stores candidate-owned answers, discovers and ranks listings from public ATS
-  feeds, builds an evidence-based resume PDF per role, and fills supported
-  employer forms (Greenhouse, Lever, Ashby) with Playwright, on an hourly loop
-  while the app is open.
+- **Product:** a local, private job-search workspace. It imports a resume into a
+  resume library, stores candidate-owned answers, discovers and ranks listings
+  from public ATS feeds, prepares applications for review (a one-page resume per
+  role plus the employer's questions with proposed answers; Luna, an optional AI
+  assistant, drafts the open-ended ones), sends what the candidate approves by
+  filling supported forms (Greenhouse, Lever, Ashby) with Playwright, and tracks
+  hiring stages in a Tracker spreadsheet, optionally updated from the inbox.
+- **Names:** the product is **Starployment**; the Python package, CLI, env vars
+  (`JOBHUB_*`), database file (`jobhub.db`), and keychain service names keep the
+  old `jobhub` names for compatibility. Do not rename them.
 - **Primary interface:** the native PySide6 desktop app (`jobhub/desktop/`).
   The FastAPI web UI (`jobhub/server.py` + `web/`) is a legacy compatibility
   surface; keep it working, but new product work goes into the desktop app.
@@ -19,13 +25,13 @@ before touching anything under `jobhub/apply/`, `jobhub/scheduler.py`, or
   SQLite (WAL), Playwright/Chromium, JobSpy, ReportLab, PyInstaller. Managed with
   `uv`; the checkout has a `.venv`.
 - **Git:** the code lives in the private GitHub repository
-  `matthewstar05/JobHub` (branch `main`). Commit or push only when the owner
+  `matthewstar05/starployment` (branch `main`; renamed from `JobHub`). Commit or push only when the owner
   asks. `data/`, `.env`, `tmp/`, `dist/`, `build/`, `.venv/`, the bundled
   Chromium, and `VERIFICATION.md` (a personal log naming real employers) are
   git-ignored and must never be committed. Test fixtures use fictional
   details (`example.test` emails, 555 phone numbers), never the owner's real
   ones.
-- **The owner runs the installed app** from `/Applications/JobHub.app`. Every
+- **The owner runs the installed app** from `/Applications/Starployment.app`. Every
   iteration that changes the app ends by rebuilding and reinstalling it; see
   "Definition of done" below.
 
@@ -47,10 +53,12 @@ code. After you change anything that ships in the bundle (`jobhub/`, `web/`,
 
    This runs `build_desktop.py` and `smoke_bundle.py`, stages a signed copy,
    waits for any in-flight application in the live database to finish, asks
-   the running JobHub to quit cleanly, swaps the new bundle into
-   `/Applications/JobHub.app` (restoring the old one if verification fails),
-   and relaunches JobHub if it was running. Candidate data in
-   `~/Library/Application Support/JobHub` is never modified.
+   the running app to quit cleanly (including an older `JobHub.app`), swaps the
+   new bundle into `/Applications/Starployment.app` (restoring the old one if
+   verification fails), moves a leftover `/Applications/JobHub.app` to the
+   Trash, and relaunches the app if it was running. Candidate data (in
+   `~/Library/Application Support/Starployment`, or the existing `JobHub`
+   folder, which keeps being used in place) is never modified.
 4. **Report it:** tell the owner the app was reinstalled and relaunched, or
    why it was not.
 
@@ -59,7 +67,7 @@ Rules for this step:
 - If only docs, tests, or dev scripts changed, skip the rebuild. The installer
   refuses a bundle older than its bundled sources, so run it with `--build`
   whenever in doubt.
-- Never kill the process or otherwise interrupt JobHub while an application
+- Never kill the process or otherwise interrupt the app while an application
   is queued or running. The installer also waits for an in-progress scan. If it
   gives up waiting, report that and leave the installed app alone.
 - The build takes a few minutes and the bundle is about 900 MB; run it once, at
@@ -78,10 +86,17 @@ These are product guarantees, and several have regression tests. Do not weaken
 them to make a feature easier.
 
 1. **Never invent candidate facts.** Answers come only from the parsed resume
-   and from values the candidate saved (`settings.answers`,
-   `profile.custom_facts`). An unknown required answer stops the attempt with
-   status `needs_human`. Demographic questions are declined. Never add
-   defaults such as "work authorized: Yes".
+   and from values the candidate saved or approved (`settings.answers`,
+   `profile.custom_facts`, approved draft answers). An unknown required answer
+   stops the attempt with status `needs_human`. Demographic questions are
+   declined. Never add defaults such as "work authorized: Yes". Luna's drafts
+   are suggestions: they are stored with `source="luna"`, `approved=False`, and
+   reach a form only after the candidate approves them
+   (`prepare.approve_and_queue`). `luna.SENSITIVE_RE` keeps eligibility, salary,
+   start date, demographic, legal, and contact questions away from Luna
+   entirely; multiple-choice drafts must match a real option, and resume
+   selections are indices validated against the library. The resume builder
+   selects and orders the candidate's own wording; it never rewrites it.
 2. **"Applied" means confirmed.** A submission counts only with a new employer
    confirmation signal *and* a durable local record. `db.finish_application`
    refuses `applied` without `submission_attempted`. A form fill or Submit click
@@ -98,18 +113,37 @@ them to make a feature easier.
    (`dry_run`) fills forms without clicking Submit.
 6. **User data never ships.** `data/`, `.env`, resumes, screenshots, and the
    Playwright browser profile must never enter a bundle or
-   `dist/JobHub-source.zip` (`packaging/export_source.py` is an allowlist on
+   `dist/Starployment-source.zip` (`packaging/export_source.py` is an allowlist on
    purpose). `VERIFICATION.md` is a personal log and is excluded too.
 7. **Don't experiment on the real profile.** For demos, screenshots, or manual
    runs, point `JOBHUB_DATA_DIR` at a fresh temporary directory (see §4). The
    real data lives in `data/` for source runs and in
-   `~/Library/Application Support/JobHub` for the packaged app.
+   `~/Library/Application Support/Starployment` (or the legacy `JobHub` folder)
+   for the packaged app.
 8. **Tests never contact employers.** They use temporary databases and local
    browser fixtures. Keep it that way; mock the network.
 9. **Secrets stay in the OS vault.** The IMAP app password goes through
    `keyring` (`jobhub/apply/email_verification.py`), never into SQLite or logs.
    The Settings view sends it as a transient `_imap_password` patch key that the
-   controller strips before saving.
+   controller strips before saving (`DesktopController._store_mail_secret`).
+   Agent API keys use `agents.save_api_key` (keyring service
+   "Starployment agent key").
+10. **Prepared is not sent.** Drafts (`db.drafts`) are pre-application work.
+   Sending always goes through `scheduler.apply_one` (`prepare.send_draft`), so
+   rules 2–4 apply unchanged. `db.reset_unfinished` deletes only drafts that
+   were never sent and attempts that stopped before Submit; anything with
+   `submission_attempted` or `applied` is history and is never deleted. A job
+   with an open draft has status `prepared`, which keeps automatic runs away.
+11. **The inbox is read-only and minimal.** `email_tracker` opens INBOX
+   read-only, keeps only sender, subject, date, and the inferred stage
+   (`mail_events`), and only advances a stage
+   (`db.set_application_stage(..., "email")`); it never reopens an offer or a
+   closed application or undoes a manual choice. Uncertain matches are left
+   for the candidate.
+12. **Agents run tool-free.** `agents.complete` runs the Claude CLI with
+   `--tools ""` and the Codex CLI with shell, exec, apps, browser, computer
+   use, and web search disabled, `--ignore-user-config`, a read-only sandbox,
+   and an empty scratch folder. Keep it that way.
 
 ---
 
@@ -127,10 +161,10 @@ interpreter is equivalent.
 | Desktop tests only | `QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q tests/test_desktop_*.py tests/test_application_notes.py` |
 | Lint | `uvx ruff check --select F,E9,B --ignore B008,B905,B904 jobhub packaging scripts tests` (unused `app = QApplication(...)` in tests is intentional) |
 | Screenshots of every view | `.venv/bin/python scripts/render_screenshots.py` → `tmp/screenshots/` (`--docs` refreshes `docs/screenshots/`) |
-| Build the app bundle | `.venv/bin/python packaging/build_desktop.py` → `dist/JobHub.app` |
+| Build the app bundle | `.venv/bin/python packaging/build_desktop.py` → `dist/Starployment.app` |
 | Smoke-test the bundle | `.venv/bin/python packaging/smoke_bundle.py` |
 | Build, install to /Applications, relaunch | `.venv/bin/python packaging/install_app.py --build` (end of every iteration; flags: `--launch`, `--no-launch`, `--wait SECONDS`) |
-| Portable source zip | `.venv/bin/python packaging/export_source.py` → `dist/JobHub-source.zip` |
+| Portable source zip | `.venv/bin/python packaging/export_source.py` → `dist/Starployment-source.zip` |
 | Legacy web UI | `./run.sh` or `.venv/bin/python -m jobhub serve --no-scheduler` (port 8765) |
 | Health check | `.venv/bin/python -m jobhub doctor` |
 
@@ -164,8 +198,15 @@ sources/*  ──► db.upsert_jobs ──► scoring.score_all ──► schedu
                                           │           + answers.py + tailor.py
                                           └──── db.finish_application ◄─┘
 
-desktop/controller.py: one worker thread runs scans/applies/imports; the Qt
-thread only reads SQLite (refresh every 15 s) and renders via window.set_data.
+prepare.prepare_batch ──► drafts (db) ──► Applications review ──► prepare.send_draft
+  (form questions, answers,     ▲   Luna drafts (luna.py via agents.py)    │ (scheduler.apply_one)
+   one-page resume)             │                                          ▼
+email_tracker.sync ──► db.set_application_stage ──► Tracker ◄── applications (sent)
+
+desktop/controller.py: one browser worker thread runs scans, applies, imports,
+and sends; a two-thread "assist" pool runs preparation, Luna, inbox checks, and
+connection tests (never the browser). The Qt thread only reads SQLite (refresh
+every 15 s) and renders via window.set_data.
 ```
 
 | Path | Responsibility |
@@ -178,8 +219,13 @@ thread only reads SQLite (refresh every 15 s) and renders via window.set_data.
 | `jobhub/scheduler.py` | `scan_once`, `rescore`, `apply_one`, `auto_apply_batch`, shared `STATE`. |
 | `jobhub/apply/engine.py`, `adapters.py` | Browser form filling per ATS, confirmation detection, screenshots. |
 | `jobhub/answers.py` | Maps rendered form questions to saved candidate answers without guessing. |
-| `jobhub/profile.py`, `tailor.py` | Resume parsing (pdftotext/pypdf, optional LLM) and role-specific PDF output. |
-| `jobhub/setup.py`, `readiness.py` | Saving setup; what is still missing before unattended work. |
+| `jobhub/profile.py` | Resume parsing (pdftotext/pypdf, optional LLM). |
+| `jobhub/tailor.py` | One-page resume builder (`plan_resume`, `build_resume`: rank the library, shrink until one page), role types (`classify_role`), resume files (`choose_resume_file`), `resume_choice`. |
+| `jobhub/prepare.py` | Read Greenhouse/Lever/Ashby form definitions, answer from saved facts, Luna fill, `prepare_batch`, `approve_and_queue`, `send_draft`. |
+| `jobhub/agents.py` | Connections for Luna: Claude CLI, Codex CLI, Anthropic/OpenAI keys; CLI discovery beyond a GUI PATH, status, sign-in, tool-free `complete`. |
+| `jobhub/luna.py` | Draft answers (`draftable`, `draft_answers`), resume selection, optional email second opinion; all output validated. |
+| `jobhub/email_tracker.py` | Provider presets, read-only IMAP, `classify`, `match_application`, `sync`. |
+| `jobhub/setup.py`, `readiness.py` | Saving setup and the resume library (`save_resume_library`, `merge_resume_into_library`); what is still missing before unattended work. |
 | `jobhub/migration.py` | One-time import of checkout data into the packaged app's data directory. |
 | `jobhub/server.py`, `web/` | Legacy FastAPI JSON API and static web UI (no build step). |
 | `jobhub/desktop/` | The native app. See §5. |
@@ -225,7 +271,8 @@ Tests prove behavior; screenshots prove design. After any visual change:
 | `desktop/__main__.py` | Entry point and flags: `--no-scheduler`, `--setup`, `--smoke-test PNG`, `--browser-check`, `--dependency-check`. |
 | `desktop/controller.py` | `DesktopController`: signal wiring, worker thread, refresh loop, toasts, save handlers. The only place the UI talks to `db`/`scheduler`. |
 | `desktop/ui.py` | `JobHubWindow` shell: floating sidebar, page stack, toasts, keyboard shortcuts, macOS menu bar, theme crossfade, `set_data`, `set_scan_state`. Re-exports the views. |
-| `desktop/views/` | One module per sidebar page: `dashboard.py`, `jobs.py` (+ `AddPostingSheet`), `applications.py`, `profile.py`, `settings.py`. |
+| `desktop/views/` | One module per sidebar page: `dashboard.py` (+ `ApplyHero`, `ApplyPlanSheet`), `jobs.py` (+ `AddPostingSheet`), `applications.py` (drafts and attempts; `DraftDetail`, `QuestionRow`), `tracker.py` (spreadsheet, `AddApplicationSheet`), `profile.py` (Details, Resume builder, Resume files, Answers), `settings.py`. Shared panels: `resume_builder.py`, `connections.py` (Luna and Email, also used by the wizard). |
+| `desktop/editors.py` | No-syntax editors: `TagEditor` (chips), `KeyValueEditor` (label/value rows), `BulletEditor`, `FlowLayout`, `yes_no_control`. They set `formExpand` so `FormGroup` rows give them full width. |
 | `desktop/wizard.py` | `SetupWizard`: step indicator, resume drop zone, grouped forms, answer bank. |
 | `desktop/widgets.py` | The design system: backdrop, glass, controls, motion, layout helpers. |
 | `desktop/delegates.py` | `GlassTable` and item delegates (role, score ring, status pill, action capsule, application row). |
@@ -237,25 +284,37 @@ Tests prove behavior; screenshots prove design. After any visual change:
 
 ### 5.2 Design language
 
-JobHub follows Apple's current "liquid glass" direction: content floats on
+Starployment follows Apple's current "liquid glass" direction: content floats on
 translucent, rounded materials over a soft ambient color field, with restrained
 motion and minimal chrome. Concretely:
 
-- **Backdrop.** `AmbientBackdrop` / `paint_backdrop` paints a near-neutral base
-  with four large, soft radial glows (`theme.BACKDROP_GLOWS`) and a faint grain
-  that prevents banding (`widgets.BACKDROP_GRAIN`; `render_screenshots.py --docs`
-  turns it off because noise bloats PNGs). It renders at quarter resolution and
-  is cached per size and scheme. The glows avoid the upper-left, where titles sit directly on
-  the backdrop, so muted text keeps at least 4.5:1 contrast.
-- **Glass.** `GlassPanel` (and `paint_glass`) draws a translucent vertical
-  gradient fill, a 1px outer hairline (`glass_line`), and a specular inner rim
-  that fades out within ~30px (`glass_edge`). Materials: `regular` for content
-  cards, `sidebar` for the thinner navigation pane, and `thick` for sheets,
-  toasts, and menus. `tint="accent"` (etc.) washes a panel with a semantic color.
+- **Backdrop.** On the Qt fallback path, `AmbientBackdrop` / `paint_backdrop`
+  paints a near-neutral base with four large, soft radial glows
+  (`theme.BACKDROP_GLOWS`) and faint grain (`widgets.BACKDROP_GRAIN`; the docs
+  screenshot renderer turns it off because noise bloats PNGs). It renders at
+  quarter resolution and is cached per size and scheme. On supported macOS,
+  AppKit's `NSVisualEffectView` supplies the window base instead.
+- **Glass.** On macOS 26+ with the Cocoa platform, `native_glass.py` creates a
+  window-sized AppKit material plane below Qt's foreground. `NSGlassEffectView`
+  renders supported panels and capsules. Unclipped materials are batched by
+  `NSGlassEffectContainerView`; materials inside scroll areas or clipped by
+  ancestors use a separate unbatched plane because container batching promotes
+  descendants above intermediate masks. The unbatched plane uses an `NSView`
+  clipper with `clipsToBounds` and layer `masksToBounds` enabled.
+  `NSVisualEffectView` supplies the window background. These are OS-managed
+  materials: the active native path does not paint glass gradients in Qt. Qt
+  continues to own its controls, layout, focus, and input. On older macOS,
+  non-macOS platforms, offscreen rendering, or when native setup is unavailable,
+  `GlassPanel` and
+  `paint_glass` draw the translucent gradients, hairline, and highlight as a
+  fallback. `JOBHUB_NATIVE_GLASS=0` forces that fallback on a supported Mac.
+  `regular`, `sidebar`, and `thick` remain the logical surface roles; semantic
+  tints are passed to the native view where supported and applied during Qt
+  painting on the fallback path.
 - **Floating chrome.** The sidebar is a 236px glass pane inset 8–10px from the
-  window edges with radius 22. Its drop shadow is painted by the backdrop
-  (`add_shadow_target`), not by a `QGraphicsEffect`, so animating inside the
-  sidebar stays cheap.
+  window edges with radius 22. The fallback paints its shadow on the backdrop
+  (`add_shadow_target`) rather than with a `QGraphicsEffect`, so animation
+  inside the sidebar stays cheap.
 - **Shape.** Buttons, pills, search fields, and segmented controls are
   capsules. Cards use radius 16–18, grouped settings 14, and rows 10–12. Corner
   radii nest: inner radius is roughly outer radius minus the padding.
@@ -374,8 +433,53 @@ lights inside the floating sidebar. Consequences:
 - The native menu bar (File, Edit, View, Window) is only created on the
   `cocoa` platform; the same `QAction`s carry the shortcuts everywhere.
 
-Shortcuts: ⌘1–⌘5 pages, ⌘R refresh, ⌘N add posting, ⌘F find jobs, ⌘S save
-the current page, ⌘, Settings, ⌘⇧E edit setup, Return opens the selected job.
+### Native Liquid Glass materials
+
+Native materials are enabled only when `sys.platform` is macOS, Qt reports the
+`cocoa` platform, AppKit exposes both `NSGlassEffectView` and
+`NSGlassEffectContainerView`, and `JOBHUB_NATIVE_GLASS` is not set to `0`,
+`false`, `off`, or `no`. The main window, setup wizard, and Add Posting dialog
+prepare a translucent Qt backing store before their Cocoa window is created.
+One AppKit plane per window follows the Qt widget geometry: a window-level
+`NSVisualEffectView` sits behind a batched glass container, and supported Qt
+panels and capsules map to `NSGlassEffectView` instances. Qt widgets remain
+ordinary controls and retain their layout, focus, and input behavior.
+
+AppKit owns the material appearance on this path. Do not describe or tune its
+active material as the `paint_glass` gradient. That painter remains the
+fallback for older macOS, non-macOS, offscreen tests/screenshots, disabled
+native glass, or unavailable native classes. The switch does not disable the
+separate native title-bar behavior; use `JOBHUB_NATIVE_TITLEBAR=0` for that.
+
+Offscreen `QWidget.grab()` screenshots verify the Qt-painted fallback and
+layout, not the AppKit compositor. For an isolated compositor check, run
+`.venv/bin/python -m jobhub.desktop --native-glass-check tmp/native-glass-check`
+on macOS 26+ with Cocoa. If `QT_QPA_PLATFORM` is set to `offscreen`, prefix the
+command with `QT_QPA_PLATFORM=cocoa`. This diagnostic runs before data
+migration and controller startup, uses synthetic controls without database or
+network access, and writes actual `screencapture` PNGs plus `diagnostic.json`
+to the output directory. It checks light and dark appearances, resize,
+partially clipped material bounds, and dialog close/reopen. Run the regular
+app with a temporary `JOBHUB_DATA_DIR` for broader visual review of pages and
+the setup wizard. Native setup failures must leave the Qt fallback visible and
+must not prevent the app from opening.
+
+Glass sync contract (`native_glass.py`): `_WindowHook` is an object-level
+filter on the window and its `QWindow`. It syncs right after layout on the
+window's Resize and flushes a pending sync on UpdateRequest/Expose/Paint, so
+native glass and Qt paint land in the same frame during live resize, page
+transitions, and scrolling. Clippers use `NSViewMinYMargin` so AppKit keeps
+them top-anchored between syncs. Widgets destroyed through their parent get no
+DeferredDelete; `_release_native` (connected to the surface's `destroyed`
+signal, and checked with `shiboken6.isValid` on every refresh) removes their
+native views. `_WindowMaterials.__init__` must never raise: return with
+`active=False` instead. Verify on a Mac with a temporary data dir by comparing
+each surface's native frame with `visible_rect` after resizes, tab switches,
+and scrolling.
+
+Shortcuts: ⌘1–⌘6 pages (Overview, Jobs, Applications, Tracker, Profile,
+Settings), ⌘⇧A Apply…, ⌘R refresh, ⌘N add posting, ⌘F find jobs, ⌘S save the
+current page, ⌘, Settings, ⌘⇧E edit setup, Return opens the selected job.
 
 ### 5.9 Recipes
 
@@ -431,14 +535,14 @@ contrast) and look at the screenshots.
   `packaging/assets/jobhub-icon.svg`, installs Chromium into
   `packaging/playwright-browsers/`, runs PyInstaller with
   `packaging/jobhub.spec`, copies Chromium and the Playwright driver into the
-  bundle, then ad hoc signs `dist/JobHub.app` on macOS. It takes a few
+  bundle, then ad hoc signs `dist/Starployment.app` on macOS. It takes a few
   minutes. Chromium is large; the directory is git-ignored.
 - `collect_submodules("jobhub")` picks up new modules automatically. New
   non-Python assets need a `datas` entry in the spec (the Lucide directory and
   app icon are already included).
 - `packaging/smoke_bundle.py` runs the frozen app with a temporary data
   directory: dependency check, Chromium launch, and an offscreen window render.
-- `packaging/install_app.py` installs `dist/JobHub.app` into `/Applications`
+- `packaging/install_app.py` installs `dist/Starployment.app` into `/Applications`
   (macOS only). It refuses stale bundles, never interrupts an in-flight
   application or scan, quits the app through Apple Events (bundle ID
   `local.jobhub.desktop`), swaps atomically with rollback, and relaunches.

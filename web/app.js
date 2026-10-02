@@ -64,7 +64,7 @@ async function refreshState() {
     $('#scan-history').innerHTML = (s.runs || []).slice(0,3).map(r => `<details class="scan"><summary>${fmtTs(r.started_at)} <span class="pill">${esc(r.status)}</span> <span class="muted">${r.found || 0} found · ${r.new_jobs || 0} new</span></summary><pre>${esc((r.log || []).join('\n'))}</pre></details>`).join('') || '<p class="muted small">No scans yet.</p>';
   } catch (e) {
     $('#r-sched').textContent = 'Offline'; $('#connection').classList.remove('hidden');
-    $('#connection').textContent = 'Cannot reach JobHub. Keep the launcher window open, then reload this page.';
+    $('#connection').textContent = 'Cannot reach Starployment. Keep the launcher window open, then reload this page.';
   } finally { refreshBusy = false; }
 }
 $('#btn-scan').onclick = perform(async () => { await api('/api/scan',{method:'POST'}); toast('Scanning your enabled sources'); refreshState(); });

@@ -1,4 +1,4 @@
-"""Create a portable, candidate-free JobHub source archive.
+"""Create a portable, candidate-free Starployment source archive.
 
 The allowlist is intentional: a checkout may contain resumes, mailbox secrets,
 browser state, application screenshots, and other local files outside the app.
@@ -16,7 +16,7 @@ SOURCE_DIRS = ("jobhub", "web", "scripts", "packaging", "tests", "docs", ".githu
 ROOT_FILES = (
     "README.md", "AGENTS.md", "CLAUDE.md", "pyproject.toml", "uv.lock", ".python-version", ".gitignore", ".env.example",
     "run_desktop.sh", "run_desktop.bat", "run_desktop.command", "run_setup.sh", "run_setup.bat",
-    "Launch JobHub.command", "Set up JobHub.command", "run.sh",
+    "Launch Starployment.command", "Set up Starployment.command", "run.sh",
 )
 SKIP_PARTS = {"__pycache__", "playwright-browsers", ".pytest_cache", ".ruff_cache"}
 SKIP_NAMES = {".DS_Store", ".env"}
@@ -43,14 +43,14 @@ def source_files(root: Path) -> list[Path]:
 
 
 def build_archive(root: Path = ROOT, output: Path | None = None) -> tuple[Path, int, str]:
-    output = output or root / "dist" / "JobHub-source.zip"
+    output = output or root / "dist" / "Starployment-source.zip"
     files = source_files(root)
     if not files or Path("jobhub/__init__.py") not in files or Path("README.md") not in files:
         raise RuntimeError("The source checkout is incomplete; refusing to create a partial archive")
     output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=8) as archive:
         for relative in files:
-            archive.write(root / relative, arcname=(Path("JobHub") / relative).as_posix())
+            archive.write(root / relative, arcname=(Path("Starployment") / relative).as_posix())
     with zipfile.ZipFile(output) as archive:
         bad_file = archive.testzip()
         if bad_file:

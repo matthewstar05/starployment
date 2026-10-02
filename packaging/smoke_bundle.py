@@ -1,4 +1,4 @@
-"""Exercise a frozen JobHub bundle without reading or writing candidate data."""
+"""Exercise a frozen Starployment bundle without reading or writing candidate data."""
 from __future__ import annotations
 
 import os
@@ -14,10 +14,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def executable_path(platform: str = sys.platform, root: Path = ROOT) -> Path:
     if platform == "darwin":
-        return root / "dist" / "JobHub.app" / "Contents" / "MacOS" / "JobHub"
+        return root / "dist" / "Starployment.app" / "Contents" / "MacOS" / "Starployment"
     if platform == "win32":
-        return root / "dist" / "JobHub" / "JobHub.exe"
-    return root / "dist" / "JobHub" / "JobHub"
+        return root / "dist" / "Starployment" / "Starployment.exe"
+    return root / "dist" / "Starployment" / "Starployment"
 
 
 def executable_format(path: Path) -> str:
@@ -52,7 +52,7 @@ def main() -> int:
         raise SystemExit(f"No native bundle found at {executable}")
     validate_executable_platform(executable)
 
-    with tempfile.TemporaryDirectory(prefix="jobhub-bundle-smoke-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="starployment-bundle-smoke-") as temporary:
         temporary_dir = Path(temporary)
         env = os.environ.copy()
         env["JOBHUB_DATA_DIR"] = str(temporary_dir / "candidate-data")

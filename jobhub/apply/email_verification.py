@@ -17,6 +17,7 @@ from email.parser import BytesParser
 from email.utils import getaddresses, parsedate_to_datetime
 from html.parser import HTMLParser
 
+# Kept from the JobHub name so passwords saved before the rename keep working.
 SERVICE = "JobHub IMAP verification"
 _NATIVE_BACKENDS = ("keyring.backends.macOS", "keyring.backends.Windows", "keyring.backends.SecretService")
 

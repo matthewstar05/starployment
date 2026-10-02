@@ -1,4 +1,4 @@
-"""Runtime paths for a frozen JobHub process."""
+"""Runtime paths for a frozen Starployment process."""
 import os
 import sys
 from pathlib import Path

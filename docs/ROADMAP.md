@@ -1,6 +1,6 @@
-# JobHub product map
+# Starployment product map
 
-JobHub's first useful loop is local setup, discovery, ranking, truthful resume tailoring, supported form filling, and a durable application history. The native app should make the next action obvious: review a missing fact, inspect a matched role, or see an employer-confirmed submission. A score is a ranking aid, not a probability of getting hired.
+Starployment's first useful loop is local setup, discovery, ranking, truthful resume tailoring, supported form filling, and a durable application history. The native app should make the next action obvious: review a missing fact, inspect a matched role, or see an employer-confirmed submission. A score is a ranking aid, not a probability of getting hired.
 
 ## What the prototype already does
 
@@ -12,6 +12,10 @@ JobHub's first useful loop is local setup, discovery, ranking, truthful resume t
 | Matching | Explainable job score using title, skills, experience, location, compensation, and recency. |
 | Applications | Role-specific PDF with extractive summary from saved facts, ordinary Greenhouse/Lever/Ashby form filling, duplicate control, and employer-confirmation checks. |
 | History | SQLite run and application records with screenshots, unanswered questions, source diagnostics, and private notes editable from a selected application. |
+| Apply flow | Overview → Apply prepares the top matches for review: form questions read ahead from Greenhouse, Lever, and Ashby, answers from saved facts, Luna drafts for open questions, a resume per role. Approve and send one at a time or in a batch; reset what was never sent. |
+| Resume library | Unlimited roles, projects, schools, skills, and awards; a one-page resume generated per role by ranking and trimming the candidate's own wording; resume files by role type. |
+| Luna | Optional drafting assistant on the candidate's Claude or ChatGPT plan (or an API key), run tool-free; every draft needs approval; sensitive questions never reach her. |
+| Tracker | Sortable spreadsheet of sent applications with stages, salary and location stats, notes, manual entries, CSV export, and read-only inbox tracking of assessments, interviews, offers, and rejections. |
 | Packaging | A tested macOS arm64 app bundle, portable source archive, and native build recipes for macOS, Windows, and Linux. |
 
 ## Next milestones, in priority order
@@ -27,8 +31,8 @@ JobHub's first useful loop is local setup, discovery, ranking, truthful resume t
 - **Broader discovery:** user-managed company lists, more employer ATS adapters, saved search presets, stale-posting detection, and source reliability summaries. LinkedIn and Indeed listings can lead to employer sites without claiming universal scrape coverage.
 - **More form adapters:** Workday, SmartRecruiters, iCIMS, and site-specific forms, each with fixtures, live practice checks, and confirmation rules. Login walls and challenge flows need their own explicit support path.
 - **Application strategy:** configurable company frequency limits, salary floors, remote and office attendance preferences, saved-job queues, and a reasoned comparison of career growth, compensation, location, and role fit. Never label a heuristic as an admission probability.
-- **Candidate materials:** multiple verified resume variants, a source-of-truth experience library, optional cover letters grounded in that library, and a review diff showing every selected claim.
-- **Follow-up workspace:** interview stages, contact notes, deadlines, exportable application history, and reminders. No outbound message should be sent without an explicit user action or an authorized rule.
+- **Candidate materials:** the experience library and role-specific resume files now exist. Next: cover letters grounded in the library and a review diff showing every selected claim.
+- **Follow-up workspace:** stages, notes, CSV export, and inbox tracking now exist. Next: contacts, deadlines, reminders, and Gmail OAuth as an alternative to app passwords. No outbound message should be sent without an explicit user action or an authorized rule.
 - **Distribution:** signed and notarized macOS releases, Windows signing, Linux packages, automatic updates, and a first-run guide. User profiles, browser state, credentials, resumes, and screenshots stay outside release artifacts.
 
 The unattended path depends on accurate candidate-owned facts and supported employer forms. Unknown eligibility, personal narratives, office attendance, and legal consent remain unanswered until the candidate supplies them. The app should report exactly what it attempted and what the employer confirmed.

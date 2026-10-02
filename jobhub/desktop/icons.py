@@ -36,6 +36,20 @@ _ICON_FILES = {
     "layers": "layers.svg",
     "zap": "zap.svg",
     "close": "x.svg",
+    "tracker": "sheet.svg",
+    "luna": "sparkles.svg",
+    "mail": "mail.svg",
+    "star": "star.svg",
+    "trash": "trash-2.svg",
+    "folder": "folder-open.svg",
+    "plug": "plug.svg",
+    "reset": "rotate-ccw.svg",
+    "download": "download.svg",
+    "eye": "eye.svg",
+    "pin": "pin.svg",
+    "education": "graduation-cap.svg",
+    "code": "code.svg",
+    "award": "award.svg",
 }
 _DEFAULT_COLOR = "#5b6573"
 
@@ -45,7 +59,7 @@ def icon_path(name: str) -> Path:
     try:
         filename = _ICON_FILES[name]
     except KeyError as error:
-        raise ValueError(f"Unknown JobHub icon: {name}") from error
+        raise ValueError(f"Unknown Starployment icon: {name}") from error
 
     frozen_root = getattr(sys, "_MEIPASS", None)
     if frozen_root:
@@ -75,7 +89,7 @@ def icon_pixmap(name: str, color: str = _DEFAULT_COLOR, size: int = 20,
         source = source.replace(b'stroke-width="2"', f'stroke-width="{stroke:g}"'.encode("ascii"))
     renderer = QSvgRenderer(QByteArray(source))
     if not renderer.isValid():
-        raise ValueError(f"Unable to render JobHub icon: {name}")
+        raise ValueError(f"Unable to render Starployment icon: {name}")
 
     pixmap = QPixmap(QSize(size * scale, size * scale))
     pixmap.fill(Qt.GlobalColor.transparent)

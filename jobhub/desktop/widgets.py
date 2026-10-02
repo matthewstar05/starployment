@@ -1,4 +1,4 @@
-"""Apple-style presentation primitives for the JobHub desktop client.
+"""Apple-style presentation primitives for the Starployment desktop client.
 
 The visual language is "liquid glass": an ambient color field
 (``AmbientBackdrop``) sits behind translucent rounded materials
@@ -81,6 +81,7 @@ from PySide6.QtWidgets import (
 )
 
 from .icons import icon_pixmap, jobhub_icon
+from .native_glass import GlassSurface, refresh_window_materials, window_has_native_glass
 from .theme import BACKDROP_GLOWS, DARK, PALETTES, current_colors, current_scheme
 
 
@@ -241,6 +242,8 @@ def _backdrop_pixmap(width: int, height: int, dpr: float, scheme: str, grain: bo
 
 def paint_backdrop(painter: QPainter, widget: QWidget) -> None:
     """Fill ``widget`` with the ambient color field for the current scheme."""
+    if window_has_native_glass(widget):
+        return
     size = widget.size()
     dpr = widget.devicePixelRatioF() or 1.0
     painter.drawPixmap(0, 0, _backdrop_pixmap(size.width(), size.height(), round(dpr, 2), current_scheme(),
@@ -391,6 +394,8 @@ class AmbientBackdrop(QWidget):
         return super().eventFilter(watched, event)
 
     def paintEvent(self, event) -> None:
+        if window_has_native_glass(self):
+            return
         painter = QPainter(self)
         paint_backdrop(painter, self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -419,6 +424,9 @@ class GlassPanel(QFrame):
         self._material = material
         self._tint = tint
         self._tint_alpha = tint_alpha
+        self._native_glass = GlassSurface(
+            self, radius, tint=lambda: (self._tint, self._tint_alpha) if self._tint else None,
+        )
 
     @property
     def radius(self) -> float:
@@ -428,9 +436,12 @@ class GlassPanel(QFrame):
         self._tint = tint
         if alpha is not None:
             self._tint_alpha = alpha
+        self._native_glass.refresh()
         self.update()
 
     def paintEvent(self, event) -> None:
+        if self._native_glass.active:
+            return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         tint = with_alpha(current_colors()[self._tint], self._tint_alpha) if self._tint else None
@@ -595,6 +606,7 @@ class GlassNavList(QListWidget):
         self._anim = QVariantAnimation(self)
         self._anim.valueChanged.connect(self._set_pill)
         self.currentRowChanged.connect(self._move_pill)
+        self._native_selection = GlassSurface(self.viewport(), 10, rect=lambda: self._pill)
 
     def add_destination(self, label: str, icon_name: str) -> QListWidgetItem:
         item = QListWidgetItem(label)
@@ -625,6 +637,7 @@ class GlassNavList(QListWidget):
 
     def _set_pill(self, rect) -> None:
         self._pill = QRectF(rect)
+        self._native_selection.refresh()
         self.viewport().update()
 
     def _move_pill(self, row: int) -> None:
@@ -662,7 +675,7 @@ class GlassNavList(QListWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         if 0 <= self._hover_row != self.currentRow():
             painter.fillPath(rounded_path(self._target(self._hover_row), 10), qcolor(colors["fill_hover"]))
-        if not self._pill.isNull() and self.currentRow() >= 0:
+        if not self._native_selection.active and not self._pill.isNull() and self.currentRow() >= 0:
             if current_scheme() == DARK:
                 paint_glass(painter, self._pill, 10, material="regular",
                             tint=with_alpha("#FFFFFF", 0.06))
@@ -786,6 +799,7 @@ class SegmentedControl(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self._native_glass = GlassSurface(self, lambda: self.height() / 2)
 
     # QComboBox-compatible surface -------------------------------------------------
     def addItem(self, text: str, data: object = None) -> None:  # noqa: N802
@@ -915,7 +929,8 @@ class SegmentedControl(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         track = QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5)
         radius = track.height() / 2
-        painter.fillPath(rounded_path(track, radius), qcolor(colors["fill_quiet"]))
+        if not self._native_glass.active:
+            painter.fillPath(rounded_path(track, radius), qcolor(colors["fill_quiet"]))
         if not self._thumb.isNull() and self._index >= 0:
             thumb = self._thumb.adjusted(0.5, 0.5, -0.5, -0.5)
             if current_scheme() == DARK:
@@ -923,8 +938,9 @@ class SegmentedControl(QWidget):
                 painter.setPen(QPen(with_alpha("#FFFFFF", 0.12), 1))
                 painter.drawPath(rounded_path(thumb, thumb.height() / 2))
             else:
-                paint_soft_shadow(painter, thumb, thumb.height() / 2, with_alpha("#000000", 0.14), blur=5,
-                                  offset=QPointF(0, 1.5), steps=5)
+                if not self._native_glass.active:
+                    paint_soft_shadow(painter, thumb, thumb.height() / 2, with_alpha("#000000", 0.14), blur=5,
+                                      offset=QPointF(0, 1.5), steps=5)
                 painter.fillPath(rounded_path(thumb, thumb.height() / 2), QColor("#FFFFFF"))
         metrics = self._metrics()
         for index, (text, _) in enumerate(self._items):
@@ -953,6 +969,7 @@ class SearchField(QLineEdit):
         self.setClearButtonEnabled(True)
         self._icon_action = self.addAction(QIcon(), QLineEdit.ActionPosition.LeadingPosition)
         self._refresh_icon()
+        self._native_glass = GlassSurface(self, lambda: self.height() / 2)
 
     def _refresh_icon(self) -> None:
         self._icon_action.setIcon(jobhub_icon("search", current_colors()["text_subtle"], 15))
@@ -1139,6 +1156,11 @@ class CapsuleButton(QPushButton):
         self._icon_name = icon
         self._trailing = trailing
         self.refresh_icon()
+        self._native_glass = GlassSurface(
+            self, lambda: self.height() / 2,
+            tint=lambda: ("accent", 0.9) if role == "primary" else ("red", 0.12) if role == "danger" else None,
+            opacity=lambda: 1.0 if self.isEnabled() else 0.35,
+        )
 
     def sizeHint(self) -> QSize:
         hint = super().sizeHint()
@@ -1472,9 +1494,12 @@ class FormGroup(QWidget):
         layout = QHBoxLayout(row)
         layout.setContentsMargins(16, 9, 14, 9)
         layout.setSpacing(14)
-        multiline = isinstance(field, (QTextEdit, QPlainTextEdit))
+        grows = bool(field.property("formExpand"))   # chip lists and row editors
+        if field.metaObject().className() == "QComboBox" and getattr(field, "isEditable", lambda: False)():
+            expand = True if expand is None else expand   # an editable choice reads like a text field
+        multiline = isinstance(field, (QTextEdit, QPlainTextEdit)) or grows
         if expand is None:
-            expand = isinstance(field, (QLineEdit, QTextEdit, QPlainTextEdit)) or (
+            expand = isinstance(field, (QLineEdit, QTextEdit, QPlainTextEdit)) or grows or (
                 isinstance(field, ToggleSwitch) and bool(field.text())
             )
         if title or description:
@@ -1647,6 +1672,8 @@ class DirtyTracker(QObject):
                 widget.valueChanged.connect(self._mark)
             elif isinstance(widget, SegmentedControl):
                 widget.currentIndexChanged.connect(self._mark)
+            elif hasattr(widget, "changed"):
+                widget.changed.connect(self._mark)   # TagEditor, KeyValueEditor, BulletEditor
 
     def _mark(self, *_args) -> None:
         if self._suspended or self._dirty:
@@ -1707,6 +1734,7 @@ class FadeStack(QStackedWidget):
         fade.setStartValue(0.0)
         fade.setEndValue(1.0)
         fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+        fade.valueChanged.connect(lambda: refresh_window_materials(self))
         end = self.contentsRect().topLeft()
         if self._mode == "push":
             direction = 1 if index > previous else -1
@@ -1735,6 +1763,7 @@ class FadeStack(QStackedWidget):
         if page is not None:
             page.setGraphicsEffect(None)
             page.move(self.contentsRect().topLeft())
+            refresh_window_materials(self)
 
 
 # --------------------------------------------------------------------------- feedback
@@ -1758,6 +1787,12 @@ class Toast(QWidget):
         self._text = ""
         self._tone = "info"
         self._progress = 0.0
+        self._native_glass = GlassSurface(
+            self, self.HEIGHT / 2,
+            rect=lambda: QRectF(self.rect()).adjusted(self.MARGIN, self.MARGIN, -self.MARGIN, -self.MARGIN)
+                         .translated(0, (1.0 - self._progress) * 18),
+            opacity=lambda: self._progress,
+        )
         self._phase = 0
         self._anim = QVariantAnimation(self)
         self._anim.valueChanged.connect(self._set_progress)
@@ -1815,6 +1850,7 @@ class Toast(QWidget):
 
     def _set_progress(self, value) -> None:
         self._progress = float(value)
+        self._native_glass.refresh()
         self.update()
 
     def _tick(self) -> None:
@@ -1846,8 +1882,9 @@ class Toast(QWidget):
         painter.setOpacity(min(1.0, self._progress))
         painter.translate(0, (1.0 - self._progress) * 18)
         body = QRectF(self.rect()).adjusted(self.MARGIN, self.MARGIN, -self.MARGIN, -self.MARGIN)
-        paint_soft_shadow(painter, body, body.height() / 2, colors["glass_shadow"], blur=18)
-        paint_glass(painter, body, body.height() / 2, material="thick")
+        if not self._native_glass.active:
+            paint_soft_shadow(painter, body, body.height() / 2, colors["glass_shadow"], blur=18)
+            paint_glass(painter, body, body.height() / 2, material="thick")
         icon_center = QPointF(body.left() + 22, body.center().y())
         if self._tone == "busy":
             paint_activity_indicator(painter, icon_center, 8, self._phase, colors["text_muted"])

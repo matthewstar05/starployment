@@ -13,6 +13,23 @@ STATUS_LABELS = {
     "failed": "Issue",
     "skipped": "Skipped",
     "dry_run": "Practice run",
+    # prepared applications (drafts)
+    "prepared": "Prepared",
+    "preparing": "Preparing",
+    "ready": "Ready to review",
+    "needs_answers": "Needs answers",
+    "approved": "Approved",
+    "sending": "Sending",
+    "sent": "Sent",
+    "practice": "Practice run",
+    "unconfirmed": "Unconfirmed",
+    "error": "Issue",
+    # hiring stages
+    "assessment": "Assessment",
+    "interview": "Interview",
+    "offer": "Offer",
+    "rejected": "Rejected",
+    "withdrawn": "Withdrawn",
 }
 
 
@@ -20,6 +37,24 @@ def status_label(status: str | None) -> str:
     """Human wording for a job or application status."""
     status = str(status or "unknown")
     return STATUS_LABELS.get(status, status.replace("_", " ").title())
+
+
+def retryable_job_ids(applications: list[dict]) -> set[str]:
+    """Offer another attempt only before any known submit for the vacancy."""
+    blocked = set()
+    latest: dict[str, dict] = {}
+    for record in applications:
+        job_id = record.get("job_id")
+        key = record.get("canonical_key") or job_id
+        if record.get("submission_attempted") or record.get("status") in {"applied", "queued", "running"}:
+            blocked.add(key)
+        if job_id and (job_id not in latest or int(record.get("id") or 0) > int(latest[job_id].get("id") or 0)):
+            latest[job_id] = record
+    return {
+        job_id for job_id, record in latest.items()
+        if record.get("status") in {"needs_human", "failed", "dry_run"}
+        and (record.get("canonical_key") or job_id) not in blocked
+    }
 
 
 def parse_time(value: str | None) -> datetime | None:
@@ -167,3 +202,46 @@ def pretty_log_line(line: str) -> str:
     if not match or parse_time(match.group(1)) is None:
         return str(line)
     return f"{local_time(match.group(1))}   {match.group(2)}"
+
+
+# --------------------------------------------------------------------------- tracker
+STAGE_ORDER = ("applied", "assessment", "interview", "offer", "rejected", "withdrawn")
+ACTIVE_STAGES = {"applied", "assessment", "interview", "offer"}
+CLOSED_STAGES = {"rejected", "withdrawn"}
+
+
+def salary_midpoint(minimum: int | None, maximum: int | None) -> float | None:
+    values = [v for v in (minimum, maximum) if isinstance(v, (int, float)) and v > 0]
+    return sum(values) / len(values) if values else None
+
+
+def tracker_stats(rows: list[dict]) -> dict:
+    """Summary numbers for the Tracker header. A score is never shown as a probability."""
+    from statistics import median
+
+    total = len(rows)
+    stages = [str(r.get("stage") or "applied") for r in rows]
+    responded = sum(1 for s in stages if s in ("assessment", "interview", "offer", "rejected"))
+    pays = [m for r in rows if (m := salary_midpoint(r.get("salary_min"), r.get("salary_max")))]
+    places: dict[str, int] = {}
+    for r in rows:
+        place = "Remote" if r.get("remote") and not r.get("location") else str(r.get("location") or "").split(";")[0].strip()
+        if place:
+            places[place] = places.get(place, 0) + 1
+    return {
+        "total": total,
+        "responded": responded,
+        "response_rate": round(100 * responded / total) if total else 0,
+        "assessment": stages.count("assessment"),
+        "interview": stages.count("interview"),
+        "offer": stages.count("offer"),
+        "rejected": stages.count("rejected"),
+        "median_salary": int(median(pays)) if pays else None,
+        "top_locations": sorted(places.items(), key=lambda item: (-item[1], item[0]))[:3],
+    }
+
+
+def compact_money(amount: float | None) -> str:
+    if not amount:
+        return "—"
+    return f"${amount / 1000:,.0f}k" if amount >= 1000 else f"${amount:,.0f}"

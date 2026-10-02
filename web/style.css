@@ -1,4 +1,4 @@
-/* JobHub legacy web UI: the same liquid-glass language as the desktop app.
+/* Starployment legacy web UI: the same liquid-glass language as the desktop app.
    Tokens mirror jobhub/desktop/theme.py. Class names are used by app.js. */
 :root{
   color-scheme:light dark;

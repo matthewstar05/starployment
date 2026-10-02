@@ -37,38 +37,75 @@ COMPANIES = [
     ("Example", "Data Engineer", "Remote", 128_000, 150_000, 77),
     ("Vantage", "Security Engineer", "Washington, DC", 150_000, 190_000, 35),
 ]
-PAGES = ("dashboard", "jobs", "applications", "profile", "settings", "setup")
+PAGES = ("dashboard", "jobs", "applications", "tracker", "profile", "builder", "settings", "apply", "setup")
 # README image names written by --docs.
 DOC_NAMES = {
-    "dashboard-light.png": "jobhub-macos.png",
-    "dashboard-dark.png": "jobhub-macos-dark.png",
-    "jobs-light.png": "jobhub-jobs-light.png",
-    "jobs-dark.png": "jobhub-jobs-dark.png",
-    "applications-light.png": "jobhub-applications-light.png",
-    "applications-dark.png": "jobhub-applications-dark.png",
-    "settings-light.png": "jobhub-settings-light.png",
-    "settings-dark.png": "jobhub-settings-dark.png",
-    "setup-step1-dark.png": "jobhub-setup-dark.png",
-    "setup-step3-light.png": "jobhub-setup-light.png",
+    "dashboard-light.png": "starployment-overview-light.png",
+    "dashboard-dark.png": "starployment-overview-dark.png",
+    "jobs-light.png": "starployment-jobs-light.png",
+    "jobs-dark.png": "starployment-jobs-dark.png",
+    "applications-light.png": "starployment-applications-light.png",
+    "applications-dark.png": "starployment-applications-dark.png",
+    "tracker-light.png": "starployment-tracker-light.png",
+    "tracker-dark.png": "starployment-tracker-dark.png",
+    "builder-light.png": "starployment-resume-builder-light.png",
+    "settings-light.png": "starployment-settings-light.png",
+    "settings-dark.png": "starployment-settings-dark.png",
+    "setup-step1-dark.png": "starployment-setup-dark.png",
+    "setup-step3-light.png": "starployment-setup-light.png",
 }
 
 
 def seed(db, config) -> None:
-    from jobhub.models import Job, Profile
+    from jobhub.models import Education, Experience, Job, Profile, Project
 
     now = datetime.now(timezone.utc)
+    experience = [
+        Experience(company="Northbeam Analytics", title="Software Engineer Intern", location="San Francisco, CA",
+                   start="Jun 2025", end="Sep 2025", tech=["Python", "Airflow", "Postgres"],
+                   bullets=["Built an Airflow pipeline that cut nightly reporting time from 3 hours to 40 minutes",
+                            "Added data-quality checks that caught 12 schema regressions before release",
+                            "Wrote a Postgres partitioning plan for a 2 TB events table"]),
+        Experience(company="Campus Research Lab", title="Research Assistant", location="San Luis Obispo, CA",
+                   start="Jan 2024", end="Present", tech=["R", "Stata", "Python"],
+                   bullets=["Estimated labor-market models on 1.2M survey records",
+                            "Automated figure generation for two working papers"]),
+        Experience(company="Harbor Trading Club", title="Quant Developer", start="Sep 2023", end="Jun 2025",
+                   tech=["C++", "Python"], bullets=["Wrote a backtester for 40 equity strategies",
+                                                    "Mentored eight members on market microstructure"]),
+    ] + [Experience(company=f"Example Co {i}", title="Teaching Assistant", start=f"Jan {2019 + i}",
+                    end=f"Jun {2019 + i}", bullets=["Led weekly labs for 30 students"]) for i in range(8)]
+    projects = [
+        Project(name="Order Book Simulator", role="Author", tech=["C++", "CMake"],
+                bullets=["Simulated a limit order book processing 1M messages per second"]),
+        Project(name="Transit Delay Forecasts", role="Lead", tech=["Python", "Pandas", "XGBoost"],
+                bullets=["Forecast bus delays with 18% lower error than the agency baseline"]),
+        Project(name="Voxel Engine", role="Author", tech=["C++", "OpenGL"],
+                bullets=["Rendered 10M voxels at 120 fps with greedy meshing"]),
+    ] + [Project(name=f"Side Project {i}", tech=["TypeScript"], bullets=["Shipped a small web tool"]) for i in range(9)]
     db.save_profile(Profile(
         first_name="Alex", last_name="Rivera", email="alex.rivera@example.test", phone="555-0134",
         city="San Luis Obispo", state="CA", country="United States",
         linkedin="https://www.linkedin.com/in/example", github="https://github.com/example",
         headline="Software engineer focused on data systems",
         summary="New-grad engineer who builds reliable data pipelines and quantitative tooling.",
-        skills=["Python", "SQL", "Go", "Kubernetes", "Pandas", "React"],
+        skills=["Python", "SQL", "Go", "Kubernetes", "Pandas", "React", "C++", "Airflow", "Postgres", "Rust",
+                "TypeScript", "Docker", "Spark", "XGBoost", "R", "Stata"],
+        education=[Education(school="Example State University", degree="B.S. Computer Science", start="Sep 2022",
+                             end="Jun 2026", gpa="3.8")],
+        experience=experience, projects=projects, awards=["Dean's List, six quarters", "ICPC regional finalist"],
+        custom_facts={"Home city": "San Luis Obispo, CA", "Languages spoken": "English, Spanish"},
     ))
     db.set_settings({
         "setup_complete": True, "auto_apply": True, "dry_run": False, "appearance": "System",
         "target_titles": ["Software Engineer", "Data Engineer", "Quantitative Developer"],
         "preferred_locations": ["San Francisco, CA", "New York, NY", "Remote"],
+        "agent": {"backend": "claude_cli", "model": ""},
+        "email_verification": {"enabled": False, "imap_host": "imap.gmail.com", "imap_port": 993,
+                               "imap_username": "alex.rivera@example.test", "sender_address": ""},
+        "answers": {**db.get_settings()["answers"], "work_authorized_us": "Yes", "requires_sponsorship": "No",
+                    "confirmed_fields": ["work_authorized_us", "requires_sponsorship"],
+                    "field_answers": {"Are you willing to work in person?": "Yes"}},
     })
     jobs = []
     for index, (company, title, location, low, high, _score) in enumerate(COMPANIES):
@@ -89,13 +126,14 @@ def seed(db, config) -> None:
     db.update_scores(scores)
     by_company = {job.company: job for job in jobs}
     statuses = {"Bluebird": "applied", "Example": "needs_human", "Pinecrest": "needs_human",
-                "Keystone Fintech": "skipped", "Vantage": "failed"}
+                "Keystone Fintech": "skipped", "Vantage": "failed", "Cobalt Systems": "dry_run"}
     applications = [
         ("Bluebird", "applied", 1, [], "", "Thank-you page confirmed.\nFollow up with the recruiter Friday."),
         ("Example", "needs_human", 0, ["Current location (required)", "Earliest start date (required)"],
          "Required or invalid fields need attention: location, start date", ""),
         ("Pinecrest", "needs_human", 1, ["Email code"], "Verification code requested after Submit", ""),
         ("Vantage", "failed", 0, [], "The form requires an account login", ""),
+        ("Cobalt Systems", "dry_run", 0, ["LinkedIn profile (optional)"], "", "Review the tailored resume before applying."),
     ]
     with db.conn() as con:
         for company, status in statuses.items():
@@ -103,6 +141,9 @@ def seed(db, config) -> None:
         for offset, (company, status, attempted, unanswered, error, note) in enumerate(applications):
             started = (now - timedelta(hours=offset * 5 + 1)).isoformat(timespec="seconds")
             finished = (now - timedelta(hours=offset * 5)).isoformat(timespec="seconds")
+            if status == "dry_run":
+                started = (now - timedelta(minutes=3)).isoformat(timespec="seconds")
+                finished = (now - timedelta(minutes=2)).isoformat(timespec="seconds")
             log = [f"{started} Opened {by_company[company].url}", f"{started} Filled 14 fields from saved facts",
                    f"{finished} Result: {status}"]
             con.execute(
@@ -110,6 +151,47 @@ def seed(db, config) -> None:
                 "candidate_note,submission_attempted,resume_path) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (by_company[company].id, status, "engine", started, finished, json.dumps(log),
                  json.dumps(unanswered), error, note, attempted, str(config.TAILORED / "resume.pdf")))
+    # Submitted applications at different hiring stages, for the Tracker.
+    tracked = [("Harbor Analytics", "interview", 2), ("Lumen Health", "assessment", 4), ("Tidewater", "rejected", 9),
+               ("Granite Cloud", "applied", 1), ("Orchard", "offer", 12), ("Arcadia Robotics", "applied", 3)]
+    with db.conn() as con:
+        for company, stage, days in tracked:
+            job = by_company[company]
+            when = (now - timedelta(days=days)).isoformat(timespec="seconds")
+            con.execute("UPDATE jobs SET status='applied' WHERE id=?", (job.id,))
+            con.execute(
+                "INSERT INTO applications(job_id,status,method,started_at,finished_at,log,submission_attempted,stage,"
+                "stage_source,stage_updated_at,candidate_note) VALUES (?,?,?,?,?,?,1,?,?,?,?)",
+                (job.id, "applied", "engine", when, when, "[]", stage, "email" if stage != "applied" else "",
+                 (now - timedelta(days=max(0, days - 1))).isoformat(timespec="seconds"),
+                 "Recruiter: Sam" if stage == "interview" else ""))
+    # Prepared applications waiting for review.
+    drafts = [
+        ("Northwind Labs", "ready", [
+            ("Why do you want to work at Northwind Labs?", "textarea", [], True,
+             "I build data pipelines like the Airflow work at Northbeam, and Northwind's platform team runs the "
+             "systems I want to grow into.", "luna", False),
+            ("Are you legally authorized to work in the United States?", "select", ["Yes", "No"], True, "Yes", "saved", True),
+            ("Do you have experience with Kubernetes?", "select", ["Yes", "No"], False, "Yes", "luna", False),
+            ("First Name", "text", [], True, "Alex", "profile", True),
+            ("Resume/CV", "file", [], True, "Resume for this role", "file", True),
+        ]),
+        ("Meridian Pay", "needs_answers", [
+            ("What is your desired salary?", "text", [], True, None, "none", False),
+            ("Tell us about a project you are proud of", "textarea", [], True,
+             "I wrote an order book simulator in C++ that processes a million messages per second.", "luna", False),
+        ]),
+        ("Summit Bio", "approved", [("First Name", "text", [], True, "Alex", "profile", True)]),
+    ]
+    for company, status, questions in drafts:
+        job = by_company[company]
+        rows = [{"id": f"q{i + 1}", "label": label, "kind": kind, "options": options, "required": required,
+                 "name": "", "answer": answer, "source": source, "approved": approved,
+                 "note": "Northbeam internship and skills" if source == "luna" else ""}
+                for i, (label, kind, options, required, answer, source, approved) in enumerate(questions)]
+        db.upsert_draft(job.id, status=status, resume_path=str(config.TAILORED / "resume.pdf"),
+                        resume_note="One-page resume generated from your resume builder",
+                        questions=rows, question_source="greenhouse_form")
     events = [
         (5, "info", "Scan started: greenhouse, lever, ashby, simplify"),
         (4, "warn", "Scan partial: 2782 jobs from 5/6 sources, 12 new"),
@@ -133,7 +215,7 @@ def main() -> int:
     parser.add_argument("--docs", action="store_true", help="write the README screenshots in docs/screenshots")
     args = parser.parse_args()
 
-    temporary = tempfile.TemporaryDirectory(prefix="jobhub-screens-")
+    temporary = tempfile.TemporaryDirectory(prefix="starployment-screens-")
     os.environ["JOBHUB_DATA_DIR"] = str(Path(temporary.name) / "data")
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     os.environ["QT_SCALE_FACTOR"] = str(args.scale)
@@ -171,22 +253,40 @@ def main() -> int:
         controller.refresh(include_account=True)
         window.resize(width, height)
         window.show()
-        for index, page in enumerate(("dashboard", "jobs", "applications", "profile", "settings")):
+        shots = (("dashboard", 0), ("jobs", 1), ("applications", 2), ("tracker", 3), ("profile", 4),
+                 ("builder", 4), ("settings", 5))
+        for page, index in shots:
             if page not in pages:
                 continue
             window.nav.setCurrentRow(index)
             if page == "jobs":
                 window.jobs.table.selectRow(1)
+            if page == "applications":
+                window.apps.list.setCurrentRow(0)
+            if page == "profile":
+                window.profile.show_tab("details")
+            if page == "builder":
+                window.profile.show_tab("builder")
             for _ in range(5):
                 app.processEvents()
             path = output / f"{page}-{appearance.lower()}.png"
             window.grab().save(str(path))
             written.append(path)
+        if "apply" in pages:
+            from jobhub.desktop.views.dashboard import ApplyPlanSheet
+            sheet = ApplyPlanSheet(db.get_settings(), 412, window)
+            sheet.show()
+            for _ in range(5):
+                app.processEvents()
+            path = output / f"apply-{appearance.lower()}.png"
+            sheet.grab().save(str(path))
+            written.append(path)
+            sheet.close()
         if "setup" in pages:
             wizard = SetupWizard(db.get_profile().model_dump(), db.get_settings(), window)
             wizard.resize(860, 700)
             wizard.show()
-            for step in (0, 2):
+            for step in (0, 2, 3, 4):
                 wizard.tabs.setCurrentIndex(step)
                 for _ in range(5):
                     app.processEvents()

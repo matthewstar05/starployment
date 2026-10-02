@@ -167,5 +167,5 @@ def test_settings_never_include_mailbox_password():
         "email_verification": {"enabled": True, "imap_host": "mail.example.test",
                                "imap_username": "ada@example.test", "sender_address": "codes@greenhouse.io"}}))
     assert "password" not in settings["email_verification"]
-    with pytest.raises(Exception):
+    with pytest.raises(ValueError):
         config.validate_settings(config.merge_settings(settings, {"email_verification": {"password": "secret"}}))

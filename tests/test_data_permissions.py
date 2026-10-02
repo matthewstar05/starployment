@@ -12,17 +12,41 @@ from jobhub import config, db
 
 
 @pytest.mark.parametrize("platform,variable,invalid,suffix", [
-    ("win32", "LOCALAPPDATA", "", Path("AppData/Local/JobHub")),
-    ("win32", "LOCALAPPDATA", "relative-data", Path("AppData/Local/JobHub")),
-    ("linux", "XDG_DATA_HOME", "", Path(".local/share/jobhub")),
-    ("linux", "XDG_DATA_HOME", "relative-data", Path(".local/share/jobhub")),
+    ("win32", "LOCALAPPDATA", "", Path("AppData/Local/Starployment")),
+    ("win32", "LOCALAPPDATA", "relative-data", Path("AppData/Local/Starployment")),
+    ("linux", "XDG_DATA_HOME", "", Path(".local/share/starployment")),
+    ("linux", "XDG_DATA_HOME", "relative-data", Path(".local/share/starployment")),
 ])
 def test_invalid_platform_data_home_uses_home_default(monkeypatch, tmp_path, platform, variable, invalid, suffix):
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "platform", platform)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setenv(variable, invalid)
+    monkeypatch.delenv("JOBHUB_DATA_DIR", raising=False)
+    monkeypatch.delenv("STARPLOYMENT_DATA_DIR", raising=False)
     assert config._data_dir() == tmp_path / suffix
+
+
+@pytest.mark.parametrize("platform, base, legacy", [
+    ("darwin", Path("Library/Application Support"), "JobHub"),
+    ("linux", Path(".local/share"), "jobhub"),
+])
+def test_existing_jobhub_data_is_used_in_place_after_the_rename(monkeypatch, tmp_path, platform, base, legacy):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "platform", platform)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.delenv("JOBHUB_DATA_DIR", raising=False)
+    monkeypatch.delenv("STARPLOYMENT_DATA_DIR", raising=False)
+    previous = tmp_path / base / legacy
+    previous.mkdir(parents=True)
+    (previous / "jobhub.db").write_bytes(b"")
+    assert config._data_dir() == previous
+    # Once a Starployment folder exists, it wins; nothing is moved or copied.
+    current = tmp_path / base / ("Starployment" if platform == "darwin" else "starployment")
+    current.mkdir()
+    assert config._data_dir() == current
+    assert (previous / "jobhub.db").exists()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits are not Windows ACLs")

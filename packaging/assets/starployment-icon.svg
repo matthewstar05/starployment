@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <!-- Starployment: a shooting star on black. Built only from gradients and paths,
+       so Qt's SVG renderer, browsers, and iconutil all draw it the same way. -->
+  <defs>
+    <linearGradient id="night" x1="512" y1="100" x2="512" y2="924" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#17171F"/>
+      <stop offset="1" stop-color="#050508"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="636" cy="388" r="330" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFC233" stop-opacity="0.62"/>
+      <stop offset="0.22" stop-color="#FFB000" stop-opacity="0.26"/>
+      <stop offset="0.55" stop-color="#FF9F00" stop-opacity="0.07"/>
+      <stop offset="1" stop-color="#FF9F00" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="core" cx="636" cy="388" r="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFBEA" stop-opacity="1"/>
+      <stop offset="0.45" stop-color="#FFE38A" stop-opacity="0.85"/>
+      <stop offset="1" stop-color="#FFC233" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="trail" x1="262" y1="762" x2="636" y2="388" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFB000" stop-opacity="0"/>
+      <stop offset="0.55" stop-color="#FFC233" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#FFE38A" stop-opacity="1"/>
+    </linearGradient>
+    <linearGradient id="streak" x1="330" y1="756" x2="560" y2="526" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFC233" stop-opacity="0"/>
+      <stop offset="1" stop-color="#FFC233" stop-opacity="0.5"/>
+    </linearGradient>
+    <linearGradient id="star" x1="560" y1="300" x2="712" y2="476" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFF6D2"/>
+      <stop offset="0.45" stop-color="#FFD54F"/>
+      <stop offset="1" stop-color="#FFB000"/>
+    </linearGradient>
+    <linearGradient id="rim" x1="512" y1="100" x2="512" y2="924" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.03"/>
+    </linearGradient>
+  </defs>
+
+  <!-- macOS icon body: 824 pt squircle-like rounded square, centered -->
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#night)"/>
+  <rect x="100" y="100" width="824" height="824" rx="186" fill="url(#halo)"/>
+
+  <!-- distant stars -->
+  <circle cx="276" cy="300" r="5" fill="#FFFFFF" fill-opacity="0.55"/>
+  <circle cx="404" cy="212" r="3.5" fill="#FFFFFF" fill-opacity="0.4"/>
+  <circle cx="812" cy="690" r="4.5" fill="#FFFFFF" fill-opacity="0.45"/>
+  <circle cx="700" cy="800" r="3" fill="#FFFFFF" fill-opacity="0.35"/>
+  <circle cx="232" cy="520" r="3" fill="#FFFFFF" fill-opacity="0.3"/>
+
+  <!-- the trail: a long tapered wedge plus one faint speed line -->
+  <polygon points="654,406 618,370 258,766" fill="url(#trail)"/>
+  <polygon points="566,532 556,522 330,756" fill="url(#streak)"/>
+
+  <!-- the star: a four-point sparkle with concave sides -->
+  <circle cx="636" cy="388" r="64" fill="url(#core)"/>
+  <path d="M636 234 Q652 372 790 388 Q652 404 636 542 Q620 404 482 388 Q620 372 636 234 Z" fill="url(#star)"/>
+  <circle cx="636" cy="388" r="16" fill="#FFFDF2"/>
+
+  <rect x="101" y="101" width="822" height="822" rx="185" fill="none" stroke="url(#rim)" stroke-width="2"/>
+</svg>

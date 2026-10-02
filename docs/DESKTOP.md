@@ -1,6 +1,6 @@
-# JobHub desktop app
+# Starployment desktop app
 
-JobHub has a native PySide6 entrypoint at `python -m jobhub.desktop` (implemented
+Starployment (formerly JobHub) has a native PySide6 entrypoint at `python -m jobhub.desktop` (implemented
 by `jobhub.desktop.__main__`). The
 repository launchers run that entrypoint from a checkout. They use the local
 `.venv` first, then a PyInstaller
@@ -22,7 +22,7 @@ described in [AGENTS.md](../AGENTS.md#5-the-desktop-app).
 
 ## Run from a checkout
 
-On macOS, double-click `Launch JobHub.command`, or run this command on macOS or Linux:
+On macOS, double-click `Launch Starployment.command`, or run this command on macOS or Linux:
 
 ```sh
 ./run_desktop.sh
@@ -33,7 +33,7 @@ On Windows, double-click `run_desktop.bat`. The launcher prefers the local
 successful checkout import into a packaged app, it uses the same per-user data
 directory as the bundle. Set `JOBHUB_DATA_DIR` explicitly to a different
 writable directory when the checkout is read-only, for
-example `JOBHUB_DATA_DIR="$HOME/Library/Application Support/JobHub/data"`.
+example `JOBHUB_DATA_DIR="$HOME/Library/Application Support/Starployment/data"`.
 The source launchers only accept Python 3.12, matching the project requirement.
 For a fresh checkout, run `uv sync --frozen` before launching. If the local
 environment has a different Python version, the launcher tries a Python 3.12
@@ -69,10 +69,10 @@ nested Chromium app. This preserves the browser framework layout while making
 the app bundle internally verifiable. Ad hoc signing is for local use; a
 distributed macOS release still needs a developer identity and notarization.
 
-The expected output is `dist/JobHub.app` on macOS and `dist/JobHub/JobHub` or
-`dist/JobHub/JobHub.exe` on Linux or Windows. The launchers detect these paths
+The expected output is `dist/Starployment.app` on macOS and `dist/Starployment/Starployment` or
+`dist/Starployment/Starployment.exe` on Linux or Windows. The launchers detect these paths
 when no local `.venv` is present. Opening the app bundle directly uses
-JobHub's OS-specific per-user data directory by default.
+Starployment's OS-specific per-user data directory by default.
 
 For a bundle opened directly from this checkout's `dist/` folder, a one-time
 startup import copies the checkout's SQLite history, resumes, tailored PDFs,
@@ -97,6 +97,6 @@ also prevents one user's credentials and browsing state from being shipped to
 another user.
 
 For a release test, start the bundle with an empty temporary data directory,
-complete the profile setup, and run `JobHub --browser-check` before testing a
+complete the profile setup, and run `Starployment --browser-check` before testing a
 real posting. A successful PyInstaller build alone does not prove that the
 native UI or Chromium works on the target machine.

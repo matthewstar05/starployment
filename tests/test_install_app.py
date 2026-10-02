@@ -21,7 +21,7 @@ def _touch(path: Path, mtime: float) -> None:
 
 
 def test_stale_sources_lists_only_bundled_files_newer_than_the_build(tmp_path):
-    bundle = tmp_path / "dist" / "JobHub.app"
+    bundle = tmp_path / "dist" / "Starployment.app"
     _touch(install_app.executable(bundle), 1_000)
     _touch(tmp_path / "jobhub" / "desktop" / "ui.py", 900)
     assert install_app.stale_sources(bundle, tmp_path) == []
@@ -56,3 +56,29 @@ def test_busy_reports_running_scans_and_applications(tmp_path):
         connection.execute("INSERT INTO runs(status) VALUES ('running')")
         connection.execute("INSERT INTO applications(status) VALUES ('running')")
     assert install_app.busy(database) == "1 application(s) and a job scan"
+
+
+def test_renamed_bundle_executables_and_data_folder(tmp_path):
+    assert install_app.executable(Path("/Applications/Starployment.app")).name == "Starployment"
+    assert install_app.executable(Path("/Applications/JobHub.app")).name == "JobHub"
+    support = tmp_path / "Library" / "Application Support"
+    assert install_app.default_data_dir(tmp_path) == support / "Starployment"
+    (support / "JobHub").mkdir(parents=True)
+    (support / "JobHub" / "jobhub.db").write_bytes(b"")
+    assert install_app.default_data_dir(tmp_path) == support / "JobHub"   # existing data is used in place
+    (support / "Starployment").mkdir()
+    assert install_app.default_data_dir(tmp_path) == support / "Starployment"
+
+
+def test_old_app_is_moved_to_the_trash_not_deleted(tmp_path):
+    old = tmp_path / "Applications" / "JobHub.app"
+    (old / "Contents").mkdir(parents=True)
+    (old / "Contents" / "Info.plist").write_text("plist")
+    moved = install_app.move_to_trash(old, home=tmp_path)
+    assert not old.exists()
+    assert moved == tmp_path / ".Trash" / "JobHub.app"
+    assert (moved / "Contents" / "Info.plist").read_text() == "plist"
+    again = tmp_path / "Applications" / "JobHub.app"
+    (again / "Contents").mkdir(parents=True)
+    second = install_app.move_to_trash(again, home=tmp_path)
+    assert second != moved and second.exists() and moved.exists()

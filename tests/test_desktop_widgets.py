@@ -25,13 +25,11 @@ def app():
 
 
 def _settle(app, ms: int = 0) -> None:
-    from PySide6.QtCore import QElapsedTimer
+    from PySide6.QtTest import QTest
 
-    timer = QElapsedTimer()
-    timer.start()
     app.processEvents()
-    while timer.elapsed() < ms:
-        app.processEvents()
+    if ms:
+        QTest.qWait(ms)
 
 
 def test_qcolor_parses_css_rgba_and_blend_is_linear():
@@ -60,6 +58,7 @@ def test_toggle_switch_is_a_checkbox_and_lands_on_its_end_state(app, monkeypatch
     switch = ToggleSwitch("Include remote roles")
     switch.resize(320, 30)
     switch.show()
+    _settle(app)
     switch.setChecked(True)
     _settle(app, 800)
     assert switch.isChecked()

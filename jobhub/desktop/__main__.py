@@ -1,4 +1,4 @@
-"""Launch JobHub as a native desktop application: python -m jobhub.desktop."""
+"""Launch Starployment as a native desktop application: python -m jobhub.desktop."""
 from __future__ import annotations
 
 import argparse
@@ -9,11 +9,6 @@ from pathlib import Path
 
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
-
-from jobhub.desktop.controller import DesktopController
-from jobhub.desktop.icon import apply_application_icon
-from jobhub.desktop.styles import app_font, apply_appearance
-from jobhub.desktop.ui import JobHubWindow
 
 
 def quit_on_termination(app: QApplication) -> None:
@@ -33,13 +28,20 @@ def quit_on_termination(app: QApplication) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="jobhub-desktop")
+    parser = argparse.ArgumentParser(prog="starployment")
     parser.add_argument("--no-scheduler", action="store_true", help="open the desktop app without background scans")
     parser.add_argument("--setup", action="store_true", help="open candidate setup directly")
     parser.add_argument("--smoke-test", metavar="PNG", help="render a screenshot and exit without network activity")
     parser.add_argument("--browser-check", action="store_true", help="verify the bundled Chromium can launch")
     parser.add_argument("--dependency-check", action="store_true", help="verify native discovery dependencies can load")
+    parser.add_argument("--native-glass-check", metavar="DIRECTORY",
+                        help="run a standalone Cocoa Liquid Glass compositor diagnostic")
     args = parser.parse_args(argv)
+    if args.native_glass_check:
+        # This must stay before source-data migration and all application/controller imports.
+        from jobhub.desktop.native_glass_check import run
+
+        return run(args.native_glass_check)
     if args.dependency_check:
         import jobspy  # noqa: F401  (loads tls_client and its platform-specific native library)
 
@@ -57,6 +59,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.smoke_test:
         # A still frame: skip entrance animations so the screenshot is final.
         os.environ.setdefault("JOBHUB_REDUCED_MOTION", "1")
+    from jobhub.desktop.controller import DesktopController
+    from jobhub.desktop.icon import apply_application_icon
+    from jobhub.desktop.styles import app_font, apply_appearance
+    from jobhub.desktop.ui import JobHubWindow
+
     migration_error = ""
     if getattr(sys, "frozen", False) and not args.smoke_test and not os.environ.get("JOBHUB_DATA_DIR"):
         from jobhub.migration import bundled_checkout_data, migrate_source_checkout
@@ -68,7 +75,8 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as error:  # noqa: BLE001
                 migration_error = str(error)
     app = QApplication.instance() or QApplication(sys.argv[:1])
-    app.setApplicationName("JobHub")
+    app.setApplicationName("Starployment")
+    app.setApplicationDisplayName("Starployment")
     app.setFont(app_font())
     apply_application_icon(app)
     apply_appearance(app, "System")
@@ -81,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
 
         QTimer.singleShot(0, lambda: QMessageBox.warning(
             window, "Could not import existing setup",
-            "JobHub could not copy the setup from this checkout. The existing data was kept.\n\n" + migration_error,
+            "Starployment could not copy the setup from this checkout. The existing data was kept.\n\n" + migration_error,
         ))
     app.aboutToQuit.connect(controller.stop)
     quit_on_termination(app)

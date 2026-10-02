@@ -1,4 +1,4 @@
-"""Application-wide appearance handling for the JobHub Qt client.
+"""Application-wide appearance handling for the Starployment Qt client.
 
 Design tokens live here. ``PALETTES`` holds opaque colors used by Qt's palette,
 the stylesheet, and painted widgets. Glass materials are ``rgba(...)`` strings
@@ -48,6 +48,10 @@ PALETTES: dict[str, dict[str, str]] = {
         "red_soft": "#FDE9E7",
         "indigo": "#4F46E5",
         "indigo_soft": "#ECEBFF",
+        "star": "#FFC233",
+        "star_soft": "#FFF4D6",
+        "star_text": "#8A5A00",
+        "hero": "#0B0B0F",
         "tooltip": "#1D1D1F",
         "shadow": "#B8B8BE",
         "disabled": "#8E8E93",
@@ -95,6 +99,10 @@ PALETTES: dict[str, dict[str, str]] = {
         "red_soft": "#4A2320",
         "indigo": "#A5A0FF",
         "indigo_soft": "#2B2A55",
+        "star": "#FFC233",
+        "star_soft": "#3D3013",
+        "star_text": "#FFD36B",
+        "hero": "#08080B",
         "tooltip": "#3A3A3C",
         "shadow": "#0A0A0C",
         "disabled": "#77777C",

@@ -112,3 +112,89 @@ def save_setup(*, profile_patch: dict[str, Any] | None = None,
     settings = db.set_settings(patch)
     db.add_event("Candidate setup saved" + ("; ready for configured searches" if not missing else "; missing " + ", ".join(missing)))
     return profile, settings, missing
+
+
+# ---------------------------------------------------------------- resume library
+LIBRARY_LIMITS = {"education": 30, "experience": 200, "projects": 200, "skills": 600, "awards": 200}
+
+
+def save_resume_library(library: dict[str, Any]) -> Profile:
+    """Replace the resume builder's entries (education, experience, projects, skills, awards).
+
+    These are the candidate's own words. The builder only selects and orders
+    them for each role; it never rewrites them.
+    """
+    from .models import Education, Experience, Project
+
+    profile = db.get_profile() or Profile()
+    values = profile.model_dump()
+    models = {"education": Education, "experience": Experience, "projects": Project}
+    for key, model in models.items():
+        if key not in library:
+            continue
+        rows = library[key]
+        if not isinstance(rows, list) or len(rows) > LIBRARY_LIMITS[key]:
+            raise ValueError(f"{key.title()} must be a list of at most {LIBRARY_LIMITS[key]} entries")
+        cleaned = []
+        for row in rows:
+            entry = model.model_validate(row)
+            for attr in ("bullets", "tech", "details"):
+                if hasattr(entry, attr):
+                    items = [" ".join(str(x).split())[:1200] for x in getattr(entry, attr) if str(x).strip()]
+                    setattr(entry, attr, items[:40])
+            if any(str(v).strip() for k, v in entry.model_dump().items() if isinstance(v, str)):
+                cleaned.append(entry.model_dump())
+        values[key] = cleaned
+    for key in ("skills", "awards"):
+        if key in library:
+            items = library[key]
+            if not isinstance(items, list) or len(items) > LIBRARY_LIMITS[key]:
+                raise ValueError(f"{key.title()} must be a list of at most {LIBRARY_LIMITS[key]} items")
+            values[key] = list(dict.fromkeys(" ".join(str(x).split())[:300] for x in items if str(x).strip()))
+    profile = Profile.model_validate(values)
+    db.save_profile(profile)
+    db.add_event("Resume library saved")
+    return profile
+
+
+def merge_resume_into_library(pdf_path: str) -> tuple[Profile, dict[str, int]]:
+    """Add entries parsed from another resume PDF without replacing existing ones."""
+    from .profile import apply_links, extract_links, extract_text, heuristic_profile
+
+    path = Path(pdf_path)
+    if not path.is_file() or path.suffix.lower() != ".pdf":
+        raise ValueError("Choose a resume PDF")
+    text = extract_text(path)
+    if not text.strip():
+        raise ValueError("No readable text found in this PDF")
+    parsed = apply_links(heuristic_profile(text), extract_links(path))
+    profile = db.get_profile() or Profile()
+
+    def key(entry, *fields):
+        return tuple(" ".join(str(getattr(entry, f, "")).lower().split()) for f in fields)
+
+    added = {"experience": 0, "projects": 0, "education": 0, "skills": 0}
+    have = {key(e, "company", "title") for e in profile.experience}
+    for entry in parsed.experience:
+        if key(entry, "company", "title") not in have:
+            profile.experience.append(entry)
+            added["experience"] += 1
+    have = {key(p, "name") for p in profile.projects}
+    for entry in parsed.projects:
+        if key(entry, "name") not in have:
+            profile.projects.append(entry)
+            added["projects"] += 1
+    have = {key(e, "school", "degree") for e in profile.education}
+    for entry in parsed.education:
+        if key(entry, "school", "degree") not in have:
+            profile.education.append(entry)
+            added["education"] += 1
+    known = {s.casefold() for s in profile.skills}
+    for skill in parsed.skills:
+        if skill.casefold() not in known:
+            profile.skills.append(skill)
+            known.add(skill.casefold())
+            added["skills"] += 1
+    db.save_profile(profile)
+    db.add_event(f"Imported resume entries from {path.name}")
+    return profile, added
