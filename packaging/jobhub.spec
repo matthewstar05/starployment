@@ -23,6 +23,8 @@ icon_file = ROOT / "packaging" / "assets" / (
     "starployment.icns" if sys.platform == "darwin" else "starployment.ico" if os.name == "nt" else "starployment-icon-256.png"
 )
 datas.append((str(icon_png), "assets"))
+if os.name == "nt":
+    datas.append((str(icon_file), "assets"))
 datas.append((str(lucide_dir), "assets/lucide"))
 datas.extend(copy_metadata("keyring"))
 

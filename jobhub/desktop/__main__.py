@@ -74,6 +74,9 @@ def main(argv: list[str] | None = None) -> int:
                 migrate_source_checkout(checkout_data)
             except Exception as error:  # noqa: BLE001
                 migration_error = str(error)
+    from jobhub.desktop.native_windows import set_app_user_model_id
+
+    set_app_user_model_id()
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName("Starployment")
     app.setApplicationDisplayName("Starployment")

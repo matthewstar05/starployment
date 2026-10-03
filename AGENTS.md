@@ -295,6 +295,7 @@ Tests prove behavior; screenshots prove design. After any visual change:
 | `desktop/styles.py` | Global stylesheet for stock Qt controls, `app_font`, `color_for_status`. |
 | `desktop/format.py` | Pure copy helpers: status labels, relative time, countdown, greeting, salary, activity copy, log prettifying. No Qt; unit-test here. |
 | `desktop/native.py` | macOS window chrome (full-height content, hidden title, unified toolbar). |
+| `desktop/native_windows.py` | Windows taskbar identity (AppUserModelID, so source runs don't group under `python.exe`) and title bars that follow the app's Light/Dark appearance (DWM immersive dark mode, re-applied on every theme change and window show). |
 | `desktop/icons.py`, `icon.py` | Lucide SVG icons tinted at runtime; the app icon. |
 
 ### 5.2 Design language

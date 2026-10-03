@@ -269,6 +269,11 @@ class ThemeManager:
         from .styles import stylesheet
 
         self.app.setStyleSheet(stylesheet(scheme))
+        # Windows draws the title bar itself; match it to the painted scheme.
+        from .native_windows import install_title_bar_sync, sync_title_bars
+
+        install_title_bar_sync(self.app)
+        sync_title_bars(self.app)
         # Custom-painted widgets cache scheme-dependent pixmaps; repaint them.
         for widget in self.app.allWidgets():
             widget.update()
