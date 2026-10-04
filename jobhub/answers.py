@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .models import Job, Profile
+
+if TYPE_CHECKING:
+    from datetime import date
 
 DECLINE_RE = re.compile(r"decline|prefer not|don'?t wish|do not wish|not to (answer|say|disclose)|rather not|"
                         r"not specified|choose not|i don'?t want|do not want to (answer|disclose)", re.I)
@@ -91,6 +94,65 @@ def _start_parts(e) -> tuple[str, str]:
         return mon, m.group(2)
     y = re.search(r"20\d\d", s)
     return "", (y.group(0) if y else "")
+
+
+def missing_answer(question: dict) -> bool:
+    """A prepared question that is required and has no usable answer yet.
+
+    A required single checkbox (an acknowledgement) must be ticked: an
+    unticked box cannot be submitted, so ``False`` counts as missing.
+    """
+    if not question.get("required") or question.get("kind") == "file":
+        return False
+    value = question.get("answer")
+    if question.get("kind") == "checkbox" and not question.get("options") and value is False:
+        return True
+    return value is None or value == "" or value == []
+
+
+def form_date(value: Any) -> tuple["date", bool] | None:
+    """The calendar date a date-picker field should receive, and whether the day was given.
+
+    Accepts ``05/01/2027``, ``5/1/2027``, ``2027-05-01``, ``May 1, 2027``,
+    ``May 2027``, ``05/2027``, and ``2027-05`` (also inside longer text such as
+    "Expected May 2027"). A month without a day becomes the 1st, which is what
+    the pickers themselves do with "May 2027". Seasons ("Spring 2027") are
+    ambiguous and return None.
+    """
+    from datetime import date
+
+    text = " ".join(str(value or "").split())
+    if not text:
+        return None
+    month_names = {name[:3].casefold(): index for index, name in enumerate(MONTHS, 1)}
+
+    def build(year: str, month: int | str, day: int | str | None) -> tuple[date, bool] | None:
+        try:
+            return date(int(year), int(month), int(day or 1)), day is not None
+        except ValueError:
+            return None
+
+    if match := re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", text):
+        return build(match.group(1), match.group(2), match.group(3))
+    if match := re.search(r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b", text):
+        return build(match.group(3), match.group(1), match.group(2))
+    if match := re.search(r"\b([A-Za-z]{3,9})\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b", text):
+        month = month_names.get(match.group(1)[:3].casefold())
+        return build(match.group(3), month, match.group(2)) if month else None
+    if match := re.search(r"\b([A-Za-z]{3,9})\.?,?\s+(\d{4})\b", text):
+        month = month_names.get(match.group(1)[:3].casefold())
+        return build(match.group(2), month, None) if month else None
+    if match := re.search(r"\b(\d{1,2})/(\d{4})\b", text):
+        return build(match.group(2), match.group(1), None)
+    if match := re.search(r"\b(\d{4})-(\d{1,2})\b", text):
+        return build(match.group(1), match.group(2), None)
+    return None
+
+
+def us_date(value: Any) -> str | None:
+    """``MM/DD/YYYY`` for a date-picker answer, or None when the text is not a date."""
+    parsed = form_date(value)
+    return parsed[0].strftime("%m/%d/%Y") if parsed else None
 
 
 def _end_parts(e) -> tuple[str, str]:

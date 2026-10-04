@@ -601,6 +601,14 @@ contrast) and look at the screenshots.
   (JobSpy). `posted_ts` stores UTC seconds; a bare date counts as noon UTC and
   the Posted column shows no time for it. Ages are computed at paint time
   (`PostedDelegate`), so views never rebuild just because time passed.
+- Ashby renders "select all that apply" as `fieldset.ashby-application-form-input-checkbox-group`
+  and dates as a react-datepicker text input. The engine labels each box
+  "<question> - <option>" (matching `prepare.expand_answer`) and types dates
+  as MM/DD/YYYY key by key, then Tab (never Enter, which can submit). Setting
+  a picker's value with `fill` shows text the widget never registers. Never
+  add a group's boxes to a draft as separate questions
+  (`prepare.drop_option_duplicates`), and keep AI Autofill answers when a
+  draft is re-answered (`answer_questions` skips `you`, `luna`, `autofill`).
 - New bundled boards go in `config.CATALOG_ADDITIONS` with a bumped
   `CATALOG_VERSION`; existing installs receive only the additions, once.
 - ZipRecruiter blocks JobSpy (HTTP 403) and RemoteOK can fail DNS on some

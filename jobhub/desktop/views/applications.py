@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ...answers import missing_answer
 from ...models import posted_epoch
 from ...priority import is_starred
 from ..delegates import RECORD_ROLE, SEARCH_ROLE, SUBTITLE_ROLE, ApplicationDelegate
@@ -323,7 +324,7 @@ class DraftDetail(QWidget):
         self.monogram.set_text(company)
         self.status.set_status(status, status_label(status))
         questions = list(draft.get("questions") or [])
-        missing = [q for q in questions if q.get("required") and q.get("answer") in (None, "", []) and q.get("kind") != "file"]
+        missing = [q for q in questions if missing_answer(q)]
         luna = [q for q in questions if q.get("source") in ("luna", "autofill") and not q.get("approved")]
         source = {"greenhouse_form": "Greenhouse", "lever_form": "Lever", "ashby_form": "Ashby"}.get(
             str(draft.get("question_source") or ""), "")
@@ -346,8 +347,9 @@ class DraftDetail(QWidget):
         elif status == "practice":
             text = "Practice run finished. Nothing was submitted. Review, then send when practice mode is off."
         elif missing:
-            text = (f"{plural(len(missing), 'required question')} need{'s' if len(missing) == 1 else ''} your answer"
-                    + (f" · {draft['error']}" if draft.get("error") else "") + ".")
+            names = "; ".join(str(q["label"])[:60] for q in missing[:3]) + (" and more" if len(missing) > 3 else "")
+            text = (f"{plural(len(missing), 'required question')} need{'s' if len(missing) == 1 else ''} your answer "
+                    f"before sending: {names}" + (f" · Last attempt: {draft['error']}" if draft.get("error") else "") + ".")
         elif luna:
             text = (f"{plural(len(luna), 'answer')} came from Luna or AI Autofill, including any labeled assumptions. "
                     "Check them, edit anything, then Approve & send.")
@@ -391,8 +393,10 @@ class DraftDetail(QWidget):
         shown = questions if self._show_all else [q for q in questions if q not in routine]
         # What still needs you comes first, then Luna's drafts to check, then the rest.
         def priority(q):
+            if missing_answer(q):
+                return 0
             if q.get("answer") in (None, "", []) and q.get("kind") != "file":
-                return 0 if q.get("required") else 2
+                return 2
             return 1 if q.get("source") in ("luna", "autofill") and not q.get("approved") else 3
         shown = sorted(shown, key=priority)
         self.show_all.setVisible(bool(routine))
@@ -764,8 +768,7 @@ class ApplicationsView(QWidget):
         for row, record in enumerate(visible):
             if record["kind"] == "draft":
                 questions = record.get("questions") or []
-                open_count = sum(1 for q in questions if q.get("required") and q.get("answer") in (None, "", [])
-                                 and q.get("kind") != "file")
+                open_count = sum(1 for q in questions if missing_answer(q))
                 luna = sum(1 for q in questions if q.get("source") in ("luna", "autofill") and not q.get("approved"))
                 hint = (f"{plural(open_count, 'answer')} needed" if open_count else
                         f"Luna drafted {luna}" if luna else f"Match {float(record.get('score') or 0):.0f}")

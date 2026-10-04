@@ -525,3 +525,67 @@ def test_preselected_unknown_required_answer_is_not_candidate_evidence(fixture_f
     assert result.status == "needs_human"
     assert not result.submission_attempted
     assert "US citizen (required)" in result.unanswered
+
+
+ASHBY_DEGREES = '''
+  <fieldset class="_container_x _fieldEntry_x ashby-application-form-input-checkbox-group">
+    <label class="ashby-application-form-question-title _required_x" for="degree">Degree Type</label>
+    <div class="ashby-application-form-input-checkbox-group-option"><span><input type="checkbox" id="d0"
+      name="Undergraduate/Bachelor's"></span><label for="d0">Undergraduate/Bachelor's</label></div>
+    <div class="ashby-application-form-input-checkbox-group-option"><span><input type="checkbox" id="d1"
+      name="Master's"></span><label for="d1">Master's</label></div>
+    <div class="ashby-application-form-input-checkbox-group-option"><span><input type="checkbox" id="d2"
+      name="PhD"></span><label for="d2">PhD</label></div>
+  </fieldset>'''
+
+
+def test_ashby_checkbox_group_fieldset_is_one_question_with_prefixed_options(fixture_form):
+    fixture_form[1].update({"Degree Type - Undergraduate/Bachelor's": True, "Degree Type - Master's": True,
+                            "Degree Type - PhD": False})
+    result, page, _ = execute(fixture_form, ASHBY_DEGREES, dry=True)
+    assert not result.unanswered
+    assert [page.locator(f"#d{i}").is_checked() for i in range(3)] == [True, True, False]
+    labels = [field["label"] for field in page.evaluate(SCAN_JS) if field["kind"] == "checkbox"]
+    assert labels == ["Degree Type - Undergraduate/Bachelor's", "Degree Type - Master's", "Degree Type - PhD"]
+
+
+def test_unanswered_ashby_checkbox_group_counts_once(fixture_form):
+    result, _, _ = execute(fixture_form, ASHBY_DEGREES, dry=True)
+    assert result.unanswered == ["Degree Type (required)"]
+
+
+# A date picker that, like react-datepicker, only registers a date typed key by key:
+# a value set directly is discarded when the field loses focus.
+DATE_PICKER = '''
+  <div class="ashby-application-form-field-entry">
+    <label class="ashby-application-form-question-title _required_x" for="grad">Graduation Date</label>
+    <div class="react-datepicker-wrapper"><div class="react-datepicker__input-container">
+      <input id="grad" type="text" placeholder="Pick date..." class="ashby-application-form-input-date" required>
+    </div></div>
+  </div>
+  <script>
+    const grad = document.getElementById('grad'); let typed = '';
+    grad.addEventListener('focus', () => { typed = ''; });
+    grad.addEventListener('keydown', e => {
+      if (e.key.length === 1) typed += e.key; else if (e.key === 'Backspace') typed = typed.slice(0, -1); });
+    grad.addEventListener('blur', () => {
+      if (/^\\d{2}\\/\\d{2}\\/\\d{4}$/.test(typed)) { grad.value = typed; grad.setCustomValidity(''); }
+      else { grad.value = ''; grad.setCustomValidity('Pick a date'); }
+    });
+  </script>'''
+
+
+def test_date_picker_receives_a_typed_full_date(fixture_form):
+    fixture_form[1]["Graduation Date"] = "May 2027"
+    result, page, _ = execute(fixture_form, DATE_PICKER, dry=True)
+    assert not result.unanswered
+    assert page.locator("#grad").input_value() == "05/01/2027"
+    assert page.locator("#grad").evaluate("e => e.validity.valid")
+    assert any("Entered May 2027 as 05/01/2027" in line for line in result.log)
+
+
+def test_date_picker_reports_an_unreadable_date_instead_of_guessing(fixture_form):
+    fixture_form[1]["Graduation Date"] = "Spring 2027"
+    result, page, _ = execute(fixture_form, DATE_PICKER, dry=True)
+    assert result.unanswered == ["Graduation Date (required)"]
+    assert page.locator("#grad").input_value() == ""

@@ -18,7 +18,7 @@ from urllib.parse import urlsplit, urlunsplit
 from playwright.sync_api import Page, sync_playwright
 
 from .. import config, db
-from ..answers import Answer, Q, US_STATES, llm_answers, pick_option, rule_answer
+from ..answers import Answer, Q, US_STATES, form_date, llm_answers, pick_option, rule_answer
 from ..models import ApplyResult, Job, Profile
 from .adapters import Adapter
 from .email_verification import EmailVerificationInbox
@@ -124,7 +124,8 @@ SCAN_JS = r"""
     }
     else if (type === 'checkbox') {
       rec.kind = 'checkbox'; rec.empty = !e.checked; rec.value = e.checked;
-      const group = e.closest('fieldset[aria-required],.ashby-application-form-field-entry,.application-question');
+      const group = e.closest('fieldset[aria-required],.ashby-application-form-input-checkbox-group,' +
+                              '.ashby-application-form-field-entry,.application-question');
       const members = group ? [...group.querySelectorAll('input[type=checkbox]')] : [];
       if (members.length > 1) {
         const title = group.querySelector('legend,.ashby-application-form-question-title,.application-label');
@@ -148,7 +149,13 @@ SCAN_JS = r"""
       if (chosen?.textContent.trim()) { rec.value = chosen.textContent.trim(); rec.empty = false; }
       if (e.tagName === 'BUTTON') { rec.value = clean(e.innerText); rec.empty = placeholder(rec.value); }
     }
-    else if (['text','email','tel','url','number','search','date',''].includes(type)) rec.kind = type === 'number' ? 'number' : 'text';
+    else if (['text','email','tel','url','number','search','date',''].includes(type)) {
+      rec.kind = type === 'number' ? 'number' : 'text';
+      // Date pickers (react-datepicker on Ashby) only accept a date typed key by key.
+      rec.nativeDate = type === 'date';
+      rec.datePicker = rec.nativeDate || /input-date|datepicker/i.test(String(e.className)) ||
+        !!e.closest('.react-datepicker-wrapper,.react-datepicker__input-container');
+    }
     else continue;
     if (!rec.label) rec.label = rec.kind === 'file' ? 'Attachment' : 'Unlabeled field';
     out.push(rec);
@@ -455,6 +462,9 @@ class FormEngine:
                 return True
             return bool(re.search(r"\bcity\b", field["label"], re.I) and
                         chosen.casefold().startswith(str(expected).casefold().strip() + ","))
+        if field.get("datePicker"):
+            actual, wanted = form_date(field.get("value")), form_date(expected)
+            return bool(actual and wanted and actual[0] == wanted[0])
         if field.get("type") == "tel" or re.search(r"\b(?:phone|mobile|telephone)\b", field["label"], re.I):
             actual_digits = re.sub(r"\D", "", str(field.get("value") or ""))
             expected_digits = re.sub(r"\D", "", str(expected))
@@ -630,6 +640,9 @@ class FormEngine:
             locator.set_input_files(str(value))
             page.wait_for_timeout(1000)
             return
+        if kind in {"text", "number", "textarea"} and field.get("datePicker"):
+            self._fill_date(locator, field, str(value))
+            return
         if kind in {"text", "number", "textarea"}:
             text = str(value)
             if locator.input_value() == text:
@@ -687,6 +700,32 @@ class FormEngine:
             self._fill_combobox(page, locator, str(value), question)
             return
         raise RuntimeError(f"Unsupported field kind: {kind}")
+
+    def _fill_date(self, locator, field: dict, text: str) -> None:
+        """Type a date into a date picker so the widget registers it.
+
+        Setting the value directly (``fill``) shows the text but leaves a
+        react-datepicker empty, and the employer then rejects the field. The
+        date is typed as MM/DD/YYYY and committed with Tab, never Enter, which
+        could submit the form.
+        """
+        parsed = form_date(text)
+        if field.get("nativeDate"):
+            if parsed is None:
+                raise RuntimeError(f"“{text}” is not a date this field accepts")
+            locator.fill(parsed[0].isoformat())
+            return
+        typed = parsed[0].strftime("%m/%d/%Y") if parsed else text
+        if not (parsed and (current := form_date(locator.input_value())) and current[0] == parsed[0]):
+            locator.fill("")
+            locator.click()
+            locator.press_sequentially(typed, delay=self._rng.randint(18, 45) if human_pacing() else 0)
+            locator.press("Tab")
+        retained = form_date(locator.input_value())
+        if parsed is None or retained is None or retained[0] != parsed[0]:
+            raise RuntimeError(f"The date picker did not accept “{text}”")
+        if not parsed[1]:
+            self._log(f"Entered {text} as {typed}: the form needs a full date")
 
     OPT_SEL = '[role="option"]:visible,[class*="select__option"]:visible,[class*="option" i][id*="option" i]:visible'
 

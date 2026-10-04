@@ -19,7 +19,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from . import config, db
-from .answers import Q, rule_answer
+from .answers import Q, missing_answer as missing, rule_answer, us_date
 from .models import Job, Profile
 from .sources.base import client, strip_html
 from .sources.import_job import parse_job_url
@@ -35,6 +35,48 @@ def blank(value) -> bool:
     return value is None or value == "" or value == []
 
 
+def _group_options(questions: list[dict]) -> dict[str, set[str]]:
+    """Each multi-choice question's label mapped to its option labels (case-folded)."""
+    return {_tidy(q["label"]).casefold(): {_tidy(o).casefold() for o in q.get("options") or []}
+            for q in questions if q.get("options") and q.get("kind") in ("checkbox", "radio", "select")}
+
+
+def _covered_by_group(label: str, groups: dict[str, set[str]]) -> bool:
+    """True for one option of a known group, as a live form reports it ("PhD" or "Degree Type - PhD")."""
+    text = _tidy(label).casefold()
+    for group, options in groups.items():
+        if text in options or any(text == f"{group} - {option}" for option in options):
+            return True
+    return False
+
+
+def drop_option_duplicates(questions: list[dict]) -> list[dict]:
+    """Remove single-checkbox rows that repeat an option of a "select all that apply" group.
+
+    The group question holds the answer (a list of options). A copy of one
+    option, marked required because its group is, would demand every option
+    and conflict with the group's choice.
+    """
+    groups = _group_options(questions)
+    return [q for q in questions
+            if q.get("options") or q.get("kind") != "checkbox" or not _covered_by_group(q["label"], groups)]
+
+
+def repair_drafts() -> int:
+    """Clean option copies out of open drafts prepared by earlier versions. Returns drafts changed."""
+    changed = 0
+    for draft in db.list_drafts(db.DRAFT_OPEN + ("practice", "error")):
+        if draft["status"] in ("sending", "approved"):
+            continue
+        questions = drop_option_duplicates(list(draft["questions"]))
+        if len(questions) == len(draft["questions"]):
+            continue
+        status = draft["status"] if draft["status"] in ("practice", "error", "preparing") else draft_status(questions)
+        db.update_draft(draft["id"], questions=questions, status=status)
+        changed += 1
+    return changed
+
+
 def expand_answer(question: dict, value) -> dict[str, object]:
     """Form-ready answers for one question.
 
@@ -42,9 +84,15 @@ def expand_answer(question: dict, value) -> dict[str, object]:
     the browser engine sees as ``"<question> - <option>"``.
     """
     if question.get("kind") == "checkbox" and question.get("options") and isinstance(value, list):
-        chosen = {str(v).casefold() for v in value}
-        return {f"{question['label']} - {option}": option.casefold() in chosen for option in question["options"]}
+        chosen = {_tidy(v).casefold() for v in value}
+        return {f"{question['label']} - {_tidy(option)}": _tidy(option).casefold() in chosen
+                for option in question["options"]}
     return {question["label"]: value}
+
+
+def _tidy(text) -> str:
+    """Option text as a form shows it: forms trim and collapse spaces ("Open to Anything ")."""
+    return " ".join(str(text).split())
 
 
 def _clean_value(value):
@@ -157,7 +205,7 @@ def reanswer_open_drafts() -> int:
 def _question(index: int, label: str, kind: str, options: list[str] | None = None,
               required: bool = False, name: str = "") -> dict:
     return {"id": f"q{index}", "label": " ".join(strip_html(label).split())[:400], "kind": kind,
-            "options": [str(o) for o in (options or []) if str(o).strip()][:200],
+            "options": [_tidy(o) for o in (options or []) if str(o).strip()][:200],
             "required": bool(required), "name": name, "answer": None, "source": "none",
             "approved": False, "note": ""}
 
@@ -267,6 +315,8 @@ def ashby_questions(job: Job) -> list[dict]:
                 v.get("label") for v in field.get("selectableValues") or [] if isinstance(v, dict)]
             out.append(_question(len(out) + 1, field.get("title") or "", kind, options,
                                  entry.get("isRequired") is True, str(field.get("path") or "")))
+            if field.get("type") == "Date":
+                out[-1]["format"] = "date"   # a date picker: answered as MM/DD/YYYY
     return out
 
 
@@ -287,8 +337,8 @@ def discover_questions(job: Job) -> tuple[list[dict], str]:
 def answer_questions(questions: list[dict], profile: Profile, settings: dict, job: Job) -> list[dict]:
     """Fill answers that saved facts or the resume can supply. Leaves the rest open."""
     for question in questions:
-        if question.get("source") in ("you", "luna") and not blank(question.get("answer")):
-            continue   # keep a reviewer's answer or a draft
+        if question.get("source") in ("you", "luna", "autofill") and not blank(question.get("answer")):
+            continue   # keep a reviewer's answer, a Luna draft, or an AI Autofill answer
         if question["kind"] == "file":
             is_resume = re.search(r"resume|\bcv\b", question["label"], re.I) or question.get("name") == "resume"
             question["answer"] = "Resume for this role" if is_resume else None
@@ -305,13 +355,14 @@ def answer_questions(questions: list[dict], profile: Profile, settings: dict, jo
         declined = isinstance(value, str) and re.search(r"decline|prefer not|don.?t wish|not to (?:say|answer|disclose)",
                                                         value, re.I)
         source = {"user": "saved", "rule": "profile", "resume": "resume"}.get(answer.source, "profile")
+        if question.get("format") == "date" and isinstance(value, str):
+            value = us_date(value) or value   # show exactly what the date picker will receive
         question.update(answer=value, source="declined" if declined else source, approved=True)
     return questions
 
 
 def draft_status(questions: list[dict]) -> str:
-    missing = [q for q in questions if q.get("required") and blank(q.get("answer")) and q["kind"] != "file"]
-    return "needs_answers" if missing else "ready"
+    return "needs_answers" if any(missing(q) for q in questions) else "ready"
 
 
 def luna_ready(settings: dict) -> bool:
@@ -564,11 +615,11 @@ def approve_and_queue(draft_id: int, edits: dict[str, object] | None = None) -> 
     for question in questions:
         if not blank(question.get("answer")):
             question["approved"] = True
-    missing = [q["label"] for q in questions
-               if q.get("required") and blank(q.get("answer")) and q["kind"] != "file"]
-    if missing:
+    unanswered = [q["label"] for q in questions if missing(q)]
+    if unanswered:
         db.update_draft(draft_id, questions=questions, status="needs_answers")
-        raise ValueError("Answer the required questions first: " + "; ".join(missing[:4]))
+        raise ValueError("Answer the required questions first: " + "; ".join(unanswered[:4])
+                         + (f" and {len(unanswered) - 4} more" if len(unanswered) > 4 else ""))
     from .models import now_iso
     db.update_draft(draft_id, questions=questions, status="approved", approved_at=now_iso(), error="")
     return db.get_draft(draft_id)
@@ -619,9 +670,12 @@ def send_draft(draft_id: int) -> dict:
     else:
         questions = draft["questions"]
         known = {q["label"].casefold() for q in questions}
+        groups = _group_options(questions)
         for detail in result.get("questions") or []:
             label = str(detail.get("label") or "").strip()
-            if label and label.casefold() not in known:
+            # A live form reports each box of a "select all that apply" group;
+            # the group question already holds that answer.
+            if label and label.casefold() not in known and not _covered_by_group(label, groups):
                 questions.append(_question(len(questions) + 1, label, str(detail.get("kind") or "text"),
                                            detail.get("options") or [], bool(detail.get("required"))))
                 known.add(label.casefold())

@@ -42,6 +42,10 @@ class DesktopController(QObject):
         db.init()
         db.recover_interrupted()
         db.recover_drafts()
+        try:
+            prepare.repair_drafts()   # drafts from earlier versions may repeat checkbox options
+        except Exception as exc:  # noqa: BLE001 - never block startup on a cleanup
+            db.add_event(f"Could not tidy prepared applications: {exc}", "warn")
         app = QApplication.instance()
         if app is not None:
             from .styles import apply_appearance
