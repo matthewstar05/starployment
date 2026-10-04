@@ -92,10 +92,16 @@ SCAN_JS = r"""
     if (e.disabled || e.getAttribute('aria-disabled') === 'true' ||
         ['hidden','submit','button','reset'].includes(type) && e.getAttribute('role') !== 'combobox') continue;
     if (seen.has(e)) continue;
+    // select2 draws a stand-in for a real <select>, which is what gets filled.
+    if (e.closest('.select2-container')) continue;
     // Custom radios/checkboxes often hide the native control behind a visible label.
     const labeledVisible = [...(e.labels || [])].some(visible);
     if (type !== 'file' && !visible(e) && !(['radio','checkbox'].includes(type) && labeledVisible)) continue;
-    const rawLabel = labelFor(e);
+    let rawLabel = labelFor(e);
+    // Ashby's repeatable education block labels its fields "Start Date", "School"...
+    if (e.closest('.ashby-application-form-input-education-entry') && !/education/i.test(rawLabel)) {
+      rawLabel = 'Education ' + rawLabel;
+    }
     const rec = {idx: idFor(e), tag: e.tagName.toLowerCase(), type, id: e.id || '', name: e.name || '',
       required: required(e, rawLabel), label: clean(rawLabel), kind: '', options: [],
       value: e.value || '', empty: !(e.value || '').trim(), invalid: e.willValidate ? !e.validity.valid : false,
@@ -119,6 +125,12 @@ SCAN_JS = r"""
         const text = [...parent.children].filter(c => !c.contains(e)).map(c => c.innerText || '').join('\n');
         question = text.split('\n').map(clean).find(t => t && !optionLabels.includes(t)) || '';
       }
+      // Ashby puts a yes/no "text me about this application" choice inside the phone field.
+      const texting = e.closest('.ashby-application-form-field-entry')
+        ?.querySelector('[class*=texting-consent-description]');
+      if (texting && container?.className && /consent/i.test(String(container.className))) {
+        question = 'Receive text message updates about this application';
+      }
       rec.kind = 'radio'; rec.label = clean(question) || e.name || rec.label;
       rec.options = optionLabels; rec.optionIdx = all.map(idFor);
       rec.required = all.some(r => required(r, question)); rec.empty = !all.some(r => r.checked);
@@ -130,8 +142,11 @@ SCAN_JS = r"""
       const group = e.closest('fieldset[aria-required],.ashby-application-form-input-checkbox-group,' +
                               '.ashby-application-form-field-entry,.application-question');
       const members = group ? [...group.querySelectorAll('input[type=checkbox]')] : [];
-      if (members.length > 1) {
-        const title = group.querySelector('legend,.ashby-application-form-question-title,.application-label');
+      const title = group?.querySelector('legend,.ashby-application-form-question-title,.application-label');
+      // One box under its own question ("Please review the privacy policy" / "Acknowledge") is
+      // labelled like a group option, matching how the question was prepared.
+      if (members.length > 1 || (members.length === 1 && title && clean(title.innerText) &&
+                                 clean(title.innerText) !== rec.label)) {
         rec.groupLabel = clean(title?.innerText) || 'Checkbox choices';
         rec.groupEmpty = !members.some(m => m.checked);
         rec.groupMembers = members.map(idFor);
@@ -145,7 +160,8 @@ SCAN_JS = r"""
     }
     else if (e.tagName === 'TEXTAREA') rec.kind = 'textarea';
     else if (e.getAttribute('role') === 'combobox' || e.getAttribute('aria-autocomplete') ||
-             /select__input|combobox|autocomplete/i.test(String(e.className)) || e.closest('[class*=select__control]')) {
+             /select__input|combobox|autocomplete|location-input/i.test(String(e.className)) ||
+             e.closest('[class*=select__control]') || e.parentElement?.querySelector(':scope > .dropdown-container .dropdown-results')) {
       rec.kind = 'combobox';
       const box = e.closest('[class*=select__control]') || e.parentElement;
       const chosen = box?.querySelector('[class*=singleValue],[class*=single-value],[class*=multiValue]');
@@ -210,6 +226,8 @@ Object.defineProperty(Navigator.prototype, 'webdriver', {get: () => undefined});
 if (!window.chrome) { window.chrome = {runtime: {}}; }
 """
 MIN_PAGE_SECONDS = 18          # time on the form before Submit, like a quick human
+# Searchable catalogs where a value missing from the list is truthfully "Other".
+CATALOG_RE = re.compile(r"\b(?:school|university|college|institution|degree|discipline|major|field of study)\b", re.I)
 SPAM_RE = re.compile(r"flagged as (?:possible )?spam|spam|suspicious activity|automated|are you a robot|"
                      r"recaptcha|verify you are human|bot detected", re.I)
 
@@ -478,11 +496,18 @@ class FormEngine:
         required_missing = [f for f in fields if f["required"] and self._missing(f)]
         required_names = list(dict.fromkeys(f.get("groupLabel", f["label"]) for f in required_missing))
         invalid = [f for f in fields if f["invalid"] or f.get("ariaInvalid")]
+        invalid_names = list(dict.fromkeys(f.get("groupLabel", f["label"]) for f in invalid))
+        if invalid_names:
+            self._log("Invalid after filling: " + "; ".join(invalid_names[:12]))
         if self.dry_run:
+            # A practice run predicts a real send: it names what would stop Submit.
             count = len(required_names)
             suffix = (f" {count} required question{'s' if count != 1 else ''} "
                       f"still need{'s' if count == 1 else ''} "
                       f"{'an answer' if count == 1 else 'answers'}.") if count else ""
+            blocking = list(dict.fromkeys(required_names + invalid_names))
+            if blocking:
+                suffix += " A real send would stop at: " + "; ".join(blocking[:8]) + "."
             return self._result("dry_run", f"Dry run: filled {len(self._filled)} fields; nothing was submitted.{suffix}")
         if required_missing or invalid:
             names = list(dict.fromkeys(required_names + [f.get("groupLabel", f["label"]) for f in invalid]))
@@ -499,6 +524,8 @@ class FormEngine:
 
     @staticmethod
     def _answer_retained(field: dict, expected: object) -> bool:
+        if field["kind"] == "checkbox" and expected is False:
+            return field.get("value") is False   # an unticked box is the answer, not an empty field
         if field.get("empty") or field.get("invalid") or field.get("ariaInvalid"):
             return False
         kind = field["kind"]
@@ -657,7 +684,7 @@ class FormEngine:
         """Open a choice widget briefly and return its currently visible options."""
         locator = self._loc(page, field)
         try:
-            locator.click(timeout=5000)
+            self._click(locator)
             page.wait_for_timeout(250)
             options = self._visible_options()
             page.keyboard.press("Escape")
@@ -677,6 +704,11 @@ class FormEngine:
         if user_file and isinstance(user_file.value, str) and Path(user_file.value).is_file():
             return user_file
         label = " ".join((question.label, question.id, question.name)).lower()
+        if re.search(r"cover", label) and question.required and \
+                (self.settings.get("answers") or {}).get("cover_letter_mode", "auto") == "auto":
+            # A required cover letter is written from the candidate's own resume wording.
+            from ..tailor import cover_letter_pdf
+            return Answer(cover_letter_pdf(self.profile, self.job, self.settings), "rule")
         if re.search(r"cover|transcript|portfolio|other|additional|photo|picture", label):
             return None
         if re.search(r"resume|résumé|\bcv\b", label):
@@ -704,7 +736,7 @@ class FormEngine:
                 # Clear first: typing appends to any existing value, and a click
                 # can leave the cursor in the middle of prefilled text.
                 locator.fill("")
-                locator.click()
+                self._click(locator)
                 if len(text) <= 300:
                     self._type(locator, text)
                 else:   # long answers: paste most of it, type the end, like pasting a drafted essay
@@ -720,14 +752,27 @@ class FormEngine:
             return
         if kind == "select":
             option = pick_option(question.options, str(value))
+            if option is None and CATALOG_RE.search(question.label):
+                # A school missing from the form's list is truthfully "Other".
+                option = next((o for o in question.options if re.fullmatch(r"\s*other\s*", o, re.I)), None)
+                if option:
+                    self._log(f"{question.label}: not in the form's list, chose Other")
             if option is None:
                 raise RuntimeError("No unambiguous matching option")
-            locator.select_option(label=option)
+            # Lists enhanced by select2 keep the real <select> visually hidden.
+            locator.select_option(label=option, force=True)
             return
         if kind == "checkbox":
             if not isinstance(value, bool):
                 raise RuntimeError("Checkbox answers must be an explicit true or false value")
-            locator.set_checked(value, timeout=5000, force=True)
+            try:
+                locator.set_checked(value, timeout=5000, force=True)
+            except Exception:  # noqa: BLE001 - custom-styled boxes (Lever) ignore a positioned click
+                if locator.is_checked() != value:
+                    locator.evaluate("el => el.click()")
+            if locator.is_checked() != value:
+                # Some widgets toggle only through their label.
+                locator.evaluate("el => { const label = el.labels?.[0] || el.closest('label'); if (label) label.click(); }")
             if locator.is_checked() != value:
                 raise RuntimeError("The checkbox did not retain the requested state")
             return
@@ -750,6 +795,10 @@ class FormEngine:
                 raise RuntimeError("The radio option was not selected")
             return
         if kind == "combobox":
+            if isinstance(value, list):   # a multi-select list: pick each chosen value
+                for item in value:
+                    self._fill_combobox(page, locator, str(item), question)
+                return
             self._fill_combobox(page, locator, str(value), question)
             return
         raise RuntimeError(f"Unsupported field kind: {kind}")
@@ -777,7 +826,7 @@ class FormEngine:
         typed = parsed[0].strftime("%m/%d/%Y") if parsed else text
         if not (parsed and (current := form_date(locator.input_value())) and current[0] == parsed[0]):
             locator.fill("")
-            locator.click()
+            self._click(locator)
             self._type(locator, typed)
             locator.press("Tab")
         retained = form_date(locator.input_value())
@@ -786,7 +835,28 @@ class FormEngine:
         if not parsed[1]:
             self._log(f"Entered {text} as {typed}: the form needs a full date")
 
-    OPT_SEL = '[role="option"]:visible,[class*="select__option"]:visible,[class*="option" i][id*="option" i]:visible'
+    # Greenhouse/Ashby react-select options, ARIA options, and Lever's location suggestions.
+    OPT_SEL = ('[role="option"]:visible,[class*="select__option"]:visible,[class*="option" i][id*="option" i]:visible,'
+               '.dropdown-location:visible')
+
+    @staticmethod
+    def _search(locator, text: str) -> None:
+        """Type into a search-as-you-type field. Lever runs its search on key presses, so a
+        value set directly never shows suggestions: the last character is a real keystroke."""
+        locator.fill(text[:-1])
+        if text:
+            locator.press_sequentially(text[-1], delay=30)
+
+    def _await_options(self, page: Page, timeout_ms: int = 3000) -> list[str]:
+        """Options of a searchable list, waiting for results that load as you type."""
+        deadline = time.monotonic() + timeout_ms / 1000
+        page.wait_for_timeout(500)
+        options = self._visible_options()
+        while time.monotonic() < deadline and (not options or any(re.search(r"^loading|searching", o, re.I)
+                                                                    for o in options)):
+            page.wait_for_timeout(250)
+            options = self._visible_options()
+        return [o for o in options if not re.search(r"^loading|searching", o, re.I)]
 
     def _visible_options(self) -> list[str]:
         options = self.root.locator(self.OPT_SEL)
@@ -799,7 +869,7 @@ class FormEngine:
             if options.nth(index).inner_text().strip() == text:
                 if options.nth(index).get_attribute("aria-disabled") == "true":
                     raise RuntimeError("The matching option is disabled")
-                options.nth(index).click()
+                self._click(options.nth(index))
                 return
         raise RuntimeError("The matching option disappeared")
 
@@ -825,20 +895,22 @@ class FormEngine:
         return matches[0] if len(matches) == 1 else None
 
     def _fill_combobox(self, page: Page, locator, value: str, question: Q) -> None:
-        locator.click(timeout=5000)
+        self._click(locator)
         editable = locator.evaluate("el => el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable")
         page.wait_for_timeout(200)
+        # select2-style lists open a separate search box when clicked.
+        search = locator if editable else self._open_search_box()
         options = self._visible_options()
-        chosen = pick_option(options, value)
-        if chosen is None and editable:
-            current_location = bool(re.search(
-                r"current(?:ly)? location|where (?:are you|do you) (?:currently )?(?:located|based|live)|^location",
-                question.label, re.I,
-            ))
-            locator.fill(self.profile.city if current_location and self.profile.city else value)
-            page.wait_for_timeout(900)
-            options = self._visible_options()
-            chosen = pick_option(options, value)
+        chosen = self._pick(options, value)
+        location = bool(re.search(r"location|\bcity\b|where (?:are you|do you|will you|would you)", question.label, re.I))
+        current_location = bool(re.search(
+            r"current(?:ly)? location|where (?:are you|do you) (?:currently )?(?:located|based|live)|^location",
+            question.label, re.I,
+        )) or (location and bool(self.profile.city) and self.profile.city.casefold() in value.casefold())
+        if chosen is None and search is not None:
+            self._search(search, self.profile.city if current_location and self.profile.city else value)
+            options = self._await_options(page)
+            chosen = self._pick(options, value)
             if chosen is None and current_location:
                 chosen = self._current_location_option(options)
             if chosen is None and re.search(r"\bcity\b", question.label, re.I) and \
@@ -849,30 +921,83 @@ class FormEngine:
                            option.casefold().endswith(", " + country)]
                 if len(matches) == 1:
                     chosen = matches[0]
-            if chosen is None and len(value.split()) > 1:
-                locator.fill(" ".join(value.split()[:2]))
-                page.wait_for_timeout(700)
-                options = self._visible_options()
-                chosen = pick_option(options, value)
+            # Catalog searches (schools, degrees) often match only a shorter prefix:
+            # "California Polytechnic" finds "California Polytechnic State University - San Luis Obispo".
+            words = re.sub(r"[^\w&' ]+", " ", value).split()
+            for prefix in dict.fromkeys(" ".join(words[:n]) for n in (len(words), 3, 2, 1) if 0 < n <= len(words)):
+                if chosen is not None:
+                    break
+                self._search(search, prefix)
+                options = self._await_options(page)
+                chosen = self._pick(options, value)
+                if chosen is None and current_location:
+                    chosen = self._current_location_option(options)
+            if chosen is None and current_location and self.profile.country:
+                # Some location pickers list countries only.
+                self._search(search, self.profile.country)
+                options = self._await_options(page)
+                chosen = self._pick(options, self.profile.country)
+            if chosen is None and CATALOG_RE.search(question.label):
+                # A school or field missing from the catalog is truthfully "Other".
+                self._search(search, "Other")
+                options = self._await_options(page)
+                others = [option for option in options
+                          if re.fullmatch(r"\s*other\s*", option.split("\n")[0], re.I)]
+                if len(others) == 1:
+                    chosen = others[0]
+                    self._log(f"{question.label}: not in the form's list, chose Other")
         if chosen is None:
             # Closed lists are answerable only against their actual options.
-            if editable:
-                locator.fill("")
+            if search is not None:
+                search.fill("")
                 page.wait_for_timeout(250)
             options = self._visible_options() or options
             actual = Q(question.label, "select", options, question.required, question.name, question.id)
             answer = rule_answer(actual, self.profile, self.settings, self.job)
             if answer and answer.value is not None:
-                chosen = pick_option(options, str(answer.value))
+                chosen = self._pick(options, str(answer.value))
         if chosen is None:
-            if editable:
-                locator.fill("")
+            if search is not None:
+                search.fill("")
             page.keyboard.press("Escape")
             raise RuntimeError("No unambiguous option matched the candidate's answer")
         self._click_option(chosen)
         page.wait_for_timeout(250)
         if locator.get_attribute("aria-invalid") == "true":
             raise RuntimeError("The form rejected the selected option")
+
+    @staticmethod
+    def _pick(options: list[str], value: str) -> str | None:
+        """Match an option, also by its first line: Ashby lists schools as
+        "University of California, Berkeley / United States / berkeley.edu"."""
+        chosen = pick_option(options, value)
+        if chosen is None:
+            first: dict[str, str] = {}
+            for option in options:
+                first.setdefault(option.split("\n")[0].strip(), option)
+            hit = pick_option(list(first), value)
+            chosen = first[hit] if hit else None
+        return chosen
+
+    def _open_search_box(self):
+        """The search box a select2-style list shows once opened, if any."""
+        boxes = self.root.locator(".select2-search__field:visible, .select2-container--open input:visible, "
+                                  "input[role=searchbox]:visible, input[type=search]:visible")
+        return boxes.first if boxes.count() else None
+
+    def _click(self, locator, timeout: int = 5000) -> None:
+        """Click a field; when a sticky header or overlay intercepts the click, scroll it into
+        view and click through, then fall back to focusing it."""
+        try:
+            locator.click(timeout=timeout)
+            return
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            locator.scroll_into_view_if_needed(timeout=2000)
+            locator.click(timeout=2000, force=True)
+        except Exception:  # noqa: BLE001
+            locator.focus()
 
     def _page_text(self, page: Page) -> str:
         texts = [page.inner_text("body")[:60000]]

@@ -82,6 +82,24 @@ def activity_time(record: dict) -> float:
     return when.timestamp() if when else 0.0
 
 
+def latest_attempts(applications: list[dict]) -> list[dict]:
+    """One attempt per posting: its confirmed application if it has one, else the newest attempt.
+
+    Earlier tries of a posting (for example two stopped attempts before a
+    successful send) are history, not separate applications to act on.
+    """
+    best: dict[object, dict] = {}
+    for record in applications:
+        if record.get("hidden"):
+            continue
+        key = record.get("canonical_key") or record.get("job_id") or ("id", record.get("id"))
+        current = best.get(key)
+        rank = (record.get("status") == "applied", int(record.get("id") or 0))
+        if current is None or rank > (current.get("status") == "applied", int(current.get("id") or 0)):
+            best[key] = record
+    return [record for record in applications if any(record is kept for kept in best.values())]
+
+
 def sort_records(records: list[dict], key: str) -> list[dict]:
     """Order Applications rows. Unknown posting dates sort last."""
     if key == "posted":
@@ -140,8 +158,13 @@ class QuestionRow(QWidget):
         kind, value = question.get("kind"), question.get("answer")
         options = list(question.get("options") or [])
         if kind == "file":
-            return label("Your resume for this role is attached." if question.get("source") == "file"
-                         else "Upload this file on the employer's form.", "rowNote")
+            if question.get("source") == "file":
+                attached = ("A cover letter written from your resume is attached." if re.search(r"cover", question["label"], re.I)
+                            else "Your resume for this role is attached.")
+                return label(attached, "rowNote")
+            return label("Starployment can't attach this file. Apply on the employer's site, then right-click "
+                         "the application and choose Mark as sent." if question.get("required") else
+                         "Optional: Starployment leaves this upload empty.", "rowNote")
         if kind == "checkbox" and options:
             chosen = {str(v).casefold() for v in (value if isinstance(value, list) else [])}
             holder = QWidget()
@@ -721,8 +744,8 @@ class ApplicationsView(QWidget):
         self._continuable_ids = {record.get("id") for job_id, record in latest.items() if job_id in retryable}
         open_jobs = {d.get("job_id") for d in self.drafts if d.get("status") in OPEN_DRAFT}
         records = [dict(d, kind="draft") for d in self.drafts if d.get("status") in OPEN_DRAFT]
-        records += [dict(a, kind="attempt") for a in self.applications
-                    if a.get("job_id") not in open_jobs and not a.get("hidden")]
+        records += [dict(a, kind="attempt") for a in latest_attempts(self.applications)
+                    if a.get("job_id") not in open_jobs]
         for record in records:
             record["_starred"] = is_starred(record, self.priority)
         self.records = records

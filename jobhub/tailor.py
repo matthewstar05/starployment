@@ -484,3 +484,24 @@ def snapshot_resume_for_application(resume_path: str, application_id: int) -> st
 
 def _safe(s: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "", s)[:24] or "x"
+
+
+def cover_letter_pdf(profile: Profile, job: Job, settings: dict | None = None) -> str:
+    """A one-page cover letter PDF for a form that requires one.
+
+    The text is ``answers.cover_letter``: a short letter built from the
+    candidate's own resume wording, nothing invented.
+    """
+    from .answers import cover_letter
+
+    text = cover_letter(profile, job, settings or {})
+    folder = config.TAILORED / "cover_letters"
+    folder.mkdir(parents=True, exist_ok=True)
+    name = re.sub(r"[^A-Za-z0-9]+", "_", f"{profile.full_name or 'Candidate'}_Cover_Letter_{job.company}").strip("_")
+    path = folder / f"{name}.pdf"
+    style = ParagraphStyle("letter", fontName="Helvetica", fontSize=11, leading=15, alignment=TA_LEFT, spaceAfter=10)
+    doc = SimpleDocTemplate(str(path), pagesize=letter, leftMargin=inch, rightMargin=inch,
+                            topMargin=inch, bottomMargin=inch, title=f"Cover letter: {job.company}")
+    doc.build([Paragraph(_esc(part).replace("\n", "<br/>"), style) for part in text.split("\n\n") if part.strip()])
+    config.secure_file(path)
+    return str(path)

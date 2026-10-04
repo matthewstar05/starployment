@@ -589,3 +589,81 @@ def test_date_picker_reports_an_unreadable_date_instead_of_guessing(fixture_form
     result, page, _ = execute(fixture_form, DATE_PICKER, dry=True)
     assert result.unanswered == ["Graduation Date (required)"]
     assert page.locator("#grad").input_value() == ""
+
+
+def test_practice_run_names_what_would_stop_a_real_send(fixture_form):
+    fixture_form[1]["Postal code"] = "not a code"
+    result, _, _ = execute(fixture_form, '''
+      <label for="zip">Postal code *</label><input id="zip" required pattern="[0-9]{5}">''', dry=True)
+    assert result.status == "dry_run"
+    assert "A real send would stop at: Postal code" in result.message
+    assert any("Invalid after filling: Postal code" in line for line in result.log)
+
+
+def _located(fixture_form, fields, **kwargs):
+    """Run a fixture form for a candidate who lives in San Francisco, CA."""
+    create, _, _ = fixture_form
+    engine, context, page = create(fields, **kwargs)
+    engine.profile = Profile(first_name="Ada", last_name="Lovelace", email="ada@example.test",
+                             city="San Francisco", state="CA", country="United States")
+    return engine._run_page(context, page, engine.adapter.apply_url), page
+
+
+# Lever's location box searches on key presses and keeps only a chosen suggestion.
+LEVER_LOCATION = '''
+  <label><div class="application-label">Current location *</div><div class="application-field">
+    <input class="location-input" id="loc" name="location" required>
+    <input id="picked" type="hidden" name="selectedLocation">
+    <div class="dropdown-container"><div class="dropdown-results"></div></div></div></label>
+  <script>
+    const loc = document.getElementById('loc'), results = document.querySelector('.dropdown-results');
+    loc.addEventListener('keyup', () => setTimeout(() => {
+      results.innerHTML = /^san fr/i.test(loc.value) ? ['San Francisco, Agusan Del Sur, PHL', 'San Francisco, CA, USA']
+        .map(t => '<div class="dropdown-location">' + t + '</div>').join('') : '';
+      results.querySelectorAll('.dropdown-location').forEach(d => d.addEventListener('click', () => {
+        loc.value = d.textContent; document.getElementById('picked').value = d.textContent; results.innerHTML = ''; }));
+    }, 300));
+    loc.addEventListener('blur', () => setTimeout(() => {
+      if (!document.getElementById('picked').value) { loc.value = ''; } }, 50));
+  </script>'''
+
+
+def test_lever_location_is_chosen_from_keystroke_suggestions(fixture_form):
+    fixture_form[1]["Current location"] = "San Francisco, CA, United States"
+    result, page = _located(fixture_form, LEVER_LOCATION, dry=True)
+    assert not result.unanswered
+    assert page.locator("#picked").input_value() == "San Francisco, CA, USA"
+
+
+def test_a_lone_box_under_a_heading_is_labelled_like_a_group_option(fixture_form):
+    fixture_form[1]["Please review our privacy policy - Acknowledge/Confirm"] = True
+    result, page, _ = execute(fixture_form, '''
+      <fieldset aria-required="true"><legend>Please review our privacy policy *</legend>
+        <label><input type="checkbox" id="ack" required>Acknowledge/Confirm</label></fieldset>''', dry=True)
+    assert not result.unanswered and page.locator("#ack").is_checked()
+
+
+# Ashby lists schools with their country and domain under the name.
+SCHOOL_SEARCH = '''
+  <label for="school">School *</label><input id="school" role="combobox" aria-autocomplete="list" required>
+  <div id="menu"></div>
+  <script>
+    const school = document.getElementById('school'), menu = document.getElementById('menu');
+    school.addEventListener('input', () => {
+      const all = ['University of California, Berkeley', 'University of California, Davis', 'Other'];
+      menu.innerHTML = all.filter(s => school.value && s.toLowerCase().startsWith(school.value.toLowerCase()))
+        .map(s => '<div role="option">' + s + '<br>United States<br>example.edu</div>').join('');
+      menu.querySelectorAll('[role=option]').forEach(o => o.addEventListener('click', () => {
+        school.value = o.innerText.split('\\n')[0]; menu.innerHTML = ''; }));
+    });
+  </script>'''
+
+
+def test_school_suggestions_match_by_their_first_line_and_fall_back_to_other(fixture_form):
+    fixture_form[1]["School"] = "University of California, Berkeley"
+    result, page = _located(fixture_form, SCHOOL_SEARCH, dry=True)
+    assert not result.unanswered and page.locator("#school").input_value() == "University of California, Berkeley"
+    fixture_form[1]["School"] = "Example State University"
+    result, page = _located(fixture_form, SCHOOL_SEARCH, dry=True)
+    assert page.locator("#school").input_value() == "Other"
+    assert any("chose Other" in line for line in result.log)

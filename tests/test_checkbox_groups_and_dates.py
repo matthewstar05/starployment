@@ -55,7 +55,10 @@ def test_required_acknowledgement_must_be_ticked():
     assert missing_answer(box) and missing_answer(dict(box, answer=None)) and not missing_answer(dict(box, answer=True))
     assert not missing_answer(dict(box, required=False))
     assert missing_answer({"kind": "checkbox", "options": ["A"], "required": True, "answer": []})
-    assert not missing_answer({"kind": "file", "required": True, "answer": None})
+    assert not missing_answer({"kind": "file", "label": "Resume/CV", "required": True, "answer": None})
+    assert not missing_answer({"kind": "file", "label": "Cover letter", "required": True, "source": "file"})
+    assert missing_answer({"kind": "file", "label": "Please upload your transcript", "required": True})
+    assert not missing_answer({"kind": "file", "label": "Portfolio", "required": False})
 
 
 # ------------------------------------------------------------------ option copies

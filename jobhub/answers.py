@@ -100,14 +100,38 @@ def _start_parts(e) -> tuple[str, str]:
     return "", (y.group(0) if y else "")
 
 
+def _date_part(q: Q, text: str) -> Answer | None:
+    """A date for a field that may be one list of months or one list of years ("Start Date" as two lists)."""
+    if not text:
+        return None
+    if not q.options:
+        return _explicit_answer(q, text)
+    month = next((m for m in MONTHS if re.search(r"\b" + m[:3], text, re.I)), "")
+    year = (re.search(r"(?:19|20)\d\d", text) or [""])[0]
+    if any(re.fullmatch(r"\s*(?:19|20)\d\d\s*", option) for option in q.options) and year:
+        picked = pick_option(q.options, year)
+        return Answer(picked, "resume") if picked else None
+    if month:
+        for candidate in (month, month[:3], f"{MONTHS.index(month) + 1:02d}", str(MONTHS.index(month) + 1)):
+            picked = pick_option(q.options, candidate)
+            if picked:
+                return Answer(picked, "resume")
+    return _explicit_answer(q, text)
+
+
 def missing_answer(question: dict) -> bool:
     """A prepared question that is required and has no usable answer yet.
 
     A required single checkbox (an acknowledgement) must be ticked: an
-    unticked box cannot be submitted, so ``False`` counts as missing.
+    unticked box cannot be submitted, so ``False`` counts as missing. A
+    required upload other than the resume or a cover letter (a transcript,
+    say) is missing too: Starployment cannot attach it, so the draft says so
+    before sending instead of the send stopping at it.
     """
-    if not question.get("required") or question.get("kind") == "file":
+    if not question.get("required"):
         return False
+    if question.get("kind") == "file":
+        return question.get("source") != "file" and not re.search(r"resume|\bcv\b|cover", str(question.get("label")), re.I)
     value = question.get("answer")
     if question.get("kind") == "checkbox" and not question.get("options") and value is False:
         return True
@@ -249,18 +273,30 @@ def _canonical_question(value: Any) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-def _custom_answer(q: Q, fields: Any) -> Answer | None:
-    """Resolve a saved field answer by label, name, id, or common alias."""
+def _custom_answer(q: Q, fields: Any, approved: bool = False) -> Answer | None:
+    """Resolve a saved field answer by label, name, id, or common alias.
+
+    ``approved`` answers were approved by the candidate for this one
+    application, so "Yes"/"No" may set a checkbox, acknowledgements included
+    (a form can show a yes/no question as a single box).
+    """
     if not isinstance(fields, dict):
         return None
     question_keys = {_canonical_question(candidate) for candidate in (q.label, q.name, q.id)}
     question_keys.discard("")
     matches = [(key, value) for key, value in fields.items()
                if _canonical_question(str(key)) in question_keys]
-    # Ambiguous aliases should remain unanswered rather than choosing one.
-    if len(matches) != 1:
+    # Ambiguous aliases should remain unanswered rather than choosing one; several
+    # aliases that agree (a box found by both its label and its name) are one answer.
+    if not matches or len({repr(value) for _, value in matches}) != 1:
         return None
     saved = matches[0][1]
+    if approved and q.kind == "checkbox" and isinstance(saved, str):
+        flag = saved.strip().casefold()
+        if flag in {"yes", "true"}:
+            return Answer(True, "user")
+        if flag in {"no", "false"}:
+            return Answer(False, "user")
     if q.kind == "checkbox" and isinstance(saved, str) and _attestation_label(_normalized(q.label)):
         return None
     # The settings API stores custom answers as strings. Parse only the two
@@ -311,6 +347,10 @@ def pick_option(options: list[str], intent: str | None) -> str | None:
 def _explicit_answer(q: Q, value: Any, source: str = "rule") -> Answer | None:
     if q.kind == "checkbox":
         return Answer(value, source) if isinstance(value, bool) else None
+    if q.kind == "combobox" and isinstance(value, list):
+        # A multi-select shown as a searchable list (Greenhouse "select all that apply").
+        picked = [str(item).strip() for item in value if str(item).strip()]
+        return Answer(picked, source) if picked else None
     if value is None or isinstance(value, (dict, list, bool)) or not str(value).strip():
         return None
     text = str(value).strip()
@@ -370,7 +410,7 @@ def rule_answer(q: Q, profile: Profile, settings: dict, job: Job | None) -> Answ
     label = _normalized(q.label)
     answers = settings.get("answers", {})
     fields = answers.get("field_answers", {})
-    custom = _custom_answer(q, fields)
+    custom = _custom_answer(q, answers.get("approved_answers"), approved=True) or _custom_answer(q, fields)
     if custom:
         return custom
     # Profile custom facts are candidate-provided values and use the same
@@ -397,6 +437,13 @@ def rule_answer(q: Q, profile: Profile, settings: dict, job: Job | None) -> Answ
     def matches(pattern: str):
         return re.search(pattern, label)
 
+    # Texts about the application are a contact preference, not a fact: the private default is no.
+    if q.kind in {"radio", "select", "combobox"} and matches(r"text message|\bsms\b|texting|whatsapp"):
+        if q.kind == "combobox" and not q.options:
+            return Answer("No", "rule")   # a searchable list: the browser picks the actual "No"
+        declined = pick_option(q.options, "No")
+        if declined:
+            return Answer(declined, "rule")
     # No general checkbox rule may accept a new attestation or legal consent.
     if q.kind == "checkbox":
         if matches(r"undergrad(?:uate)?.*discipline") and " - " in q.label:
@@ -408,6 +455,10 @@ def rule_answer(q: Q, profile: Profile, settings: dict, job: Job | None) -> Answ
         if matches(r"subscribe|newsletter|promotional (?:emails|messages)|"
                    r"marketing (?:emails|communications|messages|updates)|text message|sms"):
             return Answer(False, "rule")
+        if matches(r"still (?:a )?student|currently (?:enrolled|a student|studying)") and not q.options:
+            entry = _edu(profile)
+            if entry and _degree_status(entry) != "unknown":
+                return Answer(_degree_status(entry) == "in progress", "resume")
         return None
     graduation_window = re.fullmatch(
         r"i confirm that my graduation date will be either (fall|spring) (20\d\d) "
@@ -430,6 +481,10 @@ def rule_answer(q: Q, profile: Profile, settings: dict, job: Job | None) -> Answ
     if matches(r"gender|\bsex\b|race|ethnic|hispanic|latino|veteran|military|disabilit|handicap|sexual orientation|transgender|lgbt|pronoun"):
         if matches(r"pronoun") and "pronouns" in confirmed:
             return known("pronouns")
+        if q.kind == "combobox" and not q.options:
+            # A searchable list shows its choices only when opened; the browser picks its
+            # own "decline to answer" wording, and leaves the question if there is none.
+            return Answer("decline", "rule")
         return value("decline") if q.options else None
     # This saved answer establishes membership in a combined category only.
     # It cannot establish whether the candidate is a citizen specifically.
@@ -537,6 +592,21 @@ def rule_answer(q: Q, profile: Profile, settings: dict, job: Job | None) -> Answ
         return value(getattr(profile, "postal_code", ""))
 
     e = _edu(profile)
+    # Fields inside a form's education block arrive as "Education Start Date" and so on.
+    if matches(r"^education\b.*\b(?:start date|from)$"):
+        return _date_part(q, e.start if e else "")
+    if matches(r"still (?:a )?student|currently (?:enrolled|a student|studying)"):
+        if not e or _degree_status(e) == "unknown":
+            return None
+        studying = _degree_status(e) == "in progress"
+        if q.kind == "checkbox" and not q.options:
+            return Answer(studying, "resume")
+        return value("Yes" if studying else "No")
+    # The date on a signature line (Lever's disability self-identification form) is the day
+    # the form is completed.
+    if re.search(r"signature_?date", q.name or "", re.I) or matches(r"^(?:today'?s date|date signed|signature date)$"):
+        from datetime import date
+        return value(date.today().strftime("%m/%d/%Y"))
     if matches(r"all post[- ]secondary education attained|all degrees? (?:obtained|earned|completed)"):
         completed = [entry for entry in profile.education if _degree_status(entry) == "completed"]
         if not completed:
@@ -561,6 +631,8 @@ def rule_answer(q: Q, profile: Profile, settings: dict, job: Job | None) -> Answ
         return value(_end_parts(e)[0] if e else "")
     if matches(r"(end|graduation|grad).*year"):
         return value(_end_parts(e)[1] if e else "")
+    if matches(r"(end|graduation|grad).*date") and q.options and _date_part(q, e.end if e else ""):
+        return _date_part(q, e.end if e else "")   # a month or year list
     if matches(r"(end|graduation|grad).*date"):
         if not e:
             return None
@@ -579,9 +651,15 @@ def rule_answer(q: Q, profile: Profile, settings: dict, job: Job | None) -> Answ
         return value(e.start if e else "")
     if matches(r"start date"):
         return known("available_start")
-    if matches(r"^school(?: name)?\s*$|name of school|university|college|institution|"
+    if matches(r"^(?:education )?school(?: name)?\s*$|name of school|university|college|institution|"
                r"where did you (study|attend)|alma"):
         return value(e.school if e else "")
+    # Greenhouse's employment block ("company-name-0", "title-0") lists past employers too:
+    # the most recent one (the resume's first entry) is a true answer.
+    if re.search(r"(?:^|-)(?:company-name|title)-+\d+$", q.id or q.name or "") and profile.experience:
+        recent = next((item for item in profile.experience if not item.hidden), None)
+        if recent:
+            return value(recent.title if re.search(r"title", q.id or q.name or "") else recent.company)
     if matches(r"current (company|employer)|current title|current role|most recent (company|employer)|company name"):
         current = [item for item in profile.experience if re.search(r"present|current", item.end, re.I)]
         # Multiple current roles cannot be collapsed into one employer by guessing.

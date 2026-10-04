@@ -567,6 +567,31 @@ def finish_application(app_id: int, status: str, log: list[str], screenshots: li
         new_status = {"applied": "applied", "dry_run": "new", "needs_human": "needs_human", "failed": "failed"}[status]
         c.execute("UPDATE jobs SET status=?,updated_at=? WHERE id=(SELECT job_id FROM applications WHERE id=?)",
                   (new_status, now_iso(), app_id))
+        if status == "applied":
+            _hide_superseded(c, app_id)
+
+
+def _hide_superseded(c: sqlite3.Connection, app_id: int) -> int:
+    """Once a posting has a confirmed application, its earlier attempts leave the Applications list.
+
+    They stay in history (never deleted); only ``hidden`` changes.
+    """
+    cur = c.execute(
+        "UPDATE applications SET hidden=1 WHERE id<>? AND status<>'applied' AND COALESCE(hidden,0)=0 "
+        "AND status NOT IN ('queued','running') AND job_id IN (SELECT j.id FROM jobs j WHERE j.canonical_key="
+        "(SELECT j2.canonical_key FROM jobs j2 JOIN applications a ON a.job_id=j2.id WHERE a.id=?) "
+        "OR j.id=(SELECT job_id FROM applications WHERE id=?))", (app_id, app_id, app_id))
+    return cur.rowcount
+
+
+def hide_superseded_attempts() -> int:
+    """Repair: hide earlier attempts for every posting that already has a confirmed application."""
+    hidden = 0
+    with conn() as c:
+        for row in c.execute("SELECT MAX(a.id) AS id FROM applications a JOIN jobs j ON j.id=a.job_id "
+                             "WHERE a.status='applied' GROUP BY COALESCE(j.canonical_key, j.id)").fetchall():
+            hidden += _hide_superseded(c, row["id"])
+    return hidden
 
 
 _APPLICATION_SELECT = (

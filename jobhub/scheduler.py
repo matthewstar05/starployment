@@ -71,6 +71,22 @@ def rescore() -> None:
     db.update_scores(score_all(jobs, db.get_profile(), db.get_settings()))
 
 
+def hosted_posting_url(job: Job) -> str:
+    """The job's link on its public job board.
+
+    Many Greenhouse employers (Stripe, Airbnb, Coinbase...) list their own
+    careers page as the posting URL; the board link is the apply URL.
+    """
+    from .sources.import_job import JobImportError, parse_job_url
+    for url in (job.url, job.apply_url):
+        try:
+            parse_job_url(url)
+            return url
+        except JobImportError:
+            continue
+    return job.url
+
+
 def enrich_job(job: Job) -> Job:
     """Refresh supported ATS metadata before drafting or applying.
 
@@ -82,7 +98,7 @@ def enrich_job(job: Job) -> Job:
         return job
     try:
         from .sources.import_job import fetch_job
-        enriched = fetch_job(job.url)
+        enriched = fetch_job(hosted_posting_url(job))
         if enriched.ats != job.ats or job_fingerprint(enriched) != job_fingerprint(job):
             raise PostingRefreshError("The public posting no longer matches this saved vacancy. Review it before continuing.")
         refreshed = db.refresh_job_metadata(job.id, enriched)
@@ -214,6 +230,9 @@ def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | No
                 settings = copy.deepcopy(settings)
                 answers = settings.setdefault("answers", {})
                 answers["field_answers"] = {**(answers.get("field_answers") or {}), **extra_answers}
+                # Kept apart as well: the candidate approved these for this application, so a
+                # "Yes" may tick an acknowledgement box (saved answers never can).
+                answers["approved_answers"] = dict(extra_answers)
             job = enrich_job(job)
             if require_eligible:
                 settings = db.get_settings()

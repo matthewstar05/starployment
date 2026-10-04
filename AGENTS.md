@@ -196,6 +196,7 @@ interpreter is equivalent.
 | Desktop tests only | `QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q tests/test_desktop_*.py tests/test_application_notes.py` |
 | Lint | `uvx ruff check --select F,E9,B --ignore B008,B905,B904 jobhub packaging scripts tests` (unused `app = QApplication(...)` in tests is intentional) |
 | Screenshots of every view | `.venv/bin/python scripts/render_screenshots.py` → `tmp/screenshots/` (`--docs` refreshes `docs/screenshots/`) |
+| Audit the send pipeline on real forms | `.venv/bin/python scripts/form_audit.py --api 300 --live 50` → `tmp/form_audit/` (practice mode, fictional candidate, uploads and submits blocked; `--skip N` for a fresh sample, `--urls` for specific postings) |
 | Build the app bundle | `.venv/bin/python packaging/build_desktop.py` → `dist/Starployment.app` |
 | Smoke-test the bundle | `.venv/bin/python packaging/smoke_bundle.py` |
 | Build, install to /Applications, relaunch | `.venv/bin/python packaging/install_app.py --build` (end of every iteration; flags: `--launch`, `--no-launch`, `--wait SECONDS`) |
@@ -616,6 +617,24 @@ contrast) and look at the screenshots.
   (JobSpy). `posted_ts` stores UTC seconds; a bare date counts as noon UTC and
   the Posted column shows no time for it. Ages are computed at paint time
   (`PostedDelegate`), so views never rebuild just because time passed.
+- Run `scripts/form_audit.py` after changing the engine, `answers.py`, or the
+  form readers in `prepare.py`. It drives the real prepare → approve → send
+  path in practice mode against live public forms (reads only: uploads, GraphQL
+  mutations, and anything submit-like are aborted) and groups what would stop
+  a real send. As of 2026-10-04 it passes about 92% of open postings; the rest
+  are CAPTCHAs, uploads the app cannot attach (flagged before sending), and
+  rare custom widgets. Practice runs report what would stop a real send
+  ("A real send would stop at: ..."), including fields invalid after filling.
+- Patterns the audit found, now handled: Greenhouse careers-page URLs (the
+  posting is re-checked through its board link, `scheduler.hosted_posting_url`);
+  EU Greenhouse and space-containing Ashby board names; Lever cards whose JSON
+  contains ">" (`prepare.lever_cards` parses HTML); Lever's keystroke-driven
+  location search; select2 lists (the real `<select>` is filled); multi-line
+  Ashby options (matched by first line); school/degree catalogs (shorter
+  searches, then "Other"); Greenhouse consent boxes (`data_compliance`), read
+  ahead with their standard wording; Yes/No questions rendered as boxes;
+  answers approved for one send (`answers.approved_answers`) may tick an
+  acknowledgement box, saved answers never can.
 - Ashby renders "select all that apply" as `fieldset.ashby-application-form-input-checkbox-group`
   and dates as a react-datepicker text input. The engine labels each box
   "<question> - <option>" (matching `prepare.expand_answer`) and types dates

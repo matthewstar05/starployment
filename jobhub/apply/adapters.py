@@ -53,7 +53,8 @@ def adapter_for(job: Job) -> Adapter | None:
         return None
     if parsed.scheme not in ("http", "https") or parsed.username or parsed.password:
         return None
-    if host in {"boards.greenhouse.io", "job-boards.greenhouse.io", "boards.eu.greenhouse.io"}:
+    if host in {"boards.greenhouse.io", "job-boards.greenhouse.io", "boards.eu.greenhouse.io",
+                "job-boards.eu.greenhouse.io"}:
         return Adapter("greenhouse", url, form_ready_selector="#first_name, input[type=file], form")
     if host == "jobs.ashbyhq.com" and re.fullmatch(r"/[^/]+/[0-9a-fA-F-]{36}(?:/application)?/?", parsed.path):
         return Adapter("ashby", _with_suffix(url, "/application"),

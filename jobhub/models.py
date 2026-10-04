@@ -62,7 +62,8 @@ def board_of(url: str) -> tuple[str, str] | None:
     host = (parts.hostname or "").lower()
     path = [part for part in parts.path.split("/") if part]
     slug, ats = "", ""
-    if host in ("job-boards.greenhouse.io", "boards.greenhouse.io"):
+    if host in ("job-boards.greenhouse.io", "boards.greenhouse.io", "job-boards.eu.greenhouse.io",
+                "boards.eu.greenhouse.io"):
         ats = "greenhouse"
         if "jobs" in path and path.index("jobs") > 0:
             slug = path[path.index("jobs") - 1]

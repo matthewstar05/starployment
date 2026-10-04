@@ -313,6 +313,15 @@ def _preference_facts(settings: dict) -> str:
     return "\n".join(lines)
 
 
+def _acknowledgement(question: dict) -> bool:
+    """A box to tick in acknowledgement (one option such as "I Acknowledge", or a lone checkbox)."""
+    if question.get("kind") != "checkbox":
+        return False
+    options = list(question.get("options") or [])
+    return not options or (len(options) == 1 and bool(
+        re.search(r"acknowledg|agree|understand|consent|confirm|accept|^yes\b", str(options[0]), re.I)))
+
+
 def _question_type(question: dict) -> str:
     """How a question is described to Luna. A checkbox with options is a multi-select; one without is yes/no."""
     if question.get("kind") == "checkbox":
@@ -328,12 +337,14 @@ def autofill_answers(job: Job, profile: Profile, settings: dict, questions: list
     for q in questions:
         if q.get("kind") == "file" or not str(q.get("label") or "").strip():
             continue
-        if DEMOGRAPHIC_RE.search(q["label"]) and q.get("options"):
+        if _acknowledgement(q):
+            pass   # "I acknowledge" boxes may mention race or gender; they are not self-identification
+        elif DEMOGRAPHIC_RE.search(q["label"]) and q.get("options"):
             declined = pick_option(list(q["options"]), "decline")
             if declined:
                 out[q["id"]] = {"answer": declined, "note": "Declined: demographic questions are optional"}
             continue
-        if DEMOGRAPHIC_RE.search(q["label"]):
+        if DEMOGRAPHIC_RE.search(q["label"]) and not _acknowledgement(q):
             continue
         entry = _question_entry(q, profile, job)
         entry["required"] = bool(q.get("required"))

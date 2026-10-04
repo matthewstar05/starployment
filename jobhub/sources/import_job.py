@@ -29,11 +29,16 @@ class ParsedJobURL:
 _HOSTS = {
     "job-boards.greenhouse.io": "greenhouse",
     "boards.greenhouse.io": "greenhouse",
+    # EU-hosted boards; the public API at boards-api.greenhouse.io serves them too.
+    "job-boards.eu.greenhouse.io": "greenhouse",
+    "boards.eu.greenhouse.io": "greenhouse",
     "jobs.lever.co": "lever",
     "jobs.eu.lever.co": "lever-eu",
     "jobs.ashbyhq.com": "ashby",
 }
 _SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+# Ashby board names are organization names and may contain spaces ("Superhuman Platform Inc").
+_ASHBY_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}$")
 
 
 def parse_job_url(url: str) -> ParsedJobURL:
@@ -58,7 +63,8 @@ def parse_job_url(url: str) -> ParsedJobURL:
     else:
         valid = len(segments) in (2, 3) and (len(segments) == 2 or segments[2].lower() in ("apply", "application"))
         slug, posting_id = (segments[0], segments[1]) if valid else ("", "")
-    if not valid or not _SEGMENT.match(slug) or not _SEGMENT.match(posting_id):
+    slug_pattern = _ASHBY_SLUG if ats == "ashby" else _SEGMENT
+    if not valid or not slug_pattern.match(slug) or slug != slug.strip() or not _SEGMENT.match(posting_id):
         raise JobImportError("Expected a supported public job-board URL")
     if parts.fragment:
         raise JobImportError("URL fragments are not supported")

@@ -9,7 +9,6 @@ submission still crosses the durable submit boundary.
 """
 from __future__ import annotations
 
-import html
 import json
 import re
 import threading
@@ -90,9 +89,26 @@ def expand_answer(question: dict, value) -> dict[str, object]:
     return {question["label"]: value}
 
 
+def send_answers(question: dict, value) -> dict[str, object]:
+    """Answers for one approved application, covering how its live form may render the question.
+
+    Only for sending (never the shared answer bank): a "select all that apply"
+    question may appear as a searchable multi-select list, and a lone box may
+    carry only its own text as a label.
+    """
+    answers = expand_answer(question, value)
+    if question.get("kind") == "checkbox" and question.get("options") and isinstance(value, list):
+        answers[question["label"]] = [_tidy(v) for v in value]
+        if len(question["options"]) == 1:
+            option = _tidy(question["options"][0])
+            answers.setdefault(option, option.casefold() in {_tidy(v).casefold() for v in value})
+    return answers
+
+
 def _tidy(text) -> str:
-    """Option text as a form shows it: forms trim and collapse spaces ("Open to Anything ")."""
-    return " ".join(str(text).split())
+    """Option text as a form shows it: trimmed, spaces collapsed ("Open to Anything "), and at
+    most 400 characters, the length the browser engine reads a label to."""
+    return " ".join(str(text).split())[:400]
 
 
 def _clean_value(value):
@@ -241,16 +257,81 @@ def greenhouse_questions(job: Job) -> list[dict]:
         options = [o.get("label") for o in question.get("answer_options") or [] if isinstance(o, dict)]
         out.append(_question(len(out) + 1, question.get("label") or "", "select", options,
                              question.get("required") is True))
+    # Greenhouse adds a required consent box under its demographic survey; its
+    # wording is standard and names the employer. Reading it ahead means it is
+    # answered before sending instead of stopping the send.
+    compliance = [item for item in payload.get("data_compliance") or [] if isinstance(item, dict)]
+    if any(item.get("requires_consent") or item.get("requires_processing_consent") for item in compliance):
+        # GDPR boards add a required data-processing consent box with standard wording.
+        company = str(payload.get("company_name") or job.company).strip()
+        out.append(_question(len(out) + 1, f"By checking this box, I agree to allow {company} to store and process my "
+                             "data for the purpose of considering my eligibility regarding my current application "
+                             "for employment.", "checkbox", [], True))
+    if any(item.get("demographic_data_consent_applies") for item in compliance):
+        company = str(payload.get("company_name") or job.company).strip()
+        out.append(_question(len(out) + 1, f"By checking this box, I consent to {company} collecting, storing, and "
+                             "processing my responses to the demographic data surveys above.", "checkbox", [], True))
     return out
 
 
 _LEVER_KINDS = {"text": "text", "textarea": "textarea", "multiple-choice": "radio", "dropdown": "select",
-                "multiple-select": "checkbox", "file-upload": "file"}
+                "multiple-select": "checkbox", "file-upload": "file", "university": "combobox"}
 _LEVER_STANDARD = (("Resume/CV", "file", True, "resume"), ("Full name", "text", True, "name"),
                    ("Email", "text", True, "email"), ("Phone", "text", False, "phone"),
                    ("Current location", "combobox", False, "location"), ("Current company", "text", False, "org"),
                    ("LinkedIn URL", "text", False, "urls[LinkedIn]"), ("GitHub URL", "text", False, "urls[GitHub]"),
                    ("Portfolio URL", "text", False, "urls[Portfolio]"))
+
+
+def lever_cards(page: str) -> list[str]:
+    """The JSON of each custom-question card on a Lever application page.
+
+    Cards sit in hidden inputs named ``cards[<id>][baseTemplate]``. Lever does
+    not escape ">" inside the JSON, so this reads attributes with an HTML
+    parser rather than a pattern that stops at the first ">".
+    """
+    from html.parser import HTMLParser
+
+    cards: list[str] = []
+
+    class Cards(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            values = dict(attrs)
+            if tag == "input" and re.fullmatch(r"cards\[[^\]]+\]\[baseTemplate\]", values.get("name") or ""):
+                cards.append(values.get("value") or "")
+
+    Cards(convert_charrefs=True).feed(page)
+    return cards
+
+
+def lever_location_choices(page: str) -> list[str]:
+    """Options of Lever's "Which location are you applying for?" list, when the posting has one."""
+    from html.parser import HTMLParser
+
+    choices: list[str] = []
+
+    class Locations(HTMLParser):
+        inside = False
+        option = False
+
+        def handle_starttag(self, tag, attrs):
+            values = dict(attrs)
+            if tag == "select":
+                self.inside = values.get("name") == "opportunityLocationId"
+            self.option = self.inside and tag == "option" and bool(values.get("value"))
+
+        def handle_endtag(self, tag):
+            if tag == "select":
+                self.inside = False
+            if tag == "option":
+                self.option = False
+
+        def handle_data(self, data):
+            if self.option and data.strip():
+                choices.append(data.strip())
+
+    Locations(convert_charrefs=True).feed(page)
+    return choices
 
 
 def lever_questions(job: Job) -> list[dict]:
@@ -265,12 +346,14 @@ def lever_questions(job: Job) -> list[dict]:
     for label, kind, required, name in _LEVER_STANDARD:
         if name in ("resume", "name", "email") or f'name="{name}"' in page:
             out.append(_question(len(out) + 1, label, kind, [], required, name))
-    for tag in re.findall(r"<input[^>]+name=\"cards\[[^\]]+\]\[baseTemplate\]\"[^>]*>", page):
-        value = re.search(r'value="([^"]*)"', tag)
-        if not value:
-            continue
+    location = lever_location_choices(page)
+    if location:
+        # Postings open in several places ask which one; the choice is the candidate's.
+        out.append(_question(len(out) + 1, "Which location are you applying for?", "select", location, True,
+                             "opportunityLocationId"))
+    for raw in lever_cards(page):
         try:
-            card = json.loads(html.unescape(value.group(1)))
+            card = json.loads(raw)
         except json.JSONDecodeError:
             continue
         for field in card.get("fields") or []:
@@ -288,7 +371,7 @@ _ASHBY_QUERY = """query ApiJobPosting($organizationHostedJobsPageName: String!, 
     applicationForm { sections { title fieldEntries { ... on FormFieldEntry { id field isRequired } } } }
   }
 }"""
-_ASHBY_KINDS = {"String": "text", "Email": "text", "Phone": "text", "SocialLink": "text", "Number": "text",
+_ASHBY_KINDS = {"String": "text", "Email": "text", "Phone": "text", "SocialLink": "text", "Url": "text", "Number": "text",
                 "Date": "text", "LongText": "textarea", "Boolean": "radio", "ValueSelect": "select",
                 "MultiValueSelect": "checkbox", "File": "file", "Location": "combobox"}
 
@@ -341,13 +424,23 @@ def answer_questions(questions: list[dict], profile: Profile, settings: dict, jo
             continue   # keep a reviewer's answer, a Luna draft, or an AI Autofill answer
         if question["kind"] == "file":
             is_resume = re.search(r"resume|\bcv\b", question["label"], re.I) or question.get("name") == "resume"
-            question["answer"] = "Resume for this role" if is_resume else None
-            question["source"] = "file" if is_resume else "none"
-            question["approved"] = bool(is_resume)
+            letter = (not is_resume and question.get("required") and re.search(r"cover", question["label"], re.I)
+                      and (settings.get("answers") or {}).get("cover_letter_mode", "auto") == "auto")
+            question["answer"] = ("Resume for this role" if is_resume else
+                                  "Cover letter written from your resume" if letter else None)
+            question["source"] = "file" if is_resume or letter else "none"
+            question["approved"] = bool(is_resume or letter)
             continue
         q = Q(label=question["label"], kind=question["kind"], options=list(question.get("options") or []),
               required=question.get("required", False), name=question.get("name", ""))
         answer = rule_answer(q, profile, settings, job)
+        if answer is None and question["kind"] == "checkbox" and q.options:
+            # Lever shows some single-choice questions ("Authorized to work? Yes / No") as boxes:
+            # a saved answer that picks one option ticks that box.
+            single = rule_answer(Q(label=q.label, kind="select", options=q.options, required=q.required,
+                                   name=q.name), profile, settings, job)
+            if single is not None and single.value not in (None, ""):
+                answer = type(single)([single.value], single.source)
         if answer is None or answer.value in ("", None, []):
             question.update(answer=None, source="none", approved=False)
             continue
@@ -649,7 +742,7 @@ def send_draft(draft_id: int, parallel: int = 1) -> dict:
         if blank(value) or not question.get("approved") or question["kind"] == "file":
             continue
         if question.get("source") in ("luna", "you", "saved", "autofill"):
-            extra.update(expand_answer(question, value))
+            extra.update(send_answers(question, value))
             if question.get("source") in ("luna", "you") and _rememberable(question, value, job):
                 remember[question["label"]] = value
     try:

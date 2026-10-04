@@ -91,6 +91,12 @@ Company job boards), every posting found on a Greenhouse, Lever, or Ashby board 
 to later scans, read about 120 boards per provider at a time. Greenhouse boards are read from their compact listing,
 and full descriptions are fetched only for new matches.
 
+Starployment reads each employer's form ahead, so the questions you answer in review are the ones the live
+form asks. A required upload it cannot attach (a transcript, say) is flagged in review before sending; apply on
+the employer's site and use **Mark as sent**. A required cover letter is written from your resume. Developers can
+check the whole send path against real public forms with `scripts/form_audit.py` (practice mode, fictional
+candidate, nothing uploaded or submitted).
+
 ## Resume builder and resume files
 
 **Profile → Resume builder** holds any number of roles, projects, schools, skills, and awards, each with
