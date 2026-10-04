@@ -60,10 +60,14 @@ The wizard has five steps: **Resume → About you → What to look for → Answe
      languages, office attendance) fills the same question in your other prepared applications and joins your
      question bank. Legal acknowledgements stay per application. Saving Profile → Answers refills every draft.
    - **AI Autofill** fills every open question in one application with realistic answers from your profile and
-     settings (for example, years of experience). Where your facts are silent it makes a reasonable assumption and
+     settings (for example, years of experience), written the way you would: short where the question is short,
+     with the two or three skills the role uses rather than your whole skill list. Where your facts are silent it makes a reasonable assumption and
      labels it "Assumption:", so you can check before sending. Demographic questions are declined, never guessed,
      and autofilled answers are never copied to other applications.
-3. Sending runs the browser engine against the live form. It counts as applied only after a new employer
+3. Sending runs the browser engine against the live form, quietly in the background: no window opens and
+   nothing takes focus (Settings → Automation → **Show the browser while sending** to watch). Several
+   applications go out side by side (**Send applications N at once**, 4 by default), one per employer at a time,
+   so a batch of 50–100 finishes in a fraction of the time. Each counts as applied only after a new employer
    confirmation and a durable local record. New questions found on the live form come back to Applications.
 4. **Reset unfinished…** removes every prepared application that was not sent (and, optionally, practice runs and
    attempts that stopped before Submit) so you can prepare again after changing your resume or answers. Anything

@@ -291,7 +291,7 @@ class DraftDetail(QWidget):
         self.show_all.clicked.connect(self._toggle_all)
         questions_head.addWidget(self.show_all)
         column.addLayout(questions_head)
-        self.questions_panel = GlassPanel(radius=14)
+        self.questions_panel = GlassPanel(radius=14, material="inset")
         self.questions_layout = QVBoxLayout(self.questions_panel)
         self.questions_layout.setContentsMargins(16, 6, 16, 6)
         self.questions_layout.setSpacing(0)

@@ -625,8 +625,13 @@ def approve_and_queue(draft_id: int, edits: dict[str, object] | None = None) -> 
     return db.get_draft(draft_id)
 
 
-def send_draft(draft_id: int) -> dict:
-    """Send one approved draft through the browser engine and record the outcome."""
+def send_draft(draft_id: int, parallel: int = 1) -> dict:
+    """Send one approved draft through the browser engine and record the outcome.
+
+    ``parallel`` is how many applications may be in flight at once. When every
+    slot is taken (an automatic run, say), the draft stays approved and the
+    result's status is ``busy`` so the caller can try again shortly.
+    """
     from . import scheduler
     draft = db.get_draft(draft_id)
     if draft is None:
@@ -648,8 +653,11 @@ def send_draft(draft_id: int) -> dict:
             if question.get("source") in ("luna", "you") and _rememberable(question, value, job):
                 remember[question["label"]] = value
     try:
-        application_id = scheduler.queue_application(job.id)
+        application_id = scheduler.queue_application(job.id, parallel=parallel)
     except ValueError as error:
+        # Every browser slot is taken: not a problem with this application.
+        if "waits its turn" in str(error) or str(error).startswith("An application is already queued"):
+            return {"status": "busy", "error": str(error), "draft_id": draft_id}
         db.update_draft(draft_id, status="error", error=str(error))
         return {"status": "blocked", "error": str(error), "draft_id": draft_id}
     db.update_draft(draft_id, status="sending", application_id=application_id, error="")

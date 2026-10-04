@@ -39,15 +39,18 @@ def stylesheet(appearance: str | None = None) -> str:
     check_icon = icon_path("check").as_posix()
     up_icon = icon_path("chevron-up").as_posix()
     down_icon = icon_path("chevron-down").as_posix()
-    control_line = "rgba(255,255,255,0.10)" if dark else "rgba(0,0,0,0.11)"
-    control_line_hover = "rgba(255,255,255,0.18)" if dark else "rgba(0,0,0,0.18)"
+    control_line = "rgba(255,255,255,0.08)" if dark else "rgba(0,0,0,0.09)"
+    control_line_hover = "rgba(255,255,255,0.16)" if dark else "rgba(0,0,0,0.16)"
     secondary_fill = "rgba(255,255,255,0.09)" if dark else "rgba(255,255,255,0.82)"
     secondary_hover = "rgba(255,255,255,0.14)" if dark else "rgba(255,255,255,1.0)"
     secondary_pressed = "rgba(255,255,255,0.06)" if dark else "rgba(235,236,240,1.0)"
     primary_top = "#2E8CFF" if dark else "#1A84F0"
     scroll_handle = "rgba(255,255,255,0.22)" if dark else "rgba(0,0,0,0.20)"
     scroll_handle_hover = "rgba(255,255,255,0.34)" if dark else "rgba(0,0,0,0.32)"
-    inset_fill = "rgba(0,0,0,0.22)" if dark else "rgba(255,255,255,0.55)"
+    # Notes and logs inside a panel read as soft wells, not darker boxes with borders.
+    inset_fill = c['fill_inset']
+    # Amber notices are a light wash over the panel, not a solid block.
+    notice_fill = "rgba(255,196,64,0.11)" if dark else "rgba(255,170,0,0.13)"
     return f"""
     /* Base ------------------------------------------------------------- */
     QWidget {{ color: {c['text']}; {font_rule} font-size: 13px; }}
@@ -83,9 +86,9 @@ def stylesheet(appearance: str | None = None) -> str:
     QLabel#sidebarStatusTitle {{ color: {c['text']}; font-size: 12px; font-weight: 600; }}
     QLabel#detailTitle {{ color: {c['text']}; font-size: 20px; font-weight: 700; }}
     QLabel#pill {{ border-radius: 10px; padding: 3px 10px; font-size: 11px; font-weight: 600; }}
-    QLabel#callout {{ background: {inset_fill}; color: {c['text']}; border: 1px solid {control_line};
+    QLabel#callout {{ background: {inset_fill}; color: {c['text']}; border: none;
         border-radius: 12px; padding: 11px 13px; }}
-    QLabel#questions {{ background: {c['amber_soft']}; color: {c['text']}; border-radius: 12px; padding: 11px 13px; }}
+    QLabel#questions {{ background: {notice_fill}; color: {c['text']}; border-radius: 12px; padding: 11px 13px; }}
     QLabel#dropHint {{ color: {c['text_muted']}; font-size: 12px; }}
     QFrame#console {{ background: #0E0E12; border: 1px solid rgba(255,255,255,0.07); border-radius: 12px; }}
     QFrame#console QLabel#consoleTitle {{ color: #F2F2F5; font-size: 12px; font-weight: 600; }}
@@ -109,7 +112,7 @@ def stylesheet(appearance: str | None = None) -> str:
     QLineEdit#search:focus {{ padding: 4px 9px 4px 3px; }}
     QLineEdit#search[nativeGlass="true"], QLineEdit#search[nativeGlass="true"]:hover,
     QLineEdit#search[nativeGlass="true"]:focus {{ background: transparent; }}
-    QPlainTextEdit#evidence {{ background: {inset_fill}; border: 1px solid {control_line}; border-radius: 12px;
+    QPlainTextEdit#evidence {{ background: {inset_fill}; border: none; border-radius: 12px;
         padding: 10px; color: {c['text_muted']}; font-size: 12px; }}
     QSpinBox {{ padding-right: 22px; min-width: 64px; }}
     QSpinBox[stepper="true"] {{ padding-right: 10px; min-width: 0; }}

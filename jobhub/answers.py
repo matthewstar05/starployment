@@ -82,7 +82,11 @@ def _degree_text(e) -> str:
 def _field_text(e) -> str:
     if e.field:
         return e.field.split("|")[0].strip()
-    d = re.sub(r"^(B\.?S\.?|M\.?S\.?|B\.?A\.?|M\.?A\.?|Ph\.?D\.?|Bachelor of \w+|Master of \w+)\s*(in|of)?\s*", "", e.degree or "", flags=re.I)
+    # Long forms first, and abbreviations only as whole words: "Master of Science in
+    # Quantitative Economics" must not lose its "Ma" to the "MA" abbreviation.
+    d = re.sub(r"^(?:(?:Bachelor|Master|Doctor)(?:'?s)?\s+of\s+[A-Za-z]+(?:\s+Administration)?"
+               r"|(?:B\.?S|M\.?S|B\.?A|M\.?A|Ph\.?D|B\.?Eng|M\.?Eng)\.?(?=[\s,]|$))\s*,?\s*(?:in|of)?\s*",
+               "", e.degree or "", flags=re.I)
     return d.split("|")[0].strip()
 
 
@@ -613,6 +617,78 @@ def _evidence(profile: Profile) -> list[str]:
     return result
 
 
+# Skill families a question can ask about. A skill belongs to a family when its
+# name contains one of these words (case-insensitive).
+_SKILL_FAMILIES = {
+    "ai": ("pytorch", "tensorflow", "keras", "scikit", "sklearn", "llm", "openai", "langchain", "hugging",
+           "transformers", "autogluon", "econml", "xgboost", "lightgbm", "jax", "machine learning", "nlp",
+           "computer vision", "rag", "vector"),
+    "cloud": ("aws", "gcp", "google cloud", "azure", "docker", "kubernetes", "terraform", "firebase", "vercel",
+              "lambda", "cloud", "heroku", "netlify"),
+    "frontend": ("react", "vue", "angular", "svelte", "next", "vite", "html", "css", "tailwind", "typescript",
+                 "javascript", "redux"),
+    "backend": ("node", "express", "django", "flask", "fastapi", "spring", "rails", "graphql", "rest",
+                "postgres", "mysql", "mongodb", "redis", "kafka", "grpc"),
+    "data": ("sql", "pandas", "numpy", "spark", "airflow", "dbt", "snowflake", "tableau", "tidyverse", "r",
+             "statsmodels", "matplotlib", "excel", "bigquery"),
+}
+_FAMILY_WORDS = {
+    "ai": r"\bai\b|artificial intelligence|machine learning|\bml\b|deep learning|\bllms?\b|model",
+    "cloud": r"cloud|aws|gcp|azure|devops|infrastructure|deploy",
+    "frontend": r"front[- ]?end|\bui\b|web|react",
+    "backend": r"back[- ]?end|server|api|database",
+    "data": r"\bdata\b|analytics|statistic|sql",
+}
+_LANGUAGES = {"python", "r", "sql", "c", "c++", "c#", "java", "javascript", "typescript", "go", "rust", "scala",
+              "bash", "swift", "kotlin", "ruby", "php", "sas", "matlab", "html", "css"}
+
+
+def relevant_skills(profile: Profile, job: Job | None, question: str = "", limit: int = 5) -> list[str]:
+    """The few skills a person would actually name for this question and role.
+
+    A reviewer reads a short, relevant answer; a list of every skill reads as
+    machine-made. Skills the question's topic and the posting mention come
+    first, then the candidate's own order. Frameworks questions skip bare
+    languages.
+    """
+    skills = [skill for skill in dict.fromkeys(profile.skills) if skill.strip()]
+    if not skills:
+        return []
+    text = (question or "").casefold()
+    posting = f"{job.title} {job.description}".casefold() if job else ""
+    families = [name for name, pattern in _FAMILY_WORDS.items() if re.search(pattern, text)]
+    frameworks = bool(re.search(r"framework|librar|tools?\b", text))
+
+    def mentioned(skill: str, haystack: str) -> bool:
+        return bool(haystack) and re.search(r"(?<![a-z0-9])" + re.escape(skill.casefold()) + r"(?![a-z0-9])",
+                                            haystack) is not None
+
+    def in_family(skill: str) -> bool:
+        name = skill.casefold()
+        return any(re.search(r"(?<![a-z])" + re.escape(word) + r"(?![a-z])", name)
+                   for family in families for word in _SKILL_FAMILIES[family])
+
+    scored = []
+    for index, skill in enumerate(skills):
+        if frameworks and skill.casefold() in _LANGUAGES:
+            continue
+        if families and not in_family(skill) and not mentioned(skill, text):
+            continue   # off-topic: a cloud question is not answered with React
+        score = 3 * in_family(skill) + 2 * mentioned(skill, posting) + mentioned(skill, text)
+        scored.append((-score, index, skill))
+    picked = [skill for _, _, skill in sorted(scored)][:limit]
+    # A topic question with no matching skills gets none, never the first few on the list.
+    return picked if families else picked or skills[:limit]
+
+
+def natural_list(items: list[str]) -> str:
+    """``Python, SQL, and C++`` the way a person writes a short list."""
+    items = [str(item) for item in items if str(item).strip()]
+    if len(items) <= 2:
+        return " and ".join(items)
+    return ", ".join(items[:-1]) + ", and " + items[-1]
+
+
 def factual_essay(question: Q, profile: Profile, job: Job | None) -> Answer | None:
     """Useful local answers for broad factual prompts, using resume wording only."""
     label = _normalized(question.label)
@@ -622,7 +698,8 @@ def factual_essay(question: Q, profile: Profile, job: Job | None) -> Answer | No
                  r"citizen|agree|certif|consent", label):
         return None
     if re.search(r"(?:list|describe|what|tell).*(?:technical skills|programming languages|technologies you)", label):
-        return Answer(", ".join(profile.skills), "resume") if profile.skills else None
+        picked = relevant_skills(profile, job, question.label, limit=5)
+        return Answer(natural_list(picked), "resume") if picked else None
     if not re.search(r"(?:describe|summari[sz]e|tell us about|overview of|summary of).*(?:project|technical experience|relevant experience|professional background)", label):
         return None
     evidence = _evidence(profile)

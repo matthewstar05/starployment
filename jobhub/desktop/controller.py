@@ -5,6 +5,7 @@ import queue
 import shutil
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -31,10 +32,13 @@ class WorkerSignals(QObject):
     progress = Signal(str, int, int)
     assist_finished = Signal(str, object, object)
     assist_failed = Signal(str, object, str)
+    send_done = Signal(int, object, str)      # draft id, result, error
 
 
 class DesktopController(QObject):
-    """All browser and network work runs on one worker, away from Qt's UI thread."""
+    """Scans, imports, and retries run on one worker; approved applications are sent by a
+    small pool of background browsers (Settings → Automation → Send at once). Nothing
+    blocks Qt's UI thread."""
 
     def __init__(self, window: JobHubWindow, *, scheduler_enabled: bool = True,
                  show_setup_on_start: bool = True, force_setup_on_start: bool = False):
@@ -63,6 +67,7 @@ class DesktopController(QObject):
         self.signals.progress.connect(self._prep_progress)
         self.signals.assist_finished.connect(self._assist_finished)
         self.signals.assist_failed.connect(self._assist_failed)
+        self.signals.send_done.connect(self._send_done)
         self._worker = threading.Thread(target=self._work, name="starployment-browser-worker", daemon=True)
         self._worker.start()
         # Preparation, Luna, inbox checks, and connection tests never use the
@@ -70,7 +75,10 @@ class DesktopController(QObject):
         self._assist = ThreadPoolExecutor(max_workers=2, thread_name_prefix="starployment-assist")
         self._prep_stop = threading.Event()
         self._preparing = False
-        self._sending: set[int] = set()
+        self._sending: set[int] = set()          # queued or in flight
+        self._send_queue: deque[int] = deque()
+        self._send_active: dict[int, str] = {}   # draft id -> employer, while its browser runs
+        self._send_counts = {"sent": 0, "other": 0}
         self._mail_state: dict = {"last_checked": None, "unmatched": 0}
 
         window.scan_requested.connect(self.scan)
@@ -176,8 +184,6 @@ class DesktopController(QObject):
                         self._submit_assist("mail_sync", self._mail_sync_job, False)
                 elif kind == "apply":
                     result = scheduler.apply_one(payload)
-                elif kind == "send":
-                    result = prepare.send_draft(int(payload))
                 elif kind == "import":
                     from ..sources.import_job import fetch_job
                     job = fetch_job(payload)
@@ -271,19 +277,6 @@ class DesktopController(QObject):
             result = result if isinstance(result, dict) else {}
             self._status(f"Added {result.get('company', '')} · {result.get('title', '')}", tone="success")
             self.window.show_jobs("all")
-        elif kind == "send":
-            result = result if isinstance(result, dict) else {}
-            self._sending.discard(int(result.get("draft_id") or 0))
-            status = str(result.get("status", ""))
-            detail = result.get("message") or result.get("error") or ""
-            label = {"applied": "Application sent and confirmed", "dry_run": "Practice run finished, nothing submitted",
-                     "needs_human": "Application needs your review", "failed": "Application issue",
-                     "blocked": "Could not send"}.get(status, "Application finished")
-            tone = {"applied": "success", "dry_run": "success", "needs_human": "warning"}.get(status, "error")
-            remaining = len(self._sending)
-            suffix = f" · {remaining} more sending" if remaining else ""
-            self._status(label + (f" · {detail}" if detail and status != "applied" else "") + suffix,
-                         9000 if not remaining else 0, tone if not remaining else "busy")
         else:
             result = result if isinstance(result, dict) else {}
             status = str(result.get("status", "finished"))
@@ -297,8 +290,6 @@ class DesktopController(QObject):
     def _task_failed(self, kind: str, error: str) -> None:
         if kind == "cycle":
             self._pending_scan = False
-        if kind == "send":
-            self._sending.clear()
         self._status(f"{kind.title()} failed: {error}", 15_000, "error")
         db.add_event(f"Desktop {kind} failed: {error}", "error")
         self.refresh()
@@ -487,6 +478,7 @@ class DesktopController(QObject):
 
     def stop(self) -> None:
         self._stopping.set()
+        self._send_queue.clear()
         self._prep_stop.set()
         scheduler.STATE.stop = True
         self._tasks.put(None)
@@ -761,18 +753,84 @@ class DesktopController(QObject):
         self.prepare_job(job_id)
 
     def _queue_send(self, draft_ids: list[int]) -> None:
-        if not db.get_settings().get("setup_complete"):
+        settings = db.get_settings()
+        if not settings.get("setup_complete"):
             self._status("Complete setup before sending")
             return
+        if not self._sending:
+            self._send_counts = {"sent": 0, "other": 0}
         for draft_id in draft_ids:
             if draft_id in self._sending:
                 continue
             self._sending.add(draft_id)
-            self._tasks.put(("send", draft_id))
-        practice = db.get_settings().get("dry_run")
-        count = len(self._sending)
-        self._status(("Practice run" if practice else "Sending") + (f" · {count} application{'s' if count != 1 else ''}"
-                     if count > 1 else "") + "…", 0, "busy")
+            self._send_queue.append(draft_id)
+        count, parallel = len(self._sending), self._parallel_sends(settings)
+        self._status(("Practice run" if settings.get("dry_run") else "Sending")
+                     + (f" · {count} applications, {min(count, parallel)} at a time in the background" if count > 1
+                        else " in the background") + "…", 0, "busy")
+        self._pump_sends()
+        self.refresh()
+
+    @staticmethod
+    def _parallel_sends(settings: dict) -> int:
+        return max(1, min(int(settings.get("parallel_sends", 1) or 1), scheduler.MAX_PARALLEL_SENDS))
+
+    def _pump_sends(self) -> None:
+        """Start queued sends while browser slots are free, never two to one employer at once."""
+        if self._stopping.is_set():
+            return
+        limit = self._parallel_sends(db.get_settings())
+        busy = set(self._send_active.values())
+        for draft_id in list(self._send_queue):
+            if len(self._send_active) >= limit:
+                break
+            draft = db.get_draft(draft_id)
+            company = str((draft or {}).get("company") or draft_id).strip().casefold()
+            if company in busy:
+                continue
+            self._send_queue.remove(draft_id)
+            self._send_active[draft_id] = company
+            busy.add(company)
+            threading.Thread(target=self._send_worker, args=(draft_id, limit), daemon=True,
+                             name=f"starployment-send-{draft_id}").start()
+
+    def _send_worker(self, draft_id: int, parallel: int) -> None:
+        try:
+            result = prepare.send_draft(draft_id, parallel=parallel)
+        except Exception as exc:  # noqa: BLE001
+            self.signals.send_done.emit(draft_id, None, str(exc))
+        else:
+            self.signals.send_done.emit(draft_id, result, "")
+
+    def _send_done(self, draft_id: int, result: object, error: str) -> None:
+        self._send_active.pop(draft_id, None)
+        result = result if isinstance(result, dict) else {}
+        status = str(result.get("status", "")) if not error else "failed"
+        if status == "busy" and not self._stopping.is_set():
+            # Every browser slot was taken (an automatic run, say): try again shortly.
+            self._send_queue.appendleft(draft_id)
+            QTimer.singleShot(5000, self._pump_sends)
+            return
+        self._sending.discard(draft_id)
+        self._send_counts["sent" if status in ("applied", "dry_run") else "other"] += 1
+        draft = db.get_draft(draft_id) or {}
+        subject = f"{draft.get('company') or 'Application'}"
+        detail = error or result.get("message") or result.get("error") or ""
+        label = {"applied": "Sent and confirmed", "dry_run": "Practice run finished, nothing submitted",
+                 "needs_human": "Needs your review", "failed": "Application issue",
+                 "blocked": "Could not send"}.get(status, "Finished")
+        remaining = len(self._sending)
+        if remaining:
+            self._status(f"{label} · {subject}" + (f" · {detail}" if detail and status != "applied" else "")
+                         + f" · {remaining} more sending", 0, "busy")
+        else:
+            done = self._send_counts
+            summary = (f"{label} · {subject}" + (f" · {detail}" if detail and status != "applied" else "")
+                       if done["sent"] + done["other"] == 1 else
+                       f"Finished sending · {done['sent']} sent, {done['other']} need your review")
+            tone = "success" if done["other"] == 0 else "warning"
+            self._status(summary, 9000, tone)
+        self._pump_sends()
         self.refresh()
 
     def luna_draft(self, draft_id: int) -> None:

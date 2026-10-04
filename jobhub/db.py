@@ -459,8 +459,13 @@ def job_stats() -> dict[str, int]:
 
 
 # ---------------- applications ----------------
-def reserve_application(job_id: str, method: str = "engine") -> int:
-    """Atomically reserve the browser and posting across API calls and processes."""
+def reserve_application(job_id: str, method: str = "engine", limit: int = 1) -> int:
+    """Atomically reserve a browser slot and the posting across API calls and processes.
+
+    ``limit`` is how many applications may be queued or running at once (the
+    candidate's parallel sends). One posting never has two at a time, and a
+    posting with a submission record is never reserved again.
+    """
     with conn() as c:
         c.execute("BEGIN IMMEDIATE")
         job = c.execute("SELECT status, canonical_key FROM jobs WHERE id=?", (job_id,)).fetchone()
@@ -474,8 +479,13 @@ def reserve_application(job_id: str, method: str = "engine") -> int:
         if already_applied or duplicate:
             raise ValueError("This posting already has a submission record; review its application history")
         if job["status"] in ("queued", "applying") or c.execute(
-                "SELECT 1 FROM applications WHERE status IN ('queued','running') LIMIT 1").fetchone():
-            raise ValueError("An application is already queued or in progress")
+                "SELECT 1 FROM applications a JOIN jobs j ON j.id=a.job_id WHERE j.canonical_key=? "
+                "AND a.status IN ('queued','running') LIMIT 1", (job["canonical_key"],)).fetchone():
+            raise ValueError("This application is already queued or in progress")
+        active = c.execute("SELECT COUNT(*) FROM applications WHERE status IN ('queued','running')").fetchone()[0]
+        if active >= max(1, int(limit)):
+            raise ValueError("An application is already queued or in progress" if limit <= 1 else
+                             f"{active} applications are already being sent; this one waits its turn")
         cur = c.execute(
             "INSERT INTO applications(job_id,status,method,started_at,worker_pid) VALUES (?,'queued',?,?,?)",
             (job_id, method, now_iso(), os.getpid()))

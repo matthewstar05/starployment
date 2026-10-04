@@ -409,12 +409,23 @@ class AmbientBackdrop(QWidget):
         painter.end()
 
 
+class _NoNativeGlass:
+    """Stand-in for ``GlassSurface`` on surfaces that are never native glass."""
+
+    active = False
+
+    def refresh(self) -> None:
+        pass
+
+
 class GlassPanel(QFrame):
     """A translucent rounded material. Children should be transparent.
 
     ``material`` is ``regular`` (content cards), ``sidebar`` (thinner, more of
-    the backdrop shows through), or ``thick`` (sheets and popovers). ``tint``
-    washes the panel with a semantic color, for example ``"accent"``.
+    the backdrop shows through), ``thick`` (sheets and popovers), or ``inset``
+    for a surface inside another panel: a soft borderless well, never a second
+    glass layer (glass on glass reads as a harsh step in tone). ``tint`` washes
+    the panel with a semantic color, for example ``"accent"``.
     """
 
     def __init__(self, parent: QWidget | None = None, *, radius: float = 16.0,
@@ -426,9 +437,12 @@ class GlassPanel(QFrame):
         self._material = material
         self._tint = tint
         self._tint_alpha = tint_alpha
-        self._native_glass = GlassSurface(
-            self, radius, tint=lambda: (self._tint, self._tint_alpha) if self._tint else None,
-        )
+        if material == "inset":
+            self._native_glass = _NoNativeGlass()
+        else:
+            self._native_glass = GlassSurface(
+                self, radius, tint=lambda: (self._tint, self._tint_alpha) if self._tint else None,
+            )
 
     @property
     def radius(self) -> float:
@@ -447,7 +461,13 @@ class GlassPanel(QFrame):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         tint = with_alpha(current_colors()[self._tint], self._tint_alpha) if self._tint else None
-        paint_glass(painter, QRectF(self.rect()), self._radius, material=self._material, tint=tint)
+        if self._material == "inset":
+            path = rounded_path(QRectF(self.rect()), self._radius)
+            painter.fillPath(path, qcolor(current_colors()["fill_inset"]))
+            if tint is not None:
+                painter.fillPath(path, tint)
+        else:
+            paint_glass(painter, QRectF(self.rect()), self._radius, material=self._material, tint=tint)
         painter.end()
 
 

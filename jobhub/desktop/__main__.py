@@ -49,12 +49,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.browser_check:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as playwright:
-            browser = playwright.chromium.launch(headless=True)
-            try:
-                page = browser.new_page()
-                page.goto("about:blank")
-            finally:
-                browser.close()
+            # Both the reduced headless shell and the full browser in headless mode,
+            # which is how applications are sent.
+            for channel in (None, "chromium"):
+                browser = playwright.chromium.launch(headless=True, channel=channel)
+                try:
+                    page = browser.new_page()
+                    page.goto("about:blank")
+                finally:
+                    browser.close()
         return 0
     if args.smoke_test:
         # A still frame: skip entrance animations so the screenshot is final.

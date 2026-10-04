@@ -18,13 +18,17 @@ from .scoring import score_all
 from .sources import SOURCES
 from .tailor import resume_for_job, snapshot_resume_for_application
 
-_apply_lock = threading.Lock()
+# Applications may run side by side, each in its own browser (see engine.browser_profile_slot).
+# The candidate's "parallel_sends" setting decides how many; this is the hard ceiling.
+MAX_PARALLEL_SENDS = 8
+_apply_slots = threading.BoundedSemaphore(MAX_PARALLEL_SENDS)
 _scan_lock = threading.Lock()
 
 
 class State:
     running_scan = False
-    running_apply: str | None = None
+    running_apply: str | None = None      # the most recently started application, for status displays
+    running_applies: set[str] = set()
     last_scan_at: str | None = None
     next_scan_at: str | None = None
     last_error: str = ""
@@ -168,14 +172,15 @@ def scan_once() -> dict:
     return {"run_id": run_id, "found": found, "new": new, "status": status, "log": log}
 
 
-def queue_application(job_id: str) -> int:
+def queue_application(job_id: str, parallel: int = 1) -> int:
+    """Reserve one application. ``parallel`` is how many may be queued or running at once."""
     profile = db.get_profile()
     if profile is None or not profile.resume_path:
         raise ValueError("Upload a resume before applying")
     from pathlib import Path
     if not Path(profile.resume_path).is_file():
         raise ValueError("The saved resume is missing; upload it again")
-    return db.reserve_application(job_id)
+    return db.reserve_application(job_id, limit=max(1, min(int(parallel), MAX_PARALLEL_SENDS)))
 
 
 def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | None = None,
@@ -192,10 +197,11 @@ def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | No
             application_id = queue_application(job_id)
         except ValueError as error:
             return {"error": str(error), "status": "blocked"}
-    with _apply_lock:
+    with _apply_slots:
         if not db.start_application(application_id, job_id):
             return {"error": "Application reservation is no longer available", "status": "blocked"}
         STATE.running_apply = job_id
+        STATE.running_applies.add(job_id)
         resume = ""
         try:
             job = db.get_job(job_id)
@@ -264,7 +270,8 @@ def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | No
             db.add_event(f"{result.status}: {job_id}: {result.message}", level, job_id)
             return {"application_id": application_id, **result.model_dump()}
         finally:
-            STATE.running_apply = None
+            STATE.running_applies.discard(job_id)
+            STATE.running_apply = next(iter(STATE.running_applies), None)
 
 
 def _auto_apply_preflight_window(candidates: list[Job], budget: int) -> list[Job]:

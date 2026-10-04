@@ -123,8 +123,12 @@ them to make a feature easier.
    `JobHubWindow._retryable`). Interrupted attempts become `needs_human` on
    restart (`db.recover_interrupted`).
 4. **One vacancy, one application.** `db.reserve_application` blocks
-   duplicates across sources by canonical key. Automatic runs are capped per run
-   and at one attempt per employer per cycle.
+   duplicates across sources by canonical key, and never holds two attempts
+   for one posting at once. Sends may run side by side up to
+   `settings.parallel_sends` (its `limit`; default 1 for every other caller),
+   each in its own browser profile slot (`engine.browser_profile_slot`); the
+   desktop send pool never runs two to one employer at once. Automatic runs
+   are capped per run and at one attempt per employer per cycle.
 5. **Automation is opt-in.** `auto_apply` defaults to off; practice mode
    (`dry_run`) fills forms without clicking Submit.
 6. **User data never ships.** `data/`, `.env`, resumes, screenshots, and the
@@ -209,7 +213,7 @@ That warning is harmless.
 | `JOBHUB_DATA_DIR` | Data root (DB, resumes, PDFs, screenshots, browser profile). Rejects home, filesystem root, symlinks, and unrecognized populated directories. |
 | `JOBHUB_LLM_BACKEND` | `none` / `auto` / `anthropic` / `claude_cli` / `codex_cli`. The core workflow needs no LLM. |
 | `JOBHUB_CODEX_MODEL`, `JOBHUB_CLAUDE_CLI_MODEL`, `JOBHUB_ANTHROPIC_MODEL` | Model overrides for the optional LLM backends. |
-| `JOBHUB_HEADLESS` | `0` shows Chromium during attempts. |
+| `JOBHUB_HEADLESS` | `0` shows Chromium during attempts (same as Settings → Show the browser while sending). |
 | `JOBHUB_PORT` | Legacy web server port (8765). |
 | `JOBHUB_REDUCED_MOTION` | `1` disables UI animation, `0` forces it on; unset follows macOS Reduce Motion. |
 | `JOBHUB_NATIVE_TITLEBAR` | `0` keeps a standard macOS title bar instead of the full-height glass layout. |
@@ -234,9 +238,10 @@ prepare.prepare_batch ──► drafts (db) ──► Applications review ──
    one-page resume)             │                                          ▼
 email_tracker.sync ──► db.set_application_stage ──► Tracker ◄── applications (sent)
 
-desktop/controller.py: one browser worker thread runs scans, applies, imports,
-and sends; a two-thread "assist" pool runs preparation, Luna, inbox checks, and
-connection tests (never the browser). The Qt thread only reads SQLite (refresh
+desktop/controller.py: one worker thread runs scans, retries, and imports; a
+send pool runs approved applications side by side (Settings → Automation →
+Send applications N at once), each in a background browser; a two-thread
+"assist" pool runs preparation, Luna, inbox checks, and connection tests. The Qt thread only reads SQLite (refresh
 every 15 s) and renders via window.set_data.
 ```
 
@@ -597,6 +602,16 @@ contrast) and look at the screenshots.
 
 - `pypdf` mangles some Word-exported PDFs; `profile.extract_text` prefers
   `pdftotext` (poppler) when available.
+- Sending runs Chromium's full headless mode (`channel="chromium"`, the real
+  browser and GPU stack with no window) so it never takes focus; the
+  "HeadlessChrome" user-agent marker is removed and `HEADLESS_WINDOW_SCRIPT`
+  gives the window a normal outer height. `tests/test_bot_filter.py` guards
+  the fingerprint. Human pacing types each key, so `FormEngine._type` scales
+  the action timeout with the text length (long answers used to time out).
+  With Greenhouse email codes on, those sends run one at a time
+  (`_MAILBOX_LOCK`) so a code can never reach the wrong application.
+- Luna writes in a human voice (`luna.VOICE`): a few relevant skills, not the
+  whole list. `answers.relevant_skills` picks them for rules and hints.
 - Posting dates arrive as ISO timestamps with offsets, `Z` times, or bare dates
   (JobSpy). `posted_ts` stores UTC seconds; a bare date counts as noon UTC and
   the Posted column shows no time for it. Ages are computed at paint time

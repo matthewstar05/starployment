@@ -6,12 +6,15 @@ attempt with a screenshot. No CAPTCHA bypass or guessed factual answers.
 """
 from __future__ import annotations
 
+import itertools
 import os
 import random
 import re
-import sys
+import threading
 import time
 import uuid
+from contextlib import contextmanager
+from contextlib import nullcontext as _nullcontext
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -215,39 +218,86 @@ def human_pacing() -> bool:
     return os.environ.get("JOBHUB_HUMAN_PACING", "1").strip().lower() not in {"0", "false", "off", "no"}
 
 
+# A window has browser chrome above the page; a headless one reports the same
+# outer and inner size. Report the height a normal window would have.
+HEADLESS_WINDOW_SCRIPT = """
+if (window.outerHeight === window.innerHeight) {
+  Object.defineProperty(window, 'outerHeight', {get: () => window.innerHeight + 87});
+}
+"""
+
 _HEADLESS_UA: str | None = None
+_HEADLESS_UA_LOCK = threading.Lock()
 
 
-def launch_context(playwright, channel: str | None):
-    """Open the persistent browser profile, without automation fingerprints when pacing is on.
-
-    With a desktop available (macOS, Windows), a real browser window opens
-    off-screen: a genuine Chrome fingerprint that stays out of the way. Elsewhere
-    it runs headless with the "HeadlessChrome" user-agent marker removed.
-    """
+def _browser_user_agent(playwright, channel: str) -> str:
+    """The browser's own user agent without the "HeadlessChrome" marker (probed once)."""
     global _HEADLESS_UA
-    options = dict(viewport={"width": 1280, "height": 1000}, locale="en-US",
-                   channel=channel if channel and channel != "chromium" else None)
-    if not human_pacing():
-        return playwright.chromium.launch_persistent_context(str(config.BROWSER_PROFILE), headless=config.HEADLESS,
-                                                             **options)
-    args = list(STEALTH_ARGS)
-    headless = config.HEADLESS
-    if headless and sys.platform in ("darwin", "win32"):
-        headless = False
-        args += ["--window-position=-32000,-32000", "--window-size=1280,1000"]
-    if headless:
+    with _HEADLESS_UA_LOCK:
         if _HEADLESS_UA is None:
-            probe = playwright.chromium.launch(headless=True)
+            probe = playwright.chromium.launch(headless=True, channel=channel)
             try:
                 _HEADLESS_UA = probe.new_page().evaluate("navigator.userAgent").replace("HeadlessChrome", "Chrome")
             finally:
                 probe.close()
-        options["user_agent"] = _HEADLESS_UA
-    ctx = playwright.chromium.launch_persistent_context(str(config.BROWSER_PROFILE), headless=headless, args=args,
-                                                        ignore_default_args=["--enable-automation"], **options)
+        return _HEADLESS_UA
+
+
+def show_browser(settings: dict | None = None) -> bool:
+    """Whether sending opens a visible browser window (Settings, or ``JOBHUB_HEADLESS=0``)."""
+    return bool((settings or {}).get("show_browser")) or not config.HEADLESS
+
+
+def launch_context(playwright, channel: str | None, profile_dir: Path | None = None, visible: bool = False):
+    """Open a persistent browser profile, without automation fingerprints when pacing is on.
+
+    By default the browser runs in Chromium's full headless mode: the real
+    browser and GPU stack with no window, so sending never takes focus or
+    shows a window. The "HeadlessChrome" user-agent marker is removed, and the
+    window reports a normal height. ``visible`` opens an ordinary window
+    instead, for watching a send.
+    """
+    profile = str(profile_dir or config.BROWSER_PROFILE)
+    custom = channel if channel and channel != "chromium" else None
+    options = dict(viewport={"width": 1280, "height": 1000}, locale="en-US")
+    if not human_pacing():
+        return playwright.chromium.launch_persistent_context(profile, headless=not visible, channel=custom,
+                                                             **options)
+    args = list(STEALTH_ARGS) + ["--window-size=1280,1087"]
+    if visible:
+        ctx = playwright.chromium.launch_persistent_context(profile, headless=False, args=args, channel=custom,
+                                                            ignore_default_args=["--enable-automation"], **options)
+    else:
+        # The full browser in headless mode (channel "chromium"), not the reduced headless shell.
+        engine_channel = custom or "chromium"
+        options["user_agent"] = _browser_user_agent(playwright, engine_channel)
+        ctx = playwright.chromium.launch_persistent_context(profile, headless=True, args=args, channel=engine_channel,
+                                                            ignore_default_args=["--enable-automation"], **options)
+        ctx.add_init_script(HEADLESS_WINDOW_SCRIPT)
     ctx.add_init_script(STEALTH_SCRIPT)
     return ctx
+
+
+# Chromium locks a profile to one process, so each simultaneous send uses its own
+# profile folder: the main profile first, then numbered ones beside it.
+_PROFILE_LOCK = threading.Lock()
+_PROFILES_IN_USE: set[int] = set()
+# Greenhouse email codes arrive in one mailbox; with codes enabled, one such send at a time.
+_MAILBOX_LOCK = threading.Lock()
+
+
+@contextmanager
+def browser_profile_slot():
+    with _PROFILE_LOCK:
+        slot = next(index for index in itertools.count() if index not in _PROFILES_IN_USE)
+        _PROFILES_IN_USE.add(slot)
+    try:
+        path = config.BROWSER_PROFILE if slot == 0 else config.BROWSER_PROFILE / "parallel" / f"slot-{slot}"
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        yield path
+    finally:
+        with _PROFILE_LOCK:
+            _PROFILES_IN_USE.discard(slot)
 
 
 class FormEngine:
@@ -292,13 +342,16 @@ class FormEngine:
         url = self.adapter.apply_url
         self._log(f"[{self.adapter.name}] open {url}")
         # A dedicated persistent profile retains login cookies without reading the
-        # user's regular browser. Its OS lock prevents concurrent browser use.
-        with sync_playwright() as playwright:
+        # user's regular browser. Each simultaneous send has its own profile slot.
+        mailbox = (self.adapter.name == "greenhouse"
+                   and bool(self.settings.get("email_verification", {}).get("enabled")))
+        with sync_playwright() as playwright, browser_profile_slot() as profile_dir, \
+                (_MAILBOX_LOCK if mailbox else _nullcontext()):
             channel = self.settings.get("browser_channel") or None
             ctx = None
             page = None
             try:
-                ctx = launch_context(playwright, channel)
+                ctx = launch_context(playwright, channel, profile_dir, visible=show_browser(self.settings))
                 ctx.set_default_timeout(7000)
                 page = ctx.pages[0] if ctx.pages else ctx.new_page()
                 self._opened_at = time.monotonic()
@@ -653,10 +706,10 @@ class FormEngine:
                 locator.fill("")
                 locator.click()
                 if len(text) <= 300:
-                    locator.press_sequentially(text, delay=self._rng.randint(18, 45))
+                    self._type(locator, text)
                 else:   # long answers: paste most of it, type the end, like pasting a drafted essay
                     locator.fill(text[:-12])
-                    locator.press_sequentially(text[-12:], delay=self._rng.randint(18, 45))
+                    self._type(locator, text[-12:])
                 if locator.input_value() != text:
                     locator.fill(text)   # a widget reformatted keystrokes; set the exact value
             else:
@@ -701,6 +754,12 @@ class FormEngine:
             return
         raise RuntimeError(f"Unsupported field kind: {kind}")
 
+    def _type(self, locator, text: str) -> None:
+        """Type like a person. The time limit grows with the text: a 250-character answer
+        at human speed takes longer than the default 7-second action limit."""
+        delay = self._rng.randint(18, 45) if human_pacing() else 0
+        locator.press_sequentially(text, delay=delay, timeout=max(7000, len(text) * (delay + 30) + 5000))
+
     def _fill_date(self, locator, field: dict, text: str) -> None:
         """Type a date into a date picker so the widget registers it.
 
@@ -719,7 +778,7 @@ class FormEngine:
         if not (parsed and (current := form_date(locator.input_value())) and current[0] == parsed[0]):
             locator.fill("")
             locator.click()
-            locator.press_sequentially(typed, delay=self._rng.randint(18, 45) if human_pacing() else 0)
+            self._type(locator, typed)
             locator.press("Tab")
         retained = form_date(locator.input_value())
         if parsed is None or retained is None or retained[0] != parsed[0]:

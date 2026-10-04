@@ -90,7 +90,16 @@ class SettingsView(QWidget):
         self.max_apply.setRange(1, 25)
         self.min_score = QSpinBox()
         self.min_score.setRange(0, 100)
+        self.parallel_sends = QSpinBox()
+        self.parallel_sends.setRange(1, 8)
+        self.parallel_sends.setSuffix(" at once")
+        self.show_browser = ToggleSwitch()
+        self.show_browser.setAccessibleName("Show the browser while sending")
         automation.add_row("Practice mode", self.dry_run, "Fill forms but never click Submit, even when you send.")
+        automation.add_row("Send applications", Stepper(self.parallel_sends, width=112),
+                           "Each runs in its own background browser, one per employer at a time.")
+        automation.add_row("Show the browser while sending", self.show_browser,
+                           "Off sends quietly in the background. Turn on to watch a send.")
         automation.add_row("Automatic applications", self.auto_apply,
                            "Also apply to eligible matches after each scan, without review.")
         self.interval.setSingleStep(5)
@@ -170,6 +179,7 @@ class SettingsView(QWidget):
 
         self.tracker.watch(
             self.auto_apply, self.dry_run, self.interval, self.max_apply, self.min_score, self.luna, self.email,
+            self.parallel_sends, self.show_browser,
             self.target_titles, self.locations, self.exclude_words, self.remote_ok, self.include_internships,
             self.min_salary, self.years_experience, self.one_page, self.max_skills, self.greenhouse, self.lever,
             self.ashby, self.search_terms, self.priority_companies, self.discover_boards,
@@ -234,6 +244,8 @@ class SettingsView(QWidget):
             self.interval.setValue(int(s.get("scan_interval_min", 60)))
             self.max_apply.setValue(int(s.get("max_apply_per_run", 3)))
             self.min_score.setValue(int(s.get("min_score_to_apply", 60)))
+            self.parallel_sends.setValue(int(s.get("parallel_sends", 4)))
+            self.show_browser.setChecked(bool(s.get("show_browser", False)))
             self.strategy.setCurrentIndex(max(0, self.strategy.findData(str(s.get("resume_strategy", "tailored")))))
             builder = s.get("resume_builder") or {}
             self.one_page.setChecked(bool(builder.get("one_page", True)))
@@ -265,6 +277,8 @@ class SettingsView(QWidget):
             "scan_interval_min": self.interval.value(),
             "max_apply_per_run": self.max_apply.value(),
             "min_score_to_apply": float(self.min_score.value()),
+            "parallel_sends": self.parallel_sends.value(),
+            "show_browser": self.show_browser.isChecked(),
             "resume_strategy": self.strategy.currentData(),
             "resume_builder": {"one_page": self.one_page.isChecked(), "max_skills": self.max_skills.value(),
                                **luna.pop("resume_builder")},
