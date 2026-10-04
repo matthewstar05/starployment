@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
+from functools import lru_cache
 
 from .models import Job, Profile
 
@@ -75,6 +76,11 @@ def _location_matches(preference: str, location: str) -> bool:
     )
 
 
+@lru_cache(maxsize=4096)
+def _skill_pattern(skill: str) -> re.Pattern:
+    return re.compile(rf"(?<![a-z0-9]){re.escape(skill)}(?![a-z0-9])")
+
+
 def _parse_dt(s: str | None) -> datetime | None:
     if not s:
         return None
@@ -99,7 +105,10 @@ def score_job(job: Job, profile: Profile | None, settings: dict) -> tuple[float,
 
     # --- skills fit ---
     skills = [s.lower() for s in (profile.skills if profile else [])]
-    hits = [s for s in skills if len(s) > 1 and re.search(rf"(?<![a-z0-9]){re.escape(s)}(?![a-z0-9])", desc + " " + title)]
+    text = desc + " " + title
+    # A plain substring check first: most skills are absent from most postings,
+    # and skipping their regex keeps re-ranking thousands of jobs fast.
+    hits = [s for s in skills if len(s) > 1 and s in text and _skill_pattern(s).search(text)]
     denom = max(6, min(len(skills), 25)) if skills else 1
     d["skills_fit"] = round(20 * min(1.0, len(hits) / denom * 1.5), 1)
     d["matched_skills"] = ", ".join(hits[:12])

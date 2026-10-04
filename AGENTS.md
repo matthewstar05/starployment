@@ -258,7 +258,7 @@ every 15 s) and renders via window.set_data.
 | `jobhub/apply/engine.py`, `adapters.py` | Browser form filling per ATS, confirmation detection, screenshots. |
 | `jobhub/answers.py` | Maps rendered form questions to saved candidate answers without guessing. |
 | `jobhub/profile.py` | Resume parsing (pdftotext/pypdf, optional LLM). |
-| `jobhub/tailor.py` | One-page resume builder (`plan_resume`, `build_resume`: rank the library, shrink until one page), role types (`classify_role`), resume files (`choose_resume_file`), `resume_choice`. |
+| `jobhub/tailor.py` | One-page resume builder (`plan_resume`, `build_resume`: rank the library, `shrink` then `compact` until one page, and a final `KeepInFrame` scale so generated resumes are always exactly one page; one zero-padding frame so every line shares the left margin, dates flush right), role types (`classify_role`), resume files (`choose_resume_file`), `resume_choice`. |
 | `jobhub/prepare.py` | Read Greenhouse/Lever/Ashby form definitions, answer from saved facts, Luna fill, `prepare_batch`, `approve_and_queue`, `send_draft`. |
 | `jobhub/agents.py` | Connections for Luna: Claude CLI, Codex CLI, Anthropic/OpenAI keys; CLI discovery beyond a GUI PATH, status, sign-in, tool-free `complete`. |
 | `jobhub/luna.py` | Draft answers (`draftable`, `draft_answers`), resume selection, optional email second opinion; all output validated. |
@@ -315,7 +315,9 @@ Tests prove behavior; screenshots prove design. After any visual change:
 | `desktop/widgets.py` | The design system: backdrop, glass, controls, motion, layout helpers. |
 | `desktop/delegates.py` | `GlassTable` and item delegates (role, score ring, status pill, action capsule, application row). |
 | `desktop/theme.py` | Design tokens (`PALETTES`, `BACKDROP_GLOWS`) and `ThemeManager`. |
-| `desktop/styles.py` | Global stylesheet for stock Qt controls, `app_font`, `color_for_status`. |
+| `desktop/styles.py` | Global stylesheet for stock Qt controls, `app_font`, `apply_typeface`, `color_for_status`. |
+| `desktop/fonts.py` | The Claude/System typeface choice; loads Anthropic Sans/Serif from the installed Claude app at runtime. |
+| `desktop/console.py` | Sidebar activity console. Lines keep (time, text, tone) and are recolored from palette tones on every theme change; the panel is a dark terminal in Dark mode and a white inset in Light. |
 | `desktop/format.py` | Pure copy helpers: status labels, relative time, countdown, greeting, salary, activity copy, log prettifying. No Qt; unit-test here. |
 | `desktop/native.py` | macOS window chrome (full-height content, hidden title, unified toolbar). |
 | `desktop/native_windows.py` | Windows taskbar identity (AppUserModelID, so source runs don't group under `python.exe`) and title bars that follow the app's Light/Dark appearance (DWM immersive dark mode, re-applied on every theme change and window show). |
@@ -357,9 +359,16 @@ motion and minimal chrome. Concretely:
 - **Shape.** Buttons, pills, search fields, and segmented controls are
   capsules. Cards use radius 16–18, grouped settings 14, and rows 10–12. Corner
   radii nest: inner radius is roughly outer radius minus the padding.
-- **Type.** System UI font (`.AppleSystemUIFont` on macOS) in px sizes: 28 bold
-  page titles, 15 semibold card titles, 13 body, 12 secondary, 11 captions and
-  eyebrows. Select label roles with `objectName` (see §5.4).
+- **Type.** Claude's typefaces by default (Settings → Appearance → Font):
+  Anthropic Sans for interface text and Anthropic Serif (weight 500) for page,
+  sheet, and hero titles. `desktop/fonts.py` registers them at runtime from an
+  installed `/Applications/Claude.app`; they are licensed to Anthropic, so never
+  copy, bundle, commit, or embed them (resume PDFs use standard Helvetica).
+  Without the Claude app, or with Font → System, the system UI font
+  (`.AppleSystemUIFont` on macOS) is used. Always get fonts from
+  `styles.app_font` / `widgets.ui_font` at paint time, never a hard-coded family.
+  Sizes in px: 28 page titles, 15 semibold card titles, 13 body, 12 secondary,
+  11 captions and eyebrows. Select label roles with `objectName` (see §5.4).
 - **Color.** Semantic tones only: accent (blue), green (applied/success), amber
   (needs review/warning), red (issue/error), indigo (practice runs/tracked).
   Status colors come from `styles.color_for_status`; tone pairs from

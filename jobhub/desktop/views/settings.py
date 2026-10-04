@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QFrame, QLabel, QLineEdit, QScrollArea, QSpinBox, QVBoxLayout, QWidget
 
 from ...config import ASHBY_COMPANIES, GREENHOUSE_COMPANIES, LEVER_COMPANIES, PRIORITY_COMPANIES
+from .. import fonts
 from ..editors import TagEditor
 from ..widgets import DirtyTracker, FormGroup, PageHeader, SegmentedControl, Stepper, ToggleSwitch, button
 from .connections import EmailConnection, LunaConnection
@@ -19,6 +20,8 @@ COMPANY_SUGGESTIONS = sorted(set(PRIORITY_COMPANIES) | {
     "Ramp", "Reddit", "Robinhood", "Roblox", "Salesforce", "Scale AI", "Shopify", "Snap", "Snowflake", "Spotify",
     "TikTok", "ByteDance", "Waymo", "xAI", "Millennium", "Point72", "Akuna Capital", "DRW", "Virtu",
 })
+TYPEFACE_NOTE = "Claude uses Anthropic Sans and Serif from the Claude app on this Mac."
+TYPEFACE_MISSING = "Claude's fonts appear when the Claude desktop app is installed; until then the system font is used."
 DISCOVER_NOTE = "Also read the public Greenhouse, Lever, and Ashby boards of companies found in other listings."
 TITLE_SUGGESTIONS = ["Software Engineer", "Software Developer", "Backend Engineer", "Frontend Engineer",
                      "Full Stack Engineer", "Data Scientist", "Data Analyst", "Data Engineer", "Machine Learning Engineer",
@@ -32,6 +35,7 @@ class SettingsView(QWidget):
     save_requested = Signal(dict)
     scan_requested = Signal()
     appearance_changed = Signal(str)
+    typeface_changed = Signal(str)
     resume_strategy_changed = Signal(str)
 
     def __init__(self, parent: QWidget | None = None):
@@ -68,6 +72,12 @@ class SettingsView(QWidget):
             self.appearance.addItem(text, value)
         self.appearance.activated.connect(lambda _index: self.appearance_changed.emit(str(self.appearance.currentData())))
         appearance.add_row("Theme", self.appearance, "Automatic follows your system.")
+        self.typeface = SegmentedControl()
+        for text, value in (("Claude", "Claude"), ("System", "System")):
+            self.typeface.addItem(text, value)
+        self.typeface.activated.connect(lambda _index: self.typeface_changed.emit(str(self.typeface.currentData())))
+        appearance.add_row("Font", self.typeface, TYPEFACE_NOTE if fonts.claude_available()
+                           else TYPEFACE_MISSING)
         groups.addWidget(appearance)
 
         # Connections -----------------------------------------------------------
@@ -151,12 +161,10 @@ class SettingsView(QWidget):
         self.strategy.addItem("Matched file", "library")
         self.strategy.addItem("Main resume", "original")
         self.strategy.activated.connect(lambda _i: self.resume_strategy_changed.emit(str(self.strategy.currentData())))
-        self.one_page = ToggleSwitch()
         self.max_skills = QSpinBox()
         self.max_skills.setRange(5, 80)
         resume.add_row("Resume to send", self.strategy,
                        "Generated builds a one-page resume per role from Profile → Resume builder.")
-        resume.add_row("Keep generated resumes to one page", self.one_page)
         resume.add_row("Skills listed per resume", Stepper(self.max_skills))
         groups.addWidget(resume)
 
@@ -181,7 +189,7 @@ class SettingsView(QWidget):
             self.auto_apply, self.dry_run, self.interval, self.max_apply, self.min_score, self.luna, self.email,
             self.parallel_sends, self.show_browser,
             self.target_titles, self.locations, self.exclude_words, self.remote_ok, self.include_internships,
-            self.min_salary, self.years_experience, self.one_page, self.max_skills, self.greenhouse, self.lever,
+            self.min_salary, self.years_experience, self.max_skills, self.greenhouse, self.lever,
             self.ashby, self.search_terms, self.priority_companies, self.discover_boards,
         )
 
@@ -239,6 +247,8 @@ class SettingsView(QWidget):
         with self.tracker.suspended():
             appearance = str(s.get("appearance", "System")).title()
             self.appearance.setCurrentIndex(max(0, self.appearance.findData(appearance)))
+            typeface = str(s.get("font", "Claude")).title()
+            self.typeface.setCurrentIndex(max(0, self.typeface.findData(typeface)))
             self.auto_apply.setChecked(bool(s.get("auto_apply", False)))
             self.dry_run.setChecked(bool(s.get("dry_run", False)))
             self.interval.setValue(int(s.get("scan_interval_min", 60)))
@@ -248,7 +258,6 @@ class SettingsView(QWidget):
             self.show_browser.setChecked(bool(s.get("show_browser", False)))
             self.strategy.setCurrentIndex(max(0, self.strategy.findData(str(s.get("resume_strategy", "tailored")))))
             builder = s.get("resume_builder") or {}
-            self.one_page.setChecked(bool(builder.get("one_page", True)))
             self.max_skills.setValue(int(builder.get("max_skills", 28)))
             self.luna.set_values(s)
             self.email.set_values(s)
@@ -272,6 +281,7 @@ class SettingsView(QWidget):
         luna = self.luna.values()
         patch = {
             "appearance": self.appearance.currentData(),
+            "font": self.typeface.currentData(),
             "auto_apply": self.auto_apply.isChecked(),
             "dry_run": self.dry_run.isChecked(),
             "scan_interval_min": self.interval.value(),
@@ -280,7 +290,7 @@ class SettingsView(QWidget):
             "parallel_sends": self.parallel_sends.value(),
             "show_browser": self.show_browser.isChecked(),
             "resume_strategy": self.strategy.currentData(),
-            "resume_builder": {"one_page": self.one_page.isChecked(), "max_skills": self.max_skills.value(),
+            "resume_builder": {"one_page": True, "max_skills": self.max_skills.value(),
                                **luna.pop("resume_builder")},
             **luna,
             **self.email.values(),

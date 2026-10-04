@@ -96,3 +96,59 @@ def test_resume_choice_follows_the_strategy(store, make_pdf):
     generated, note = resume_choice(profile, job, {"resume_strategy": "tailored"}, out_dir=store / "tailored" / "drafts")
     assert generated.endswith(".pdf") and "generated" in note
     assert len(PdfReader(generated).pages) == 1
+
+
+def _placed_text(path):
+    """(x, right edge, text) for every text run on page one."""
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+
+    runs = []
+
+    def visit(text, cm, tm, font, size):
+        if text.strip() and font:
+            x = cm[0] * tm[4] + cm[4]
+            scale = cm[0] * tm[0]
+            name = str(font.get("/BaseFont", "/Helvetica")).lstrip("/")
+            runs.append((x, x + stringWidth(text.strip(), name, size) * scale, text.strip()))
+
+    PdfReader(str(path)).pages[0].extract_text(visitor_text=visit)
+    return runs
+
+
+def test_resume_lines_share_one_left_margin_and_dates_sit_flush_right(store):
+    from jobhub.tailor import PAGE_MARGIN_X
+
+    profile = big_profile()
+    profile.experience[-1].location = "Example City, CA"
+    out = build_resume(profile, TRADING, store / "resume.pdf")
+    runs = _placed_text(out)
+    margin, right_margin = PAGE_MARGIN_X, 8.5 * 72 - PAGE_MARGIN_X
+    lefts = {round(x, 1) for x, _, _ in runs if x < 300}
+    # Names, titles, headings, and body text start on the margin; bullets and their text
+    # are the only indented lines. Nothing pokes out past the margin.
+    assert min(lefts) >= margin - 0.2
+    assert len({round(x) for x in lefts}) <= 3, lefts
+    dates = [(x, right) for x, right, text in runs if "–" in text or text in {"Example City, CA"}]
+    assert dates and all(abs(right - right_margin) < 1.0 for _, right in dates), dates
+
+
+def test_generated_resume_is_one_page_even_when_nothing_can_be_dropped(store):
+    profile = big_profile()
+    for entry in profile.experience:
+        entry.pinned = True   # pinned entries are never dropped, so only scaling can make room
+    profile.summary = " ".join(f"Sentence {i} about building reliable software." for i in range(12))
+    settings = {"resume_builder": {"one_page": False}}   # older saved setting; resumes stay one page anyway
+    out = build_resume(profile, TRADING, store / "pinned.pdf", settings=settings)
+    assert len(PdfReader(str(out)).pages) == 1
+    text = " ".join(text_of(out).split())
+    kept = plan_resume(profile, TRADING, settings).experience
+    assert len(kept) == 6 and all(item.source.company in text for item in kept)
+
+
+def test_dates_are_abbreviated_with_an_en_dash():
+    from jobhub.tailor import _dates
+
+    assert _dates("August 2023", "Present") == "Aug 2023 – Present"
+    assert _dates("Sept. 2021", "June 2022") == "Sep 2021 – Jun 2022"
+    assert _dates("2024", "") == "2024"
+    assert _dates("May 2025", "May 2025") == "May 2025"

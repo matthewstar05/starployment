@@ -8,19 +8,20 @@ have no stylesheet rules. Label roles are selected by ``objectName``; see the
 """
 from __future__ import annotations
 
-import sys
-
 from PySide6.QtGui import QFont, QFontDatabase
 from PySide6.QtWidgets import QApplication
 
+from . import fonts
 from .icons import icon_path
 from .theme import DARK, colors_for, resolve_appearance
 
 
 def app_font(size: int = 13, weight: int = QFont.Weight.Normal) -> QFont:
-    """The platform UI font at ``size`` pixels (SF Pro via ``.AppleSystemUIFont`` on macOS)."""
-    if sys.platform == "darwin":
-        font = QFont(".AppleSystemUIFont")
+    """The interface font at ``size`` pixels: Anthropic Sans when Claude's type is in use,
+    otherwise the platform UI font (SF Pro via ``.AppleSystemUIFont`` on macOS)."""
+    family = fonts.ui_family()
+    if family:
+        font = QFont(family)
     else:
         font = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont)
     font.setPixelSize(size)
@@ -33,9 +34,14 @@ def stylesheet(appearance: str | None = None) -> str:
     scheme = resolve_appearance(appearance)
     c = colors_for(scheme)
     dark = scheme == DARK
-    # Qt does not register the SF Pro marketing name on macOS. Its native
-    # system family resolves to the same platform typography without fallback.
-    font_rule = "font-family: '.AppleSystemUIFont';" if sys.platform == "darwin" else ""
+    # Claude's Anthropic Sans when available (fonts.py); otherwise the native system family,
+    # since Qt does not register the SF Pro marketing name on macOS.
+    family = fonts.ui_family()
+    font_rule = f"font-family: '{family}';" if family else ""
+    display = fonts.display_family()
+    # Page titles use Claude's serif at a regular weight, the way Claude sets its headings.
+    title_rule = f"font-family: '{display}'; font-weight: 500;" if fonts.active() == fonts.CLAUDE \
+        else "font-weight: 700;"
     check_icon = icon_path("check").as_posix()
     up_icon = icon_path("chevron-up").as_posix()
     down_icon = icon_path("chevron-down").as_posix()
@@ -49,6 +55,9 @@ def stylesheet(appearance: str | None = None) -> str:
     scroll_handle_hover = "rgba(255,255,255,0.34)" if dark else "rgba(0,0,0,0.32)"
     # Notes and logs inside a panel read as soft wells, not darker boxes with borders.
     inset_fill = c['fill_inset']
+    # The activity console is a dark terminal in Dark mode and a soft white panel in Light mode.
+    console_fill = "#0E0E12" if dark else "rgba(255,255,255,0.72)"
+    console_line = "rgba(255,255,255,0.07)" if dark else "rgba(0,0,0,0.07)"
     # Amber notices are a light wash over the panel, not a solid block.
     notice_fill = "rgba(255,196,64,0.11)" if dark else "rgba(255,170,0,0.13)"
     return f"""
@@ -66,8 +75,8 @@ def stylesheet(appearance: str | None = None) -> str:
     /* Typography (select with objectName) ------------------------------ */
     QLabel#brand {{ color: {c['text']}; font-size: 17px; font-weight: 700; }}
     QLabel#eyebrow {{ color: {c['text_muted']}; font-size: 11px; font-weight: 600; }}
-    QLabel#pageTitle {{ color: {c['text']}; font-size: 28px; font-weight: 700; }}
-    QLabel#sheetTitle {{ color: {c['text']}; font-size: 22px; font-weight: 700; }}
+    QLabel#pageTitle {{ color: {c['text']}; font-size: 28px; {title_rule} }}
+    QLabel#sheetTitle {{ color: {c['text']}; font-size: 22px; {title_rule} }}
     QLabel#subtitle {{ color: {c['text_muted']}; font-size: 13px; }}
     QLabel#caption {{ color: {c['text_subtle']}; font-size: 11px; }}
     QLabel#sectionTitle, QLabel#cardTitle {{ color: {c['text']}; font-size: 15px; font-weight: 600; }}
@@ -90,11 +99,11 @@ def stylesheet(appearance: str | None = None) -> str:
         border-radius: 12px; padding: 11px 13px; }}
     QLabel#questions {{ background: {notice_fill}; color: {c['text']}; border-radius: 12px; padding: 11px 13px; }}
     QLabel#dropHint {{ color: {c['text_muted']}; font-size: 12px; }}
-    QFrame#console {{ background: #0E0E12; border: 1px solid rgba(255,255,255,0.07); border-radius: 12px; }}
-    QFrame#console QLabel#consoleTitle {{ color: #F2F2F5; font-size: 12px; font-weight: 600; }}
-    QFrame#console QLabel#consoleDetail {{ color: #8E8E96; font-size: 11px; }}
-    QPlainTextEdit#consoleLog {{ background: transparent; border: none; padding: 0; color: #D7D7DE;
-        selection-background-color: #2B4A73; }}
+    QFrame#console {{ background: {console_fill}; border: 1px solid {console_line}; border-radius: 12px; }}
+    QFrame#console QLabel#consoleTitle {{ color: {c['text']}; font-size: 12px; font-weight: 600; }}
+    QFrame#console QLabel#consoleDetail {{ color: {c['text_muted']}; font-size: 11px; }}
+    QPlainTextEdit#consoleLog {{ background: transparent; border: none; padding: 0; color: {c['text']};
+        selection-background-color: {c['accent_soft']}; selection-color: {c['text']}; }}
     QPlainTextEdit#consoleLog:focus {{ border: none; padding: 0; }}
 
     /* Inputs ------------------------------------------------------------ */
@@ -129,7 +138,7 @@ def stylesheet(appearance: str | None = None) -> str:
     QLineEdit#tagInput:focus {{ border: 1px solid {c['accent']}; padding: 2px 10px; background: {c['fill_control_hover']}; }}
     QToolButton#rowRemove {{ background: transparent; border: none; border-radius: 10px; padding: 4px; }}
     QToolButton#rowRemove:hover {{ background: {c['fill_quiet']}; }}
-    QLabel#heroTitle {{ color: #FFFFFF; font-size: 24px; font-weight: 700; }}
+    QLabel#heroTitle {{ color: #FFFFFF; font-size: 24px; {title_rule} }}
     QLabel#heroText {{ color: rgba(255,255,255,0.74); font-size: 13px; }}
     QLabel#heroStat {{ color: rgba(255,255,255,0.86); font-size: 12px; font-weight: 600; }}
     QLabel#sourceBadge {{ color: {c['text_muted']}; font-size: 11px; font-weight: 600; }}
@@ -225,6 +234,26 @@ def stylesheet(appearance: str | None = None) -> str:
     QStatusBar {{ background: transparent; color: {c['text_muted']}; border: none; }}
     QFrame[frameShape="4"], QFrame[frameShape="5"] {{ color: {c['separator']}; }}
     """
+
+
+def apply_typeface(app: QApplication, choice: str, restyle: bool = True) -> str:
+    """Switch between Claude's type and the system font.
+
+    Restyling touches every widget, so it happens only when the typeface actually
+    changed, and callers about to apply the appearance anyway pass ``restyle=False``.
+    Returns the typeface in use, which is ``System`` when Claude's fonts are not installed."""
+    before = fonts.active()
+    active = fonts.set_typeface(choice)
+    font = app_font()
+    if app.font() != font:
+        app.setFont(font)
+    if restyle and active != before:
+        manager = getattr(app, "_jobhub_theme_manager", None)
+        if manager is not None:
+            manager.apply()
+        else:
+            app.setStyleSheet(stylesheet(app.property("jobhubResolvedAppearance") or None))
+    return active
 
 
 def apply_appearance(app: QApplication, appearance: str = "System") -> str:

@@ -8,20 +8,27 @@ results) are merged in so the log also shows work from earlier sessions.
 from __future__ import annotations
 
 import html
+from collections import deque
 from datetime import datetime
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QFont, QFontDatabase, QTextCursor
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QPlainTextEdit, QVBoxLayout, QWidget
 
 from .format import activity_label, activity_tone, parse_time
+from .theme import current_colors
 from .widgets import ActivityIndicator, StatusDot, label
 
-TONE_COLORS = {"success": "#4FD1A1", "green": "#4FD1A1", "warning": "#FFD166", "amber": "#FFD166",
-               "error": "#FF6961", "red": "#FF6961", "busy": "#7CB8FF", "accent": "#7CB8FF",
-               "info": "#D7D7DE", "neutral": "#A9A9B2"}
-TIME_COLOR = "#6E6E78"
 MAX_LINES = 400
+
+
+def tone_colors() -> dict[str, str]:
+    """Line colors for the current theme: the palette's semantic tones, so the log reads
+    on a dark terminal in Dark mode and on a light panel in Light mode."""
+    c = current_colors()
+    return {"success": c["green"], "green": c["green"], "warning": c["amber"], "amber": c["amber"],
+            "error": c["red"], "red": c["red"], "busy": c["accent_text"], "accent": c["accent_text"],
+            "info": c["text"], "neutral": c["text_muted"], "time": c["text_subtle"]}
 
 
 class ActivityConsole(QFrame):
@@ -61,6 +68,8 @@ class ActivityConsole(QFrame):
         self.log.setFont(font)
         column.addWidget(self.log, 1)
         self._busy: tuple | None = None
+        self._entries: deque[tuple[datetime, str, str]] = deque(maxlen=MAX_LINES)
+        self._drawn_colors: dict[str, str] | None = None
         self._seen_events: set[object] = set()
         self.last_text = ""
         self.last_tone = "info"
@@ -80,11 +89,35 @@ class ActivityConsole(QFrame):
 
     # ----------------------------------------------------------------- log
     def _line(self, when: datetime, text: str, tone: str) -> str:
-        color = TONE_COLORS.get(tone, TONE_COLORS["info"])
-        return (f'<span style="color:{TIME_COLOR}">{when:%H:%M}</span>&nbsp;'
+        colors = tone_colors()
+        color = colors.get(tone, colors["info"])
+        return (f'<span style="color:{colors["time"]}">{when:%H:%M}</span>&nbsp;'
                 f'<span style="color:{color}">{html.escape(text)}</span>')
 
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() in (QEvent.Type.PaletteChange, QEvent.Type.StyleChange):
+            self._rerender()
+
+    def _rerender(self) -> None:
+        """Redraw every line in the current theme's colors (only when they changed)."""
+        if not getattr(self, "_entries", None):
+            return
+        colors = tone_colors()
+        if colors == self._drawn_colors:
+            return
+        self._drawn_colors = colors
+        bar = self.log.verticalScrollBar()
+        at_bottom = bar.value() >= bar.maximum() - 4
+        self.log.clear()
+        for entry in self._entries:   # one block per line, as _append writes them
+            self.log.appendHtml(self._line(*entry))
+        if at_bottom:
+            bar.setValue(bar.maximum())
+
     def _drop_last_line(self) -> None:
+        if self._entries:
+            self._entries.pop()
         cursor = self.log.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         cursor.movePosition(QTextCursor.MoveOperation.StartOfBlock, QTextCursor.MoveMode.KeepAnchor)
@@ -95,7 +128,10 @@ class ActivityConsole(QFrame):
     def _append(self, text: str, tone: str, when: datetime | None) -> None:
         bar = self.log.verticalScrollBar()
         at_bottom = bar.value() >= bar.maximum() - 4
-        self.log.appendHtml(self._line(when or datetime.now(), text, tone))
+        when = when or datetime.now()
+        self._entries.append((when, text, tone))
+        self._drawn_colors = tone_colors()
+        self.log.appendHtml(self._line(when, text, tone))
         if at_bottom:
             bar.setValue(bar.maximum())
 

@@ -82,6 +82,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from . import fonts
 from .icons import icon_pixmap, jobhub_icon
 from .native_glass import GlassSurface, refresh_window_materials, window_has_native_glass
 from .theme import BACKDROP_GLOWS, DARK, PALETTES, current_colors, current_scheme
@@ -178,8 +179,9 @@ def blend(first: str | QColor, second: str | QColor, amount: float) -> QColor:
 
 
 def ui_font(pixel_size: int, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
-    """System UI font at an exact pixel size (``.AppleSystemUIFont`` on macOS)."""
-    font = QFont(".AppleSystemUIFont") if sys.platform == "darwin" else QFont()
+    """Interface font at an exact pixel size (Anthropic Sans, or the system UI font)."""
+    family = fonts.ui_family()
+    font = QFont(family) if family else QFont()
     font.setPixelSize(pixel_size)
     font.setWeight(weight)
     return font

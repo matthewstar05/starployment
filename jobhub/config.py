@@ -207,6 +207,7 @@ PRIORITY_COMPANIES = [
 DEFAULT_SETTINGS: dict = {
     # --- desktop appearance ---
     "appearance": "System",       # System | Light | Dark
+    "font": "Claude",             # Claude (Anthropic Sans/Serif from the installed Claude app) | System
     # --- autonomy ---
     "setup_complete": False,     # first-run desktop setup completed by the candidate
     "auto_apply": False,           # when True the hourly loop applies to top jobs on its own
@@ -249,6 +250,7 @@ DEFAULT_SETTINGS: dict = {
     # library:  the uploaded resume file whose role type best matches the job
     # original: always the main resume PDF
     "resume_strategy": "tailored",
+    # Generated resumes are always one page; ``one_page`` stays for older saved settings.
     "resume_builder": {"one_page": True, "luna_select": False, "max_skills": 28},
     # --- Luna, the optional drafting assistant (needs a connected agent) ---
     "agent": {"backend": "none", "model": ""},
@@ -408,6 +410,7 @@ def validate_settings(settings: dict) -> dict:
 
     class Settings(StrictModel):
         appearance: Literal["System", "Light", "Dark"]
+        font: Literal["Claude", "System"]
         setup_complete: StrictBool
         auto_apply: StrictBool
         dry_run: StrictBool

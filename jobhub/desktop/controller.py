@@ -53,9 +53,11 @@ class DesktopController(QObject):
             db.add_event(f"Could not tidy prepared applications: {exc}", "warn")
         app = QApplication.instance()
         if app is not None:
-            from .styles import apply_appearance
+            from .styles import apply_appearance, apply_typeface
 
-            apply_appearance(app, db.get_settings().get("appearance", "system"))
+            startup = db.get_settings()
+            apply_typeface(app, startup.get("font", "Claude"), restyle=False)   # appearance restyles next
+            apply_appearance(app, startup.get("appearance", "system"))
         self.window = window
         self.scheduler_enabled = scheduler_enabled
         self._stopping = threading.Event()
@@ -89,6 +91,7 @@ class DesktopController(QObject):
         window.save_profile_requested.connect(self.save_profile)
         window.save_settings_requested.connect(self.save_settings)
         window.appearance_requested.connect(self.set_appearance)
+        window.typeface_requested.connect(self.set_typeface)
         window.setup_requested.connect(self.open_setup)
         window.answer_questions_requested.connect(self.open_setup)
         window.open_url_requested.connect(self.open_url)
@@ -257,6 +260,17 @@ class DesktopController(QObject):
 
         self.window.crossfade(lambda: apply_appearance(QApplication.instance(), settings["appearance"]))
 
+    def set_typeface(self, choice: str) -> None:
+        """Apply and persist the font choice immediately, with a crossfade."""
+        try:
+            settings = db.set_settings({"font": choice})
+        except Exception as exc:  # noqa: BLE001
+            self._status(f"Could not save the font: {exc}", tone="error")
+            return
+        from .styles import apply_typeface
+
+        self.window.crossfade(lambda: apply_typeface(QApplication.instance(), settings["font"]))
+
     def _task_finished(self, kind: str, result: object) -> None:
         if kind == "cycle":
             self._pending_scan = False
@@ -392,9 +406,10 @@ class DesktopController(QObject):
             profile, _, missing = save_setup(profile_patch=profile_patch, settings_patch=settings_patch)
             library = payload.get("library") or {}
             if library:
+                before = list((db.get_profile() or type("P", (), {"skills": []})()).skills)
                 save_resume_library(library)
-                if "skills" in library:
-                    scheduler.rescore()
+                if "skills" in library and list(library.get("skills") or []) != before:
+                    self._rescore_in_background()
             if not missing:
                 db.requeue_preflight_needs_human()
             refilled = prepare.reanswer_open_drafts()
@@ -442,14 +457,20 @@ class DesktopController(QObject):
         try:
             patch = dict(patch)
             self._store_mail_secret(patch)
-            previous_appearance = db.get_settings().get("appearance")
+            previous = db.get_settings()
             settings = db.set_settings(patch)
-            if "appearance" in patch and settings["appearance"] != previous_appearance:
-                from .styles import apply_appearance
+            if ("appearance" in patch and settings["appearance"] != previous.get("appearance")) or \
+                    ("font" in patch and settings.get("font") != previous.get("font")):
+                from .styles import apply_appearance, apply_typeface
 
-                self.window.crossfade(lambda: apply_appearance(QApplication.instance(), settings["appearance"]))
-            if SCORING_KEYS & patch.keys():
-                scheduler.rescore()
+                def restyle() -> None:
+                    apply_typeface(QApplication.instance(), settings.get("font", "Claude"), restyle=False)
+                    apply_appearance(QApplication.instance(), settings["appearance"])
+
+                self.window.crossfade(restyle)
+            # Settings sends every value on save; re-rank only when a ranking input changed.
+            if any(previous.get(key) != settings.get(key) for key in SCORING_KEYS & patch.keys()):
+                self._rescore_in_background()
             if "answers" in patch:
                 prepare.reanswer_open_drafts()
             self.refresh(include_account=True)
@@ -458,6 +479,11 @@ class DesktopController(QObject):
                 self._next_cycle_at = time.time() + 2
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self.window, "Could not save settings", str(exc))
+
+    def _rescore_in_background(self) -> None:
+        """Re-rank every saved job off the UI thread (thousands of jobs take seconds)."""
+        self._status("Updating job rankings…", 0, "busy")
+        self._submit_assist("rescore", scheduler.rescore, None)
 
     def open_url(self, url: str) -> None:
         if url.startswith(("https://", "http://")):
@@ -569,6 +595,8 @@ class DesktopController(QObject):
                 self._status(report.summary, tone="info")
             self.refresh(include_account=True)
             return
+        elif kind == "rescore":
+            self._status("Job rankings updated", tone="success")
         elif kind == "preview":
             self.open_resume(str(result))
         elif kind == "import_resume":

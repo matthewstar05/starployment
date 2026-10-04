@@ -101,7 +101,8 @@ candidate, nothing uploaded or submitted).
 
 **Profile → Resume builder** holds any number of roles, projects, schools, skills, and awards, each with
 highlights you write once. For every role, Starployment ranks the library against the posting and drops the least
-relevant bullets and entries until the PDF fits exactly one page. It never rewrites your wording. Pin an entry to
+relevant bullets and entries until the PDF fits exactly one page (generated resumes are always one page; your
+own resume files are sent as they are). It never rewrites your wording. Pin an entry to
 always include it, hide one to keep it out, and **Preview for a role** to see the PDF for a real match. Luna can
 optionally choose the entries (by reference only; her selection is validated).
 

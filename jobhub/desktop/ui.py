@@ -165,6 +165,7 @@ class JobHubWindow(QMainWindow):
     save_profile_requested = Signal(dict)
     save_settings_requested = Signal(dict)
     appearance_requested = Signal(str)
+    typeface_requested = Signal(str)
     setup_completed = Signal(dict)
     setup_requested = Signal()
     answer_questions_requested = Signal(list)
@@ -239,6 +240,7 @@ class JobHubWindow(QMainWindow):
         self.profile.save_requested.connect(self._profile_save)
         self.settings.save_requested.connect(self._settings_save)
         self.settings.appearance_changed.connect(self.appearance_requested)
+        self.settings.typeface_changed.connect(self.typeface_requested)
         self._install_actions()
         self.set_scan_state(scanning=False, next_scan_at=None, setup_complete=True, scheduler_enabled=True)
 

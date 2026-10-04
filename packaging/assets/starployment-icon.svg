@@ -6,27 +6,27 @@
       <stop offset="0" stop-color="#17171F"/>
       <stop offset="1" stop-color="#050508"/>
     </linearGradient>
-    <radialGradient id="halo" cx="636" cy="388" r="330" gradientUnits="userSpaceOnUse">
+    <radialGradient id="halo" cx="620" cy="404" r="390" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#FFC233" stop-opacity="0.62"/>
       <stop offset="0.22" stop-color="#FFB000" stop-opacity="0.26"/>
       <stop offset="0.55" stop-color="#FF9F00" stop-opacity="0.07"/>
       <stop offset="1" stop-color="#FF9F00" stop-opacity="0"/>
     </radialGradient>
-    <radialGradient id="core" cx="636" cy="388" r="64" gradientUnits="userSpaceOnUse">
+    <radialGradient id="core" cx="620" cy="404" r="92" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#FFFBEA" stop-opacity="1"/>
       <stop offset="0.45" stop-color="#FFE38A" stop-opacity="0.85"/>
       <stop offset="1" stop-color="#FFC233" stop-opacity="0"/>
     </radialGradient>
-    <linearGradient id="trail" x1="262" y1="762" x2="636" y2="388" gradientUnits="userSpaceOnUse">
+    <linearGradient id="trail" x1="244" y1="780" x2="620" y2="404" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#FFB000" stop-opacity="0"/>
       <stop offset="0.55" stop-color="#FFC233" stop-opacity="0.45"/>
       <stop offset="1" stop-color="#FFE38A" stop-opacity="1"/>
     </linearGradient>
-    <linearGradient id="streak" x1="330" y1="756" x2="560" y2="526" gradientUnits="userSpaceOnUse">
+    <linearGradient id="streak" x1="318" y1="772" x2="540" y2="550" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#FFC233" stop-opacity="0"/>
       <stop offset="1" stop-color="#FFC233" stop-opacity="0.5"/>
     </linearGradient>
-    <linearGradient id="star" x1="560" y1="300" x2="712" y2="476" gradientUnits="userSpaceOnUse">
+    <linearGradient id="star" x1="514" y1="281" x2="726" y2="527" gradientUnits="userSpaceOnUse">
       <stop offset="0" stop-color="#FFF6D2"/>
       <stop offset="0.45" stop-color="#FFD54F"/>
       <stop offset="1" stop-color="#FFB000"/>
@@ -49,13 +49,13 @@
   <circle cx="232" cy="520" r="3" fill="#FFFFFF" fill-opacity="0.3"/>
 
   <!-- the trail: a long tapered wedge plus one faint speed line -->
-  <polygon points="654,406 618,370 258,766" fill="url(#trail)"/>
-  <polygon points="566,532 556,522 330,756" fill="url(#streak)"/>
+  <polygon points="646,430 594,378 240,784" fill="url(#trail)"/>
+  <polygon points="552,558 540,546 314,772" fill="url(#streak)"/>
 
-  <!-- the star: a four-point sparkle with concave sides -->
-  <circle cx="636" cy="388" r="64" fill="url(#core)"/>
-  <path d="M636 234 Q652 372 790 388 Q652 404 636 542 Q620 404 482 388 Q620 372 636 234 Z" fill="url(#star)"/>
-  <circle cx="636" cy="388" r="16" fill="#FFFDF2"/>
+  <!-- the star: a large four-point sparkle with concave sides -->
+  <circle cx="620" cy="404" r="92" fill="url(#core)"/>
+  <path d="M620 189 Q642 382 835 404 Q642 426 620 619 Q598 426 405 404 Q598 382 620 189 Z" fill="url(#star)"/>
+  <circle cx="620" cy="404" r="22" fill="#FFFDF2"/>
 
   <rect x="101" y="101" width="822" height="822" rx="185" fill="none" stroke="url(#rim)" stroke-width="2"/>
 </svg>

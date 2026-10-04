@@ -52,10 +52,30 @@ def test_appearance_applies_and_persists_immediately(controller):
 
 
 def test_rescore_runs_only_when_ranking_inputs_change(controller):
+    import time
+
+    from PySide6.QtWidgets import QApplication
+
+    from jobhub import db
+
+    def settle(until: str = ""):
+        deadline = time.time() + (5 if until else 0.3)
+        while time.time() < deadline and controller.window.sidebar.console.last_text != until:
+            QApplication.processEvents()
+            time.sleep(0.01)
+
     controller.save_settings({"dry_run": True, "scan_interval_min": 30})
+    settle()
+    assert controller.rescored == []
+    # The Settings page sends every value; unchanged ranking inputs never re-rank.
+    unchanged = {key: db.get_settings()[key] for key in ("target_titles", "preferred_locations", "min_salary")}
+    controller.save_settings(unchanged)
+    settle()
     assert controller.rescored == []
     controller.save_settings({"target_titles": ["Data Engineer"]})
-    assert controller.rescored == [True]
+    settle("Job rankings updated")
+    assert controller.rescored == [True]                  # in the background, never on the UI thread
+    assert controller.window.sidebar.console.last_text == "Job rankings updated"
 
 
 def test_skip_and_restore_from_the_jobs_menu(controller):
