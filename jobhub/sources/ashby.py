@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from ..models import Job
-from .base import fetch_boards, client, parse_salary, strip_html, title_relevant
+from .base import discovered_boards, fetch_boards, client, parse_salary, strip_html, title_relevant
 
 
 def _fetch_company(slug: str, settings: dict) -> list[Job]:
@@ -38,4 +38,5 @@ def _fetch_company(slug: str, settings: dict) -> list[Job]:
 
 def fetch(settings: dict) -> list[Job]:
     slugs = settings.get("companies", {}).get("ashby", [])
-    return fetch_boards(slugs, _fetch_company, settings, source="ashby")
+    return fetch_boards(slugs, _fetch_company, settings, source="ashby",
+                        discovered=discovered_boards(settings, "ashby"))

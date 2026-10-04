@@ -50,6 +50,7 @@ _ICON_FILES = {
     "education": "graduation-cap.svg",
     "code": "code.svg",
     "award": "award.svg",
+    "sort": "arrow-up-down.svg",
 }
 _DEFAULT_COLOR = "#5b6573"
 

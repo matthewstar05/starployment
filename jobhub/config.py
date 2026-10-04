@@ -165,6 +165,45 @@ ASHBY_COMPANIES = [
     "mercury", "deel", "runway", "together-ai", "character", "wispr", "lovable", "browser-use",
 ]
 
+# Boards added to the bundled catalog in version 2. Each one was checked
+# against its public API when added. Existing installs receive these once
+# (see db._upgrade_settings), so a board the candidate removes stays removed.
+CATALOG_VERSION = 2
+CATALOG_ADDITIONS = {
+    "greenhouse": [
+        "airtable", "cockroachlabs", "coursera", "faire", "fivetran", "gemini", "intercom", "lattice",
+        "mixpanel", "peloton", "squarespace", "toast", "tripadvisor", "udemy", "waymo", "webflow", "yext",
+        "zoominfo", "pagerduty", "newrelic", "launchdarkly", "grafanalabs", "fastly", "checkr", "sofi",
+        "betterment", "justworks", "ripple", "khanacademy", "spacex", "planetlabs", "astranis", "xai",
+        "wizinc", "flatironhealth", "oscar", "roku", "oura", "clearstreet", "flowtraders", "chicagotrading",
+        "gravitonresearchcapital", "jumptrading", "drweng", "sigmacomputing", "sambanovasystems", "coreweave",
+        "figure", "kodiak", "mercury", "mozilla", "wikimedia", "lucidmotors", "attentive", "klaviyo", "braze",
+        "contentful", "calendly", "monzo", "scopely", "crunchyroll", "vercel", "netlify", "humeai",
+    ],
+    "lever": ["spotify", "outreach", "gopuff", "ro", "binance", "offchainlabs"],
+    "ashby": [
+        "cohere", "posthog", "render", "railway", "neon", "clickhouse", "airbyte", "prefect", "astronomer",
+        "weaviate", "pinecone", "langchain", "llamaindex", "baseten", "lambda", "crusoe", "cerebras", "etched",
+        "snowflake", "confluent", "vanta", "drata", "plaid", "zip", "attio", "pylon", "decagon", "abridge",
+        "suno", "pika", "krea", "1password", "temporal", "sentry", "cribl", "mintlify", "resend", "omni",
+        "cursor", "warp", "saronic",
+    ],
+}
+GREENHOUSE_COMPANIES = list(dict.fromkeys(GREENHOUSE_COMPANIES + CATALOG_ADDITIONS["greenhouse"]))
+LEVER_COMPANIES = list(dict.fromkeys(LEVER_COMPANIES + CATALOG_ADDITIONS["lever"]))
+ASHBY_COMPANIES = list(dict.fromkeys(ASHBY_COMPANIES + CATALOG_ADDITIONS["ashby"]))
+
+# Priority ("FAANG+") employers. Their applications are starred and are never
+# sent automatically: they are prepared like any other, then wait for the
+# candidate to refine and approve each one. Editable in Settings.
+PRIORITY_COMPANIES = [
+    "Google", "Alphabet", "DeepMind", "Meta", "Facebook", "Apple", "Amazon", "Netflix", "Microsoft",
+    "Nvidia", "OpenAI", "Anthropic", "Tesla", "SpaceX", "Stripe", "Airbnb", "Uber", "Databricks",
+    "Palantir", "LinkedIn", "Jane Street", "Citadel", "Two Sigma", "Hudson River Trading", "Jump Trading",
+    "D. E. Shaw", "Optiver", "IMC", "Susquehanna", "Five Rings",
+]
+
+
 DEFAULT_SETTINGS: dict = {
     # --- desktop appearance ---
     "appearance": "System",       # System | Light | Dark
@@ -175,6 +214,8 @@ DEFAULT_SETTINGS: dict = {
     "scan_interval_min": 60,
     "max_apply_per_run": 3,
     "min_score_to_apply": 60,
+    # --- priority employers: starred, prepared, never sent automatically ---
+    "priority_companies": PRIORITY_COMPANIES,
     # --- targeting ---
     "target_titles": [],
     "exclude_title_words": [],
@@ -187,15 +228,19 @@ DEFAULT_SETTINGS: dict = {
     "sources": {"greenhouse": True, "lever": True, "ashby": True, "simplify": True,
                 "remoteok": True, "jobspy": True},
     "jobspy": {
-        "sites": ["indeed", "linkedin", "zip_recruiter", "google"],
+        # ZipRecruiter refuses JobSpy (HTTP 403), so it is not searched by default.
+        "sites": ["indeed", "linkedin", "google"],
         "search_terms": [],
         "location": "",
         "country_indeed": "usa",
-        "results_wanted": 20,
+        "results_wanted": 50,
         "hours_old": 72,
     },
     "companies": {"greenhouse": GREENHOUSE_COMPANIES, "lever": LEVER_COMPANIES,
                   "ashby": ASHBY_COMPANIES},
+    # Also scan the public boards of companies found in other listings.
+    "discover_boards": True,
+    "catalog_version": CATALOG_VERSION,
     # --- resume ---
     # tailored: a one-page PDF generated from the resume builder for each role
     # library:  the uploaded resume file whose role type best matches the job
@@ -206,7 +251,9 @@ DEFAULT_SETTINGS: dict = {
     "agent": {"backend": "none", "model": ""},
     "luna": {"draft_answers": True, "remember_approved": True, "autofill_on_prepare": True},
     # --- the Overview "Apply" plan ---
-    "apply_plan": {"count": 100, "min_score": 60, "one_per_company": True},
+    # posted_within_hours: 0 means any posting date; order: "match" or "newest".
+    "apply_plan": {"count": 100, "min_score": 60, "one_per_company": True,
+                   "posted_within_hours": 0, "order": "match"},
     # --- optional inbox tracking for replies (uses the mailbox below) ---
     "email_tracking": {"enabled": False, "lookback_days": 30, "use_luna": False},
     # --- canned answers (edit in the UI; used when a form asks) ---
@@ -321,6 +368,8 @@ def validate_settings(settings: dict) -> dict:
         count: StrictInt = Field(ge=1, le=500)
         min_score: float = Field(ge=0, le=100, allow_inf_nan=False)
         one_per_company: StrictBool
+        posted_within_hours: StrictInt = Field(ge=0, le=8760)
+        order: Literal["match", "newest"]
 
     class EmailTracking(StrictModel):
         enabled: StrictBool
@@ -362,6 +411,7 @@ def validate_settings(settings: dict) -> dict:
         scan_interval_min: StrictInt = Field(ge=5, le=10080)
         max_apply_per_run: StrictInt = Field(ge=1, le=25)
         min_score_to_apply: float = Field(ge=0, le=100, allow_inf_nan=False, strict=True)
+        priority_companies: list[StrictStr] = Field(max_length=300)
         target_titles: list[StrictStr] = Field(max_length=100)
         exclude_title_words: list[StrictStr] = Field(max_length=100)
         include_internships: StrictBool
@@ -372,6 +422,8 @@ def validate_settings(settings: dict) -> dict:
         sources: dict[Literal["greenhouse", "lever", "ashby", "simplify", "remoteok", "jobspy"], StrictBool]
         jobspy: JobSpy
         companies: dict[Literal["greenhouse", "lever", "ashby"], list[StrictStr]]
+        discover_boards: StrictBool
+        catalog_version: StrictInt = Field(ge=1)
         resume_strategy: Literal["original", "tailored", "library"]
         resume_builder: ResumeBuilder
         agent: Agent
@@ -381,6 +433,18 @@ def validate_settings(settings: dict) -> dict:
         answers: Answers
         email_verification: EmailVerification
         harness: Harness
+
+        @field_validator("priority_companies")
+        @classmethod
+        def clean_companies(cls, value):
+            names = []
+            for name in value:
+                name = " ".join(str(name).split())
+                if any(ord(char) < 32 for char in name) or len(name) > 100:
+                    raise ValueError("Priority companies must be short names")
+                if name and name.casefold() not in {n.casefold() for n in names}:
+                    names.append(name)
+            return names
 
         @field_validator("companies")
         @classmethod

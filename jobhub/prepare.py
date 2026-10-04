@@ -417,15 +417,23 @@ def luna_fill(draft_id: int, settings: dict | None = None) -> int:
 
 
 # ------------------------------------------------------------------ preparing
-def plan_candidates(count: int, min_score: float, one_per_company: bool = True) -> list[Job]:
-    """The best-matching New jobs on supported forms, one per employer when asked."""
+def plan_candidates(count: int, min_score: float, one_per_company: bool = True, *,
+                    posted_within_hours: int = 0, order: str = "match") -> list[Job]:
+    """New jobs on supported forms, one per employer when asked.
+
+    ``posted_within_hours`` keeps only postings published in that window (0 is
+    any time). ``order`` is ``"match"`` (best match first) or ``"newest"``
+    (most recently posted first).
+    """
     busy_companies = set()
     if one_per_company:
         for draft in db.list_drafts(db.DRAFT_OPEN + ("sending",)):
             busy_companies.add(str(draft.get("company") or "").strip().casefold())
     picked: list[Job] = []
     seen: set[str] = set()
-    for job in db.list_jobs(status="new", min_score=float(min_score), limit=20000):
+    for job in db.list_jobs(status="new", min_score=float(min_score), limit=20000,
+                            posted_within_hours=posted_within_hours or None,
+                            order="posted" if order == "newest" else "match"):
         if job.ats not in SUPPORTED_ATS:
             continue
         company = job.company.strip().casefold()
@@ -459,13 +467,18 @@ def prepare_job(job: Job, profile: Profile, settings: dict) -> int:
 
 def prepare_batch(count: int, min_score: float, one_per_company: bool = True, *,
                   use_luna: bool | None = None, progress: Callable[[str, int, int], None] | None = None,
-                  stop: threading.Event | None = None, luna_workers: int = 3) -> dict:
-    """Prepare up to ``count`` applications. Luna drafts run after every form is read."""
+                  stop: threading.Event | None = None, luna_workers: int = 3,
+                  posted_within_hours: int = 0, order: str = "match") -> dict:
+    """Prepare up to ``count`` applications. Luna drafts run after every form is read.
+
+    Priority-company roles are prepared like any other; they are starred and
+    wait for the candidate's own Approve & send.
+    """
     settings = db.get_settings()
     profile = db.get_profile()
     if profile is None or not profile.resume_path or not Path(profile.resume_path).is_file():
         raise ValueError("Add your resume in setup before preparing applications")
-    jobs = plan_candidates(count, min_score, one_per_company)
+    jobs = plan_candidates(count, min_score, one_per_company, posted_within_hours=posted_within_hours, order=order)
     prepared: list[int] = []
     failed = 0
     for index, job in enumerate(jobs, 1):
@@ -505,7 +518,28 @@ def prepare_batch(count: int, min_score: float, one_per_company: bool = True, *,
             drafted = sum(pool.map(run, needing))
     db.add_event(f"Prepared {len(prepared)} application(s) for review" + (f"; Luna drafted {drafted} answers" if drafted else ""),
                  "success" if prepared else "warn")
-    return {"prepared": len(prepared), "failed": failed, "considered": len(jobs), "drafted": drafted}
+    from .priority import is_starred
+    priority = settings.get("priority_companies") or []
+    starred = sum(1 for draft_id in prepared if is_starred(db.get_draft(draft_id) or {}, priority))
+    return {"prepared": len(prepared), "failed": failed, "considered": len(jobs), "drafted": drafted,
+            "starred": starred}
+
+
+def bulk_send_candidates(drafts: list[dict], priority: list[str]) -> tuple[list[dict], list[dict]]:
+    """Split drafts for "Send ready" into (send, held).
+
+    An approved draft was approved on its own and goes. A ready draft goes
+    unless it is starred (priority companies are starred automatically):
+    starred applications wait for their own Approve & send.
+    """
+    from .priority import held_from_bulk_send
+    send, held = [], []
+    for draft in drafts:
+        if draft.get("status") == "ready" and held_from_bulk_send(draft, priority):
+            held.append(draft)
+        elif draft.get("status") in ("approved", "ready"):
+            send.append(draft)
+    return send, held
 
 
 # ------------------------------------------------------------------ sending

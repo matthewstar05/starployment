@@ -104,6 +104,70 @@ def relative_time(value: str | None, now: datetime | None = None) -> str:
     return local.strftime("%b %d, %Y").replace(" 0", " ")
 
 
+_DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def posted_label(value: str | None, now: datetime | None = None) -> tuple[str, str]:
+    """``("Oct 3, 9:20 AM", "2h ago")`` for a posting date; the time appears only when the source gave one.
+
+    A bare date (job sites that only say "posted today") shows the date and
+    its age in days. Unknown dates return ``("—", "")``.
+    """
+    if not value:
+        return "—", ""
+    now = now or datetime.now(timezone.utc)
+    text = str(value).strip()
+    if _DATE_ONLY.match(text):
+        try:
+            day = datetime.fromisoformat(text).date()
+        except ValueError:
+            return text, ""
+        today = now.astimezone().date()
+        days = (today - day).days
+        shown = f"{day:%b} {day.day}" + (f", {day.year}" if day.year != today.year else "")
+        ago = "Today" if days <= 0 else "Yesterday" if days == 1 else _age_words(days * 86400)
+        return shown, ago
+    when = parse_time(text)
+    if when is None:
+        return text, ""
+    local = when.astimezone()
+    if local.year != now.astimezone().year:
+        shown = f"{local:%b} {local.day}, {local.year}"
+    else:
+        shown = f"{local:%b} {local.day}, " + local.strftime("%I:%M %p").lstrip("0")
+    return shown, _age_words((now - when).total_seconds())
+
+
+def _age_words(seconds: float) -> str:
+    if seconds < 0:
+        return "Just posted"
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return "Just now" if minutes < 1 else f"{minutes}m ago"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}h ago"
+    days = hours // 24
+    if days < 14:
+        return f"{days}d ago"
+    if days < 60:
+        return f"{days // 7}w ago"
+    if days < 365:
+        return f"{days // 30}mo ago"
+    return f"{days // 365}y ago"
+
+
+def posted_within(value: str | None, hours: float, now: datetime | None = None) -> bool:
+    """True when a posting date falls in the last ``hours`` (a bare date counts as that day's noon UTC)."""
+    if not value:
+        return False
+    text = str(value).strip()
+    when = parse_time(text + "T12:00:00+00:00" if _DATE_ONLY.match(text) else text)
+    if when is None:
+        return False
+    return ((now or datetime.now(timezone.utc)) - when).total_seconds() <= hours * 3600
+
+
 def countdown(seconds: float) -> str:
     """``in 42 min``/``in 1 hr 5 min`` for the next scheduled scan."""
     minutes = max(0, int(round(seconds / 60)))

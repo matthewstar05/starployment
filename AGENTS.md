@@ -10,7 +10,8 @@ before touching anything under `jobhub/apply/`, `jobhub/scheduler.py`, or
 
 - **Product:** a local, private job-search workspace. It imports a resume into a
   resume library, stores candidate-owned answers, discovers and ranks listings
-  from public ATS feeds, prepares applications for review (a one-page resume per
+  from public ATS feeds (plus company boards discovered from other listings),
+  filters and sorts them by posting date, prepares applications for review (a one-page resume per
   role plus the employer's questions with proposed answers; Luna, an optional AI
   assistant, drafts the open-ended ones), sends what the candidate approves by
   filling supported forms (Greenhouse, Lever, Ashby) with Playwright, and tracks
@@ -149,6 +150,12 @@ them to make a feature easier.
    were never sent and attempts that stopped before Submit; anything with
    `submission_attempted` or `applied` is history and is never deleted. A job
    with an open draft has status `prepared`, which keeps automatic runs away.
+   "Remove" on an attempt only sets `applications.hidden` (the Applications list
+   skips it; the Tracker and duplicate checks still see it).
+   **Mark as sent** (`db.mark_application_sent`) is the candidate's own record
+   of an application they sent outside Starployment, like
+   `db.add_manual_application`: `method='manual'`, never a browser submission.
+   It closes the draft and blocks any later attempt for the same posting.
 11. **The inbox is read-only and minimal.** `email_tracker` opens INBOX
    read-only, keeps only sender, subject, date, and the inferred stage
    (`mail_events`), and only advances a stage
@@ -159,6 +166,15 @@ them to make a feature easier.
    `--tools ""` and the Codex CLI with shell, exec, apps, browser, computer
    use, and web search disabled, `--ignore-user-config`, a read-only sandbox,
    and an empty scratch folder. Keep it that way.
+13. **Priority companies and starred roles wait for the candidate.**
+   `settings.priority_companies` (FAANG+ by default, editable in Settings)
+   stars matching roles automatically (`priority.is_starred`; `jobs.starred`
+   is NULL to follow the list, 1/0 for the candidate's own choice). They are
+   prepared like any other, but `scheduler.auto_apply_batch` never selects a
+   priority company or a starred job, `apply_one(require_eligible=True)`
+   refuses them before the browser starts, and "Send ready"
+   (`prepare.bulk_send_candidates`) leaves starred drafts for their own
+   Approve & send. Do not add another unattended send path that skips this.
 
 ---
 
@@ -227,11 +243,12 @@ every 15 s) and renders via window.set_data.
 | Path | Responsibility |
 | --- | --- |
 | `jobhub/config.py` | Paths, env vars, default settings, settings validation (`validate_settings`, `merge_settings`). |
-| `jobhub/models.py` | Pydantic `Job`, `Profile`, `ApplyResult`; canonical URLs and job IDs. |
-| `jobhub/db.py` | SQLite schema, dedup view (`DEDUPED_JOBS`), jobs, applications, runs, events, settings, profile. |
-| `jobhub/sources/` | One module per source; `import_job.py` validates and imports a single posting URL. |
+| `jobhub/models.py` | Pydantic `Job`, `Profile`, `ApplyResult`; canonical URLs and job IDs; `posted_epoch` (posting dates to UTC seconds) and `board_of` (the public board behind a posting URL). |
+| `jobhub/db.py` | SQLite schema, dedup view (`DEDUPED_JOBS`), jobs (`posted_ts` for posting-window filters and `JOB_ORDERS` sorting; `starred`), applications (`hidden`), runs, events, settings (and the one-time `_upgrade_settings` catalog upgrade), profile, discovered `boards`. |
+| `jobhub/priority.py` | Priority-company matching (`normalize_company`, `is_priority`), the effective star (`is_starred`), and the holds for bulk sends and automation. Pure functions. |
+| `jobhub/sources/` | One module per source; `import_job.py` validates and imports a single posting URL. `base.fetch_boards` reads configured boards plus the scan's discovered boards (quietly, reporting `board_results`). Greenhouse reads the light listing and fetches descriptions only for undescribed matches. |
 | `jobhub/scoring.py` | Deterministic, explainable 0–100 match score and auto-apply eligibility. Settings that affect it are listed in `controller.SCORING_KEYS`. |
-| `jobhub/scheduler.py` | `scan_once`, `rescore`, `apply_one`, `auto_apply_batch`, shared `STATE`. |
+| `jobhub/scheduler.py` | `scan_once` (with a rotating slice of discovered boards, `DISCOVERED_BOARDS_PER_SCAN`), `rescore`, `apply_one`, `auto_apply_batch`, shared `STATE`. |
 | `jobhub/apply/engine.py`, `adapters.py` | Browser form filling per ATS, confirmation detection, screenshots. |
 | `jobhub/answers.py` | Maps rendered form questions to saved candidate answers without guessing. |
 | `jobhub/profile.py` | Resume parsing (pdftotext/pypdf, optional LLM). |
@@ -286,7 +303,7 @@ Tests prove behavior; screenshots prove design. After any visual change:
 | `desktop/__main__.py` | Entry point and flags: `--no-scheduler`, `--setup`, `--smoke-test PNG`, `--browser-check`, `--dependency-check`. |
 | `desktop/controller.py` | `DesktopController`: signal wiring, worker thread, refresh loop, toasts, save handlers. The only place the UI talks to `db`/`scheduler`. |
 | `desktop/ui.py` | `JobHubWindow` shell: floating sidebar, page stack, toasts, keyboard shortcuts, macOS menu bar, theme crossfade, `set_data`, `set_scan_state`. Re-exports the views. |
-| `desktop/views/` | One module per sidebar page: `dashboard.py` (+ `ApplyHero`, `ApplyPlanSheet`), `jobs.py` (+ `AddPostingSheet`), `applications.py` (drafts and attempts; `DraftDetail`, `QuestionRow`), `tracker.py` (spreadsheet, `AddApplicationSheet`), `profile.py` (Details, Resume builder, Resume files, Answers), `settings.py`. Shared panels: `resume_builder.py`, `connections.py` (Luna and Email, also used by the wizard). |
+| `desktop/views/` | One module per sidebar page: `dashboard.py` (+ `ApplyHero`, `ApplyPlanSheet`), `jobs.py` (+ `AddPostingSheet`; Posted column, Posted window and Sort menus, header-click sorting run in SQL), `applications.py` (drafts and attempts; `DraftDetail`, `QuestionRow`; Starred filter, Sort menu, right-click star / mark as sent / remove), `tracker.py` (spreadsheet, `AddApplicationSheet`), `profile.py` (Details, Resume builder, Resume files, Answers), `settings.py`. Shared panels: `resume_builder.py`, `connections.py` (Luna and Email, also used by the wizard). |
 | `desktop/editors.py` | No-syntax editors: `TagEditor` (chips), `KeyValueEditor` (label/value rows), `BulletEditor`, `FlowLayout`, `yes_no_control`. They set `formExpand` so `FormGroup` rows give them full width. |
 | `desktop/wizard.py` | `SetupWizard`: step indicator, resume drop zone, grouped forms, answer bank. |
 | `desktop/widgets.py` | The design system: backdrop, glass, controls, motion, layout helpers. |
@@ -394,6 +411,8 @@ Buttons: `button(text, role, icon=..., trailing=...)` where role is `primary`
 | `SegmentedControl` | Small exclusive choices (theme, filters, resume strategy). Mirrors the `QComboBox` API; `activated` fires only for user clicks. |
 | `Stepper` | Wraps a `QSpinBox` with a −/+ capsule. Keep reading and writing the wrapped spin box. |
 | `SearchField` | Capsule search input with a magnifier and a clear button. |
+| `ChoiceButton` | A secondary capsule that opens a menu of exclusive choices (Sort, Posted). `changed` fires only for user picks. |
+| `paint_star_mark` | The filled amber star for starred rows (painted by delegates, never a per-row widget). |
 | `GlassNavList` | The sidebar list with a spring-animated selection pill and count badges (`set_badge`). |
 | `FadeStack` | A `QStackedWidget` with fade-and-rise (pages) or push (wizard) transitions. It removes its opacity effect when done. |
 | `Toast` | Transient feedback. Use `window.notify(text, tone, timeout)`; tones are `info`, `success`, `warning`, `error`, and `busy` (spinner; timeout 0 keeps it). |
@@ -578,6 +597,12 @@ contrast) and look at the screenshots.
 
 - `pypdf` mangles some Word-exported PDFs; `profile.extract_text` prefers
   `pdftotext` (poppler) when available.
+- Posting dates arrive as ISO timestamps with offsets, `Z` times, or bare dates
+  (JobSpy). `posted_ts` stores UTC seconds; a bare date counts as noon UTC and
+  the Posted column shows no time for it. Ages are computed at paint time
+  (`PostedDelegate`), so views never rebuild just because time passed.
+- New bundled boards go in `config.CATALOG_ADDITIONS` with a bumped
+  `CATALOG_VERSION`; existing installs receive only the additions, once.
 - ZipRecruiter blocks JobSpy (HTTP 403) and RemoteOK can fail DNS on some
   networks. Public Greenhouse, Lever, and Ashby APIs plus Simplify's list are
   the reliable sources. Source failures are reported, never fatal.

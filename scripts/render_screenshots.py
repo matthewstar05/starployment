@@ -100,6 +100,8 @@ def seed(db, config) -> None:
         "setup_complete": True, "auto_apply": True, "dry_run": False, "appearance": "System",
         "target_titles": ["Software Engineer", "Data Engineer", "Quantitative Developer"],
         "preferred_locations": ["San Francisco, CA", "New York, NY", "Remote"],
+        # A fictional priority employer, so its prepared application shows the star.
+        "priority_companies": [*config.PRIORITY_COMPANIES, "Northwind Labs"],
         "agent": {"backend": "claude_cli", "model": ""},
         "email_verification": {"enabled": False, "imap_host": "imap.gmail.com", "imap_port": 993,
                                "imap_username": "alex.rivera@example.test", "sender_address": ""},
@@ -115,10 +117,12 @@ def seed(db, config) -> None:
             remote="Remote" in location, salary_min=low, salary_max=high,
             url=f"https://job-boards.greenhouse.io/{slug}/jobs/{4000 + index}",
             discovered_at=(now - timedelta(hours=index * 3)).isoformat(timespec="seconds"),
+            posted_at=(now - timedelta(hours=index * 7 + 1, minutes=index * 13)).isoformat(timespec="seconds"),
         ))
     for index in range(40):
         jobs.append(Job(source="simplify", ats="lever", company=f"Studio {index + 1}", title="Software Engineer",
-                        location="Remote", url=f"https://jobs.lever.co/studio{index}/{index:04d}"))
+                        location="Remote", url=f"https://jobs.lever.co/studio{index}/{index:04d}",
+                        posted_at=(now - timedelta(days=index % 9)).date().isoformat() if index % 3 else None))
     db.upsert_jobs(jobs)
     scores = {job.id: (float(COMPANIES[i][5]) if i < len(COMPANIES) else 30.0 - i * 0.3,
                        {"title_fit": 30, "skills_fit": 18, "location": 10, "freshness": 8})
@@ -165,6 +169,7 @@ def seed(db, config) -> None:
                 (job.id, "applied", "engine", when, when, "[]", stage, "email" if stage != "applied" else "",
                  (now - timedelta(days=max(0, days - 1))).isoformat(timespec="seconds"),
                  "Recruiter: Sam" if stage == "interview" else ""))
+    db.set_job_star(by_company["Meridian Pay"].id, True)
     # Prepared applications waiting for review.
     drafts = [
         ("Northwind Labs", "ready", [
@@ -274,7 +279,7 @@ def main() -> int:
             written.append(path)
         if "apply" in pages:
             from jobhub.desktop.views.dashboard import ApplyPlanSheet
-            sheet = ApplyPlanSheet(db.get_settings(), 412, window)
+            sheet = ApplyPlanSheet(db.get_settings(), 412, window, counts=db.fresh_counts())
             sheet.show()
             for _ in range(5):
                 app.processEvents()

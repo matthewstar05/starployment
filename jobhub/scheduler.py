@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from . import db
 from .apply import apply_to_job
 from .models import ApplyResult, Job, job_fingerprint
+from .priority import held_from_automation
 from .readiness import preflight_job
 from .scoring import score_all
 from .sources import SOURCES
@@ -36,6 +37,28 @@ log = logging.getLogger(__name__)
 
 class PostingRefreshError(RuntimeError):
     """The current public ATS posting could not be verified safely."""
+
+
+# Discovered company boards read per provider in one scan. Boards rotate, least
+# recently read first, so every discovered board is read every few scans.
+DISCOVERED_BOARDS_PER_SCAN = 120
+BOARD_SOURCES = ("greenhouse", "lever", "ashby")
+
+
+def _scan_settings(settings: dict) -> dict:
+    """This scan's view of settings: configured boards plus a rotating slice of discovered ones."""
+    import copy
+    scan = copy.deepcopy(settings)
+    if settings.get("discover_boards", True):
+        companies = settings.get("companies") or {}
+        scan["_discovered_boards"] = {
+            ats: db.boards_for_scan(ats, set(companies.get(ats) or []), DISCOVERED_BOARDS_PER_SCAN)
+            for ats in BOARD_SOURCES if settings.get("sources", {}).get(ats)
+        }
+    with db.conn() as c:
+        scan["_known_postings"] = {r["canonical_key"] for r in c.execute(
+            "SELECT canonical_key FROM jobs WHERE ats='greenhouse' AND length(description) > 0").fetchall()}
+    return scan
 
 
 def rescore() -> None:
@@ -81,7 +104,7 @@ def scan_once() -> dict:
     status = "ok"
     try:
         run_id = db.create_run()
-        settings = db.get_settings()
+        settings = _scan_settings(db.get_settings())
         enabled = [n for n, on in settings.get("sources", {}).items() if on and n in SOURCES]
         db.add_event(f"Scan started: {', '.join(enabled) or 'no enabled sources'}")
         jobs: list[Job] = []
@@ -96,6 +119,9 @@ def scan_once() -> dict:
                     jobs.extend(result)
                     successful += 1
                     log.append(f"{name}: {len(result)} jobs")
+                    board_results = getattr(result, "board_results", None)
+                    if board_results and name in BOARD_SOURCES:
+                        db.record_board_scans(name, board_results)
                     for notice in getattr(result, "notices", []):
                         log.append(f"{name}: INFO {notice}")
                     for warning in getattr(result, "warnings", []):
@@ -118,6 +144,9 @@ def scan_once() -> dict:
         jobs = list(by_key.values())
         found = len(jobs)
         new = db.upsert_jobs(jobs)
+        boards = db.discover_boards(jobs) if settings.get("discover_boards", True) else 0
+        if boards:
+            log.append(f"discovered {boards} more company board(s) to read in later scans")
         rescore()
         log.append(f"total {found} unique, {new} new, {time.time() - t0:.0f}s")
         db.add_event(f"Scan {status}: {found} jobs from {successful}/{len(enabled)} sources, {new} new",
@@ -188,6 +217,11 @@ def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | No
                     raise PostingRefreshError(
                         "The current posting no longer meets your automatic application criteria. "
                         "Review the refreshed role before applying."
+                    )
+                if held_from_automation(job, settings.get("priority_companies") or []):
+                    raise PostingRefreshError(
+                        "This is a starred or priority-company role, so it waits for your own approval. "
+                        "Prepare it and use Approve & send."
                     )
             db.add_event(f"Applying: {job.company} / {job.title}", "info", job_id)
             from pathlib import Path
@@ -262,8 +296,11 @@ def auto_apply_batch() -> list[dict]:
     if not settings.get("auto_apply") or not settings.get("setup_complete"):
         return []
     rescore()
+    priority = settings.get("priority_companies") or []
+    # Priority companies and starred roles are never applied to unattended.
     candidates = [job for job in db.list_jobs(status="new", min_score=float(settings.get("min_score_to_apply", 60)), limit=100000)
-                  if job.ats in ("greenhouse", "ashby", "lever") and job.score_json.get("auto_apply_eligible", True)]
+                  if job.ats in ("greenhouse", "ashby", "lever") and job.score_json.get("auto_apply_eligible", True)
+                  and not held_from_automation(job, priority)]
     results = []
     attempted_companies: set[str] = set()
     max_applications = int(settings.get("max_apply_per_run", 3))

@@ -2,15 +2,79 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import datetime, timezone
 from typing import Any, Optional
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 
 from pydantic import BaseModel, Field
 
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+_DATE_ONLY = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def posted_epoch(value: Any) -> float | None:
+    """Seconds since the epoch (UTC) for a posting date, or None when unknown.
+
+    Sources publish ISO timestamps with offsets, ``Z`` suffixes, bare dates
+    (job sites that only say "posted today"), or epoch numbers. A bare date is
+    placed at noon UTC so it sorts sensibly without claiming a precise time.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return number / 1000 if number > 1e12 else number
+    text = str(value).strip()
+    try:
+        if _DATE_ONLY.match(text):
+            return datetime.fromisoformat(text + "T12:00:00+00:00").timestamp()
+        when = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when.timestamp()
+
+
+def posted_has_time(value: Any) -> bool:
+    """True when a posting date includes a time of day (not just a date)."""
+    return bool(value) and not _DATE_ONLY.match(str(value).strip())
+
+
+_BOARD_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+
+
+def board_of(url: str) -> tuple[str, str] | None:
+    """The public Greenhouse, Lever, or Ashby board a posting URL belongs to.
+
+    Used to discover more company boards from postings found elsewhere. Only
+    exact hosted job-board hosts count; the slug is lower-cased.
+    """
+    try:
+        parts = urlsplit(str(url or "").strip())
+    except ValueError:
+        return None
+    host = (parts.hostname or "").lower()
+    path = [part for part in parts.path.split("/") if part]
+    slug, ats = "", ""
+    if host in ("job-boards.greenhouse.io", "boards.greenhouse.io"):
+        ats = "greenhouse"
+        if "jobs" in path and path.index("jobs") > 0:
+            slug = path[path.index("jobs") - 1]
+        elif path[:1] == ["embed"]:
+            slug = (parse_qs(parts.query).get("for") or [""])[0]
+    elif host == "jobs.lever.co" and len(path) >= 2:
+        ats, slug = "lever", path[0]
+    elif host == "jobs.ashbyhq.com" and len(path) >= 2:
+        ats, slug = "ashby", path[0]
+    if not ats or not _BOARD_SLUG.match(slug) or slug.lower() in ("embed", "jobs"):
+        return None
+    return ats, slug.lower()
 
 
 def canonical_url(url: str) -> str:
@@ -63,6 +127,8 @@ class Job(BaseModel):
     score_json: dict[str, Any] = Field(default_factory=dict)
     status: str = "new"              # new | queued | applying | applied | skipped | failed | needs_human
     raw: dict[str, Any] = Field(default_factory=dict)
+    # None: follow the priority-company list; True/False: the candidate's own choice.
+    starred: Optional[bool] = None
 
     def model_post_init(self, __context: Any) -> None:
         if not self.id:

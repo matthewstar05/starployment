@@ -6,8 +6,14 @@ The list on the left mixes two kinds of records:
   each with a proposed answer. Review, edit, and "Approve & send" here.
 * attempts, from the browser engine: status, evidence, and a private note.
 
-Filters narrow the list to what needs you (To review), what is queued
-(Approved), what went out (Sent), and what stopped (Issues).
+Filters narrow the list to starred applications, what needs you (To review),
+what is queued (Approved), what went out (Sent), and what stopped (Issues).
+The Sort menu orders the list; right-click a row to star it, mark it as sent
+(applied outside Starployment), or remove it from the list.
+
+Starred applications (priority companies are starred automatically) are
+prepared like any other but never sent by "Send ready" or automatic runs:
+each one waits for its own Approve & send.
 """
 from __future__ import annotations
 
@@ -23,6 +29,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QScrollArea,
@@ -32,10 +39,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ...models import posted_epoch
+from ...priority import is_starred
 from ..delegates import RECORD_ROLE, SEARCH_ROLE, SUBTITLE_ROLE, ApplicationDelegate
 from ..editors import FlowLayout, _AutoText
-from ..format import local_time, plural, pretty_log_line, relative_time, retryable_job_ids, salary, status_label
+from ..format import (local_time, parse_time, plural, posted_label, pretty_log_line, relative_time,
+                      retryable_job_ids, salary, status_label)
 from ..widgets import (
+    ChoiceButton,
     EmptyState,
     GlassPanel,
     Monogram,
@@ -52,8 +63,36 @@ NOTE_AUTOSAVE_MS = 900
 SOURCE_TEXT = {"saved": "Saved answer", "profile": "From your profile", "resume": "From your resume",
                "luna": "Drafted by Luna · review", "autofill": "AI Autofill · check", "you": "Your answer", "none": "Needs your answer",
                "declined": "Declined", "file": "Attached automatically"}
-FILTERS = (("All", "all"), ("To review", "review"), ("Approved", "approved"), ("Sent", "sent"), ("Issues", "issues"))
+FILTERS = (("All", "all"), ("Starred", "starred"), ("To review", "review"), ("Approved", "approved"),
+           ("Sent", "sent"), ("Issues", "issues"))
+SORTS = (("Recent activity", "recent"), ("Newest posted", "posted"), ("Best match", "match"),
+         ("Company A–Z", "company"), ("Status", "status"))
+BUCKET_ORDER = {"review": 0, "approved": 1, "issues": 2, "sent": 3}
 OPEN_DRAFT = {"preparing", "ready", "needs_answers", "approved", "sending", "practice", "error"}
+
+
+def activity_time(record: dict) -> float:
+    """When a record last changed: a draft's update, or an attempt's finish (else start)."""
+    if record.get("kind") == "draft":
+        value = record.get("updated_at") or record.get("created_at")
+    else:
+        value = record.get("finished_at") or record.get("started_at")
+    when = parse_time(value)
+    return when.timestamp() if when else 0.0
+
+
+def sort_records(records: list[dict], key: str) -> list[dict]:
+    """Order Applications rows. Unknown posting dates sort last."""
+    if key == "posted":
+        return sorted(records, key=lambda r: (posted_epoch(r.get("posted_at")) is None,
+                                              -(posted_epoch(r.get("posted_at")) or 0), -activity_time(r)))
+    if key == "match":
+        return sorted(records, key=lambda r: (-float(r.get("score") or 0), -activity_time(r)))
+    if key == "company":
+        return sorted(records, key=lambda r: (str(r.get("company") or "").casefold(), -activity_time(r)))
+    if key == "status":
+        return sorted(records, key=lambda r: (BUCKET_ORDER.get(bucket(r), 9), -activity_time(r)))
+    return sorted(records, key=lambda r: -activity_time(r))
 
 
 def bucket(record: dict) -> str:
@@ -166,6 +205,7 @@ class DraftDetail(QWidget):
     remove_requested = Signal(int)
     open_requested = Signal(str)
     resume_requested = Signal(str)
+    star_requested = Signal(str, bool)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -210,6 +250,10 @@ class DraftDetail(QWidget):
                                    "click Submit.", "questions")
         self.practice_note.hide()
         column.addWidget(self.practice_note)
+        self.starred_note = label("Starred · This application waits for you. Refine it, then use Approve & send. "
+                                  "Send ready and automatic runs skip starred applications.", "questions")
+        self.starred_note.hide()
+        column.addWidget(self.starred_note)
 
         actions_holder = QWidget()
         actions_holder.setObjectName("formRow")
@@ -232,7 +276,9 @@ class DraftDetail(QWidget):
         self.remove = button("Remove", "quiet", icon="trash")
         self.remove.setToolTip("Remove this prepared application")
         self.remove.clicked.connect(self._remove)
-        for widget in (self.approve, self.luna, self.save, self.resume, self.posting, self.remove):
+        self.star = button("Star", "quiet", icon="star")
+        self.star.clicked.connect(self._toggle_star)
+        for widget in (self.approve, self.luna, self.save, self.star, self.resume, self.posting, self.remove):
             actions.addWidget(widget)
         column.addWidget(actions_holder)
 
@@ -282,6 +328,8 @@ class DraftDetail(QWidget):
         source = {"greenhouse_form": "Greenhouse", "lever_form": "Lever", "ashby_form": "Ashby"}.get(
             str(draft.get("question_source") or ""), "")
         meta = [f"Match {float(draft.get('score') or 0):.0f}"]
+        if draft.get("posted_at"):
+            meta.append(f"Posted {local_time(draft['posted_at'])}")
         if source:
             meta.append(f"{source} form read ahead")
         if draft.get("resume_note"):
@@ -320,7 +368,16 @@ class DraftDetail(QWidget):
         self.resume.setVisible(bool(draft.get("resume_path")))
         self.posting.setVisible(bool(draft.get("url")))
         self.remove.setEnabled(status not in ("sending",))
+        starred = bool(draft.get("_starred"))
+        self.star.setText("Starred" if starred else "Star")
+        self.star.setToolTip("Remove the star. Send ready can then include this application." if starred else
+                             "Star this application to refine it. Starred applications are only sent one by one.")
+        self.starred_note.setVisible(starred and status not in ("sending",))
         self._build_rows()
+
+    def _toggle_star(self) -> None:
+        if self.draft is not None and self.draft.get("job_id"):
+            self.star_requested.emit(str(self.draft["job_id"]), not bool(self.draft.get("_starred")))
 
     def _build_rows(self) -> None:
         while self.questions_layout.count():
@@ -404,6 +461,10 @@ class ApplicationsView(QWidget):
     prepare_requested = Signal(str)
     autofill_all_requested = Signal()
     reopen_requested = Signal(int)
+    star_requested = Signal(str, bool)
+    mark_sent_requested = Signal(str)
+    hide_requested = Signal(int)
+    discard_draft_requested = Signal(int)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -411,6 +472,7 @@ class ApplicationsView(QWidget):
         self.applications: list[dict] = []
         self.drafts: list[dict] = []
         self.records: list[dict] = []
+        self.priority: list[str] = []
         self.selected_application: dict | None = None
         self._questions: list[str] = []
         self._signature: object = None
@@ -429,7 +491,8 @@ class ApplicationsView(QWidget):
         self.autofill_all_button.setToolTip("Run AI Autofill on every prepared application that still has open questions")
         self.autofill_all_button.clicked.connect(self.autofill_all_requested)
         self.send_all_button = button("Send ready", icon="applications")
-        self.send_all_button.setToolTip("Approve and send every application that is ready")
+        self.send_all_button.setToolTip("Approve and send every application that is ready. "
+                                        "Starred applications are left for you to send one by one.")
         self.send_all_button.setEnabled(False)
         self.send_all_button.clicked.connect(self.send_approved_requested)
         self.header.add_action(self.reset_button)
@@ -440,7 +503,7 @@ class ApplicationsView(QWidget):
         toolbar = QHBoxLayout()
         toolbar.setSpacing(10)
         self.search = SearchField("Search company or role")
-        self.search.setMinimumWidth(220)
+        self.search.setMinimumWidth(180)
         self.search.setMaximumWidth(340)
         self.search.textChanged.connect(self._rebuild_list)
         toolbar.addWidget(self.search, 1)
@@ -461,6 +524,18 @@ class ApplicationsView(QWidget):
         left.setMinimumWidth(280)
         left_layout = QVBoxLayout(left)
         left_layout.setContentsMargins(6, 6, 6, 6)
+        left_layout.setSpacing(2)
+        list_head = QHBoxLayout()
+        list_head.setContentsMargins(10, 2, 2, 0)
+        self.list_count = label("", "caption", wrap=False)
+        list_head.addWidget(self.list_count)
+        list_head.addStretch(1)
+        self.sort = ChoiceButton("sort", "Sort")
+        for text, value in SORTS:
+            self.sort.add_option(text, value)
+        self.sort.changed.connect(self._rebuild_list)
+        list_head.addWidget(self.sort)
+        left_layout.addLayout(list_head)
         self.list_stack = QStackedWidget()
         self.list = QListWidget()
         self.list.setObjectName("applicationList")
@@ -471,6 +546,8 @@ class ApplicationsView(QWidget):
         self.list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list.currentRowChanged.connect(self._select_row)
+        self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list.customContextMenuRequested.connect(self._context_menu)
         self.empty = EmptyState("applications", "No applications yet",
                                 "Press Apply on Overview to prepare applications for your best matches.")
         self.empty.setObjectName("applicationEmpty")
@@ -493,6 +570,7 @@ class ApplicationsView(QWidget):
         self.draft_detail.remove_requested.connect(self._confirm_remove)
         self.draft_detail.open_requested.connect(self.open_requested)
         self.draft_detail.resume_requested.connect(self.resume_requested)
+        self.draft_detail.star_requested.connect(self.star_requested)
         self.detail_stack.addWidget(self.attempt_page)
         self.detail_stack.addWidget(self.draft_detail)
         split.addWidget(self.detail)
@@ -605,8 +683,14 @@ class ApplicationsView(QWidget):
         return page
 
     # ------------------------------------------------------------------ data
-    def set_context(self, *, practice: bool = False, luna_connected: bool = False) -> None:
+    def set_context(self, *, practice: bool = False, luna_connected: bool = False,
+                    priority: list[str] | None = None) -> None:
         self.draft_detail.set_context(practice=practice, luna_connected=luna_connected)
+        if priority is not None and list(priority) != self.priority:
+            self.priority = list(priority)
+            self._signature = None
+            if self.applications or self.drafts:
+                self.set_applications(self.applications, self.drafts)
 
     def set_applications(self, applications: list[dict], drafts: list[dict] | None = None) -> None:
         drafts = self.drafts if drafts is None else drafts
@@ -614,9 +698,11 @@ class ApplicationsView(QWidget):
             (a.get("id"), a.get("status"), a.get("finished_at"), a.get("candidate_note"),
              tuple(a.get("unanswered") or ()), len(a.get("log") or ()), a.get("submission_attempted"),
              a.get("job_id"), a.get("canonical_key"), a.get("title"), a.get("company"),
-             a.get("url"), a.get("location"), a.get("resume_path"))
+             a.get("url"), a.get("location"), a.get("resume_path"), a.get("hidden"), a.get("starred"),
+             a.get("posted_at"), a.get("score"))
             for a in applications
-        ), tuple((d.get("id"), d.get("status"), d.get("updated_at"), d.get("score")) for d in drafts))
+        ), tuple((d.get("id"), d.get("status"), d.get("updated_at"), d.get("score"), d.get("starred"),
+                  d.get("posted_at")) for d in drafts))
         if signature == self._signature:
             return
         self._signature = signature
@@ -631,10 +717,15 @@ class ApplicationsView(QWidget):
         self._continuable_ids = {record.get("id") for job_id, record in latest.items() if job_id in retryable}
         open_jobs = {d.get("job_id") for d in self.drafts if d.get("status") in OPEN_DRAFT}
         records = [dict(d, kind="draft") for d in self.drafts if d.get("status") in OPEN_DRAFT]
-        records += [dict(a, kind="attempt") for a in self.applications if a.get("job_id") not in open_jobs]
+        records += [dict(a, kind="attempt") for a in self.applications
+                    if a.get("job_id") not in open_jobs and not a.get("hidden")]
+        for record in records:
+            record["_starred"] = is_starred(record, self.priority)
         self.records = records
         approved = sum(1 for d in self.drafts if d.get("status") == "approved")
-        sendable = sum(1 for d in self.drafts if d.get("status") in ("approved", "ready"))
+        # Starred applications are sent one by one, never by Send ready.
+        sendable = sum(1 for d in records if d["kind"] == "draft" and (
+            d.get("status") == "approved" or (d.get("status") == "ready" and not d["_starred"])))
         self.send_all_button.setText(f"Send ready ({sendable})" if sendable else "Send ready")
         self.send_all_button.setEnabled(bool(sendable))
         self.autofill_all_button.setEnabled(any(
@@ -653,16 +744,20 @@ class ApplicationsView(QWidget):
         query = self.search.text().casefold().strip()
         out = []
         for record in self.records:
-            if wanted != "all" and bucket(record) != wanted:
+            if wanted == "starred" and not record.get("_starred"):
+                continue
+            if wanted not in ("all", "starred") and bucket(record) != wanted:
                 continue
             if query and query not in f"{record.get('company', '')} {record.get('title', '')}".casefold():
                 continue
             out.append(record)
-        return out
+        return sort_records(out, str(self.sort.value() or "recent"))
 
     def _rebuild_list(self, *_args) -> None:
         previous = self._selected_key()
         visible = self._visible_records()
+        by_posted = self.sort.value() == "posted"
+        self.list_count.setText(plural(len(visible), "application") if visible else "")
         self.list.blockSignals(True)
         self.list.clear()
         restore = 0 if visible else -1
@@ -680,12 +775,17 @@ class ApplicationsView(QWidget):
                 note = str(record.get("candidate_note") or "").strip()
                 hint = note.splitlines()[0] if note else (plural(len(questions), "question") if questions else "")
                 when = relative_time(record.get("finished_at") or record.get("started_at"))
+            if by_posted:
+                ago = posted_label(record.get("posted_at"))[1]
+                when = f"Posted {ago[0].lower()}{ago[1:]}" if ago else ""
             item = QListWidgetItem(f"{record.get('company') or 'Employer'}\n{record.get('title') or 'Role'}")
             item.setData(RECORD_ROLE, record)
             item.setData(SUBTITLE_ROLE, hint)
             item.setData(SEARCH_ROLE, when)
             item.setToolTip(f"{record.get('company') or 'Employer'} · {record.get('title') or 'Role'}\n"
-                            f"{status_label(record.get('status'))}" + (f"\n{hint}" if hint else ""))
+                            f"{status_label(record.get('status'))}" + (f"\n{hint}" if hint else "")
+                            + ("\nStarred" if record.get("_starred") else "")
+                            + (f"\nPosted {local_time(record['posted_at'])}" if record.get("posted_at") else ""))
             item.setSizeHint(QSize(0, ApplicationDelegate.HEIGHT))
             self.list.addItem(item)
             if previous is not None and self._key(record) == previous:
@@ -797,13 +897,20 @@ class ApplicationsView(QWidget):
         time_parts = [f"Started {local_time(application.get('started_at'))}"]
         if application.get("finished_at"):
             time_parts.append(f"Updated {local_time(application.get('finished_at'))}")
-        time_parts.append("Submission attempted" if application.get("submission_attempted") else "Submission not attempted")
+        if application.get("method") == "manual":
+            time_parts.append("Sent by you outside Starployment")
+        else:
+            time_parts.append("Submission attempted" if application.get("submission_attempted") else "Submission not attempted")
+        if application.get("posted_at"):
+            time_parts.append(f"Posted {local_time(application['posted_at'])}")
         if application.get("stage") and application.get("stage") != "applied":
             time_parts.append(f"Stage: {status_label(application['stage'])}")
         self.meta_label.setText("  ·  ".join(time_parts))
         rejected = bool(re.search(r"spam filter rejected|flagged as (?:possible )?spam", str(application.get("error") or ""), re.I))
         self.reopen_button.setVisible(rejected and bool(application.get("submission_attempted")))
-        if status == "applied":
+        if status == "applied" and application.get("method") == "manual":
+            text = "You marked this application as sent. It is in the Tracker."
+        elif status == "applied":
             text = "Employer confirmation recorded. Your application is complete."
         elif rejected and application.get("submission_attempted"):
             text = ("The employer's spam filter refused this submission, so it was not received. "
@@ -884,6 +991,57 @@ class ApplicationsView(QWidget):
 
     def _confirm_remove(self, draft_id: int) -> None:
         self.remove_draft_requested.emit(draft_id)
+        self.draft_detail.draft = None
+
+    def _context_menu(self, position) -> None:
+        item = self.list.itemAt(position)
+        record = item.data(RECORD_ROLE) if item else None
+        if not record:
+            return
+        self.list.setCurrentItem(item)
+        menu = QMenu(self)
+        job_id = str(record.get("job_id") or "")
+        status = str(record.get("status") or "")
+        busy = status in ("sending", "queued", "running")
+        starred = bool(record.get("_starred"))
+        if record.get("url"):
+            menu.addAction("Open posting", lambda: self.open_requested.emit(str(record["url"])))
+        if job_id:
+            menu.addAction("Remove star" if starred else "Star", lambda: self.star_requested.emit(job_id, not starred))
+        sent = record["kind"] == "attempt" and status == "applied"
+        if job_id and not sent and not busy:
+            menu.addAction("Mark as sent…", lambda: self._confirm_mark_sent(record))
+        if not busy:
+            menu.addSeparator()
+            if record["kind"] == "draft":
+                menu.addAction("Remove", lambda: self._confirm_remove(int(record["id"])))
+                menu.addAction("Remove and skip this job", lambda: self._discard(int(record["id"])))
+            else:
+                menu.addAction("Remove from list", lambda: self._confirm_hide(record))
+        menu.exec(self.list.viewport().mapToGlobal(position))
+
+    def _confirm_mark_sent(self, record: dict) -> None:
+        subject = f"{record.get('company') or 'Employer'} · {record.get('title') or 'Role'}"
+        answer = QMessageBox.question(
+            self.window(), "Mark as sent",
+            f"Mark {subject} as sent?\n\nUse this when you applied on the employer's site yourself. "
+            "It moves to the Tracker as Applied, and Starployment will not send it again.")
+        if answer == QMessageBox.StandardButton.Yes:
+            if record.get("kind") == "draft":
+                self.draft_detail.draft = None
+            self.mark_sent_requested.emit(str(record["job_id"]))
+
+    def _confirm_hide(self, record: dict) -> None:
+        sent = record.get("status") == "applied" or record.get("submission_attempted")
+        detail = ("It stays in the Tracker and in your history." if sent else
+                  "The job stays in Jobs, and its history is kept.")
+        answer = QMessageBox.question(self.window(), "Remove from Applications",
+                                      f"Remove {record.get('company') or 'this application'} from this list?\n\n{detail}")
+        if answer == QMessageBox.StandardButton.Yes:
+            self.hide_requested.emit(int(record["id"]))
+
+    def _discard(self, draft_id: int) -> None:
+        self.discard_draft_requested.emit(draft_id)
         self.draft_detail.draft = None
 
     def _confirm_reset(self) -> None:

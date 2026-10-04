@@ -6,7 +6,7 @@ These Starployment interface icons are from the official Lucide repository:
 Included icons: `layout-dashboard`, `briefcase-business`, `send`, `user-round`,
 `settings`, `refresh-cw`, `file-text`, and the other files in this folder,
 including `sheet`, `sparkles`, `mail`, `star`, `trash-2`, `folder-open`, `plug`,
-`rotate-ccw`, `download`, `eye`, `pin`, `graduation-cap`, `code`, and `award`. The SVG artwork is bundled under the
+`rotate-ccw`, `download`, `eye`, `pin`, `graduation-cap`, `code`, `award`, and `arrow-up-down`. The SVG artwork is bundled under the
 Lucide Icons and Contributors ISC License in `LICENSE`. The license file also
 contains the required MIT attribution for Feather-derived icons.
 

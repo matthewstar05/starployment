@@ -17,6 +17,7 @@ Rules for this module:
 """
 from __future__ import annotations
 
+import math
 import os
 import random
 import subprocess
@@ -65,6 +66,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QPlainTextEdit,
     QPushButton,
     QSizePolicy,
@@ -1220,6 +1222,76 @@ class CapsuleButton(QPushButton):
 def button(text: str, role: str = "primary", *, icon: str | None = None, trailing: bool = False) -> CapsuleButton:
     """A capsule button. ``role`` is ``primary``, ``secondary``, ``quiet``, or ``danger``."""
     return CapsuleButton(text, role, icon, trailing=trailing)
+
+
+class ChoiceButton(CapsuleButton):
+    """A secondary capsule that opens a menu of exclusive choices (sort order, date range).
+
+    Mirrors a small part of the ``QComboBox`` API. ``changed`` fires only when
+    the user picks a different choice, never from ``set_value``.
+    """
+
+    changed = Signal(object)
+
+    def __init__(self, icon: str, accessible_name: str, parent: QWidget | None = None):
+        super().__init__("", "secondary", icon, parent)
+        self.setAccessibleName(accessible_name)
+        self._options: list[tuple[str, object]] = []
+        self._value: object = None
+        self.clicked.connect(self._open_menu)
+
+    def add_option(self, text: str, value: object) -> None:
+        self._options.append((text, value))
+        if len(self._options) == 1:
+            self.set_value(value)
+
+    def value(self) -> object:
+        return self._value
+
+    def options(self) -> list[tuple[str, object]]:
+        return list(self._options)
+
+    def set_value(self, value: object) -> None:
+        for text, option in self._options:
+            if option == value:
+                self._value = value
+                self.setText(text)
+                self.setToolTip(f"{self.accessibleName()}: {text}")
+                self.updateGeometry()
+                return
+
+    def choose(self, value: object) -> None:
+        """Select ``value`` as if the user picked it."""
+        if value != self._value and any(option == value for _, option in self._options):
+            self.set_value(value)
+            self.changed.emit(value)
+
+    def _open_menu(self) -> None:
+        menu = QMenu(self)
+        for text, value in self._options:
+            action = menu.addAction(text)
+            action.setCheckable(True)
+            action.setChecked(value == self._value)
+            action.triggered.connect(lambda _=False, v=value: self.choose(v))
+        menu.exec(self.mapToGlobal(QPoint(0, self.height() + 4)))
+
+
+def paint_star_mark(painter: QPainter, center: QPointF, radius: float, color: QColor | str) -> None:
+    """A filled five-point star (the "starred application" mark)."""
+    path = QPainterPath()
+    for index in range(10):
+        angle = math.pi * index / 5 - math.pi / 2
+        r = radius if index % 2 == 0 else radius * 0.45
+        point = QPointF(center.x() + r * math.cos(angle), center.y() + r * math.sin(angle))
+        path.moveTo(point) if index == 0 else path.lineTo(point)
+    path.closeSubpath()
+    painter.save()
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QPen(qcolor(color), max(1.0, radius * 0.22), Qt.PenStyle.SolidLine,
+                        Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    painter.setBrush(qcolor(color))
+    painter.drawPath(path)
+    painter.restore()
 
 
 class _StepperButtons(QWidget):

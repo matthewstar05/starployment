@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .format import status_label
+from .format import posted_label, posted_within, status_label
 from .styles import color_for_status
 from .theme import current_colors
 from .widgets import (
@@ -28,6 +28,7 @@ from .widgets import (
     item_state_selected,
     paint_monogram,
     paint_pill,
+    paint_star_mark,
     qcolor,
     rounded_path,
     ui_font,
@@ -39,6 +40,8 @@ STATUS_ROLE = int(Qt.ItemDataRole.UserRole) + 11
 SCORE_ROLE = int(Qt.ItemDataRole.UserRole) + 12
 ACTION_ROLE = int(Qt.ItemDataRole.UserRole) + 13
 SEARCH_ROLE = int(Qt.ItemDataRole.UserRole) + 14
+STAR_ROLE = int(Qt.ItemDataRole.UserRole) + 15
+POSTED_AT_ROLE = int(Qt.ItemDataRole.UserRole) + 17
 RECORD_ROLE = int(Qt.ItemDataRole.UserRole)
 
 
@@ -111,7 +114,10 @@ def _cell_rect(option: QStyleOptionViewItem) -> QRectF:
 
 
 class RoleDelegate(QStyledItemDelegate):
-    """Title on the first line, ``Company · Location`` beneath in secondary text."""
+    """Title on the first line, ``Company · Location`` beneath in secondary text.
+
+    A starred role (``STAR_ROLE``) shows an amber star before its title.
+    """
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
         colors = current_colors()
@@ -124,8 +130,12 @@ class RoleDelegate(QStyledItemDelegate):
         painter.setFont(primary)
         painter.setPen(qcolor(colors["text"]))
         top = QRectF(rect.left(), rect.center().y() - 17, rect.width(), 18)
+        if index.data(STAR_ROLE):
+            paint_star_mark(painter, QPointF(top.left() + 6, top.center().y()), 6, colors["amber"])
+            top.setLeft(top.left() + 17)
+        painter.setPen(qcolor(colors["text"]))
         painter.drawText(top, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                         QFontMetrics(primary).elidedText(title, Qt.TextElideMode.ElideRight, int(rect.width())))
+                         QFontMetrics(primary).elidedText(title, Qt.TextElideMode.ElideRight, int(top.width())))
         painter.setFont(secondary)
         painter.setPen(qcolor(colors["text_muted"]))
         bottom = QRectF(rect.left(), rect.center().y() + 1, rect.width(), 17)
@@ -147,6 +157,41 @@ class TextDelegate(QStyledItemDelegate):
         rect = _cell_rect(option)
         painter.drawText(rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                          QFontMetrics(font).elidedText(text, Qt.TextElideMode.ElideRight, int(rect.width())))
+        painter.restore()
+
+
+class PostedDelegate(QStyledItemDelegate):
+    """When a role was posted: the date (and time when known), then how long ago.
+
+    The age is worked out at paint time from ``POSTED_AT_ROLE``, so it stays
+    current without rebuilding the table. Postings from the last 24 hours show
+    their age in green.
+    """
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
+        colors = current_colors()
+        rect = _cell_rect(option)
+        posted_at = index.data(POSTED_AT_ROLE)
+        when, ago = posted_label(posted_at)
+        painter.save()
+        primary, secondary = ui_font(13), ui_font(12)
+        width = int(rect.width())
+        if not ago:
+            painter.setFont(primary)
+            painter.setPen(qcolor(colors["text_muted"]))
+            painter.drawText(rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, when or "—")
+            painter.restore()
+            return
+        painter.setFont(primary)
+        painter.setPen(qcolor(colors["text"]))
+        painter.drawText(QRectF(rect.left(), rect.center().y() - 17, rect.width(), 18),
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                         QFontMetrics(primary).elidedText(when, Qt.TextElideMode.ElideRight, width))
+        painter.setFont(secondary)
+        painter.setPen(qcolor(colors["green"] if posted_within(posted_at, 24) else colors["text_muted"]))
+        painter.drawText(QRectF(rect.left(), rect.center().y() + 1, rect.width(), 17),
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                         QFontMetrics(secondary).elidedText(ago, Qt.TextElideMode.ElideRight, width))
         painter.restore()
 
 
@@ -263,9 +308,14 @@ class ApplicationDelegate(QStyledItemDelegate):
         primary = ui_font(13, QFont.Weight.DemiBold)
         painter.setFont(primary)
         painter.setPen(qcolor(colors["text"]))
-        width = pill.left() - text_left - 8
+        starred = bool(record.get("_starred"))
+        width = pill.left() - text_left - 8 - (16 if starred else 0)
+        shown = QFontMetrics(primary).elidedText(company, Qt.TextElideMode.ElideRight, int(width))
         painter.drawText(QRectF(text_left, rect.top() + 11, width, 20), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                         QFontMetrics(primary).elidedText(company, Qt.TextElideMode.ElideRight, int(width)))
+                         shown)
+        if starred:
+            star_x = text_left + QFontMetrics(primary).horizontalAdvance(shown) + 10
+            paint_star_mark(painter, QPointF(star_x, rect.top() + 21), 5.5, colors["amber"])
         secondary = ui_font(12)
         painter.setFont(secondary)
         painter.setPen(qcolor(colors["text_muted"]))

@@ -95,6 +95,13 @@ class DesktopController(QObject):
         window.apps.reset_requested.connect(self.reset_unfinished)
         window.apps.autofill_all_requested.connect(self.autofill_all)
         window.apps.reopen_requested.connect(self.reopen_rejected)
+        # Stars, marking as sent, and removing from the Applications list
+        window.jobs.star_requested.connect(self.set_star)
+        window.apps.star_requested.connect(self.set_star)
+        window.jobs.mark_sent_requested.connect(self.mark_sent)
+        window.apps.mark_sent_requested.connect(self.mark_sent)
+        window.apps.hide_requested.connect(self.hide_application)
+        window.apps.discard_draft_requested.connect(self.discard_draft)
         # Tracker
         window.tracker.stage_change_requested.connect(self.set_stage)
         window.tracker.note_save_requested.connect(self.save_application_note)
@@ -294,9 +301,11 @@ class DesktopController(QObject):
 
     def refresh(self, *, include_account: bool = False) -> None:
         try:
-            job_query = self.window.jobs.query
-            job_status = self.window.jobs.selected_status
-            total_jobs = db.count_jobs(status=job_status, q=job_query)
+            jobs_view = self.window.jobs
+            job_query = jobs_view.query
+            job_status = jobs_view.selected_status
+            posted_hours = jobs_view.posted_hours or None
+            total_jobs = db.count_jobs(status=job_status, q=job_query, posted_within_hours=posted_hours)
             page_size = self.window.jobs.page_size
             self.window.jobs.page = min(
                 self.window.jobs.page,
@@ -311,17 +320,22 @@ class DesktopController(QObject):
                     q=job_query,
                     limit=page_size,
                     offset=self.window.jobs.page * page_size,
+                    posted_within_hours=posted_hours,
+                    order=jobs_view.sort_key,
+                    descending=jobs_view.sort_descending,
                 ),
                 total_jobs=total_jobs,
                 top_jobs=db.list_jobs(status="new", limit=5),
                 applications=db.list_applications(limit=300),
-                stats=db.job_stats(),
+                stats={**db.job_stats(), **db.fresh_counts()},
                 events=db.list_events(limit=60),
                 drafts=db.list_drafts(),
                 tracker=db.list_tracker(),
                 resume_files=db.list_resume_files(),
                 mail=self._mail_state,
             )
+            if include_account:
+                self.window.settings.set_board_count(sum(db.board_counts().values()))
             self._update_scan_state(settings)
         except Exception as exc:  # noqa: BLE001
             self._status(f"Could not refresh local data: {exc}", tone="error")
@@ -512,8 +526,11 @@ class DesktopController(QObject):
                 text += f" · Luna drafted {drafted} answers"
             if failed:
                 text += f" · {failed} could not be prepared"
+            starred = int(report.get("starred", 0))
+            if starred:
+                text += f" · {starred} starred for you to send one by one"
             if not report.get("considered"):
-                text = "No new matches fit this plan. Lower the minimum match or run a scan."
+                text = "No new matches fit this plan. Widen the posting window, lower the minimum match, or run a scan."
             self._status(text, 9000, "success" if prepared else "warning")
             if prepared:
                 self.window.show_applications("review")
@@ -595,15 +612,20 @@ class DesktopController(QObject):
         if self._preparing:
             self._status("Applications are already being prepared")
             return
+        hours = int(plan.get("posted_within_hours", 0) or 0)
+        order = str(plan.get("order") or "match")
         try:
             db.set_settings({"apply_plan": {"count": int(plan["count"]), "min_score": float(plan["min_score"]),
-                                            "one_per_company": bool(plan["one_per_company"])}})
+                                            "one_per_company": bool(plan["one_per_company"]),
+                                            "posted_within_hours": hours, "order": order}})
         except Exception as exc:  # noqa: BLE001
             self._status(f"Could not save the plan: {exc}", tone="error")
             return
         self._preparing = True
         self._prep_stop.clear()
-        self._status(f"Preparing up to {plan['count']} applications…", 0, "busy")
+        window = {24: " posted in the last 24 hours", 72: " posted in the last 3 days",
+                  168: " posted in the last week"}.get(hours, "")
+        self._status(f"Preparing up to {plan['count']} applications{window}…", 0, "busy")
 
         def progress(text: str, done: int, total: int) -> None:
             self.signals.progress.emit(text, done, total)
@@ -612,7 +634,8 @@ class DesktopController(QObject):
 
         def run() -> dict:
             return prepare.prepare_batch(int(plan["count"]), float(plan["min_score"]), bool(plan["one_per_company"]),
-                                         use_luna=bool(plan.get("use_luna", True)), progress=progress, stop=stop)
+                                         use_luna=bool(plan.get("use_luna", True)), progress=progress, stop=stop,
+                                         posted_within_hours=hours, order=order)
 
         self._submit_assist("plan", run, None)
 
@@ -680,17 +703,24 @@ class DesktopController(QObject):
         self._queue_send([draft_id])
 
     def send_approved(self) -> None:
-        candidates = [d for d in db.list_drafts(("approved", "ready")) if d["id"] not in self._sending]
+        settings = db.get_settings()
+        candidates, held = prepare.bulk_send_candidates(
+            [d for d in db.list_drafts(("approved", "ready")) if d["id"] not in self._sending],
+            settings.get("priority_companies") or [])
         if not candidates:
-            self._status("Nothing is ready to send. Use Autofill all or answer the open questions first.")
+            self._status("Nothing is ready to send. Use Autofill all or answer the open questions first."
+                         + (f" {len(held)} starred application{'s' if len(held) != 1 else ''} wait for you to "
+                            "approve each one." if held else ""))
             return
-        practice = db.get_settings().get("dry_run")
+        practice = settings.get("dry_run")
         autofilled = sum(1 for d in candidates if any(q.get("source") == "autofill" for q in d["questions"]))
         answer = QMessageBox.question(
             self.window, "Send ready applications",
             f"Approve and send {len(candidates)} application{'s' if len(candidates) != 1 else ''} now?"
             + (f"\n\n{autofilled} include AI Autofill answers, some of them labeled assumptions. "
                "Review any you are unsure about first." if autofilled else "")
+            + (f"\n\n{len(held)} starred application{'s are' if len(held) != 1 else ' is'} left for you to "
+               "refine and send one by one." if held else "")
             + ("\n\nPractice mode is on, so forms are filled but not submitted." if practice else
                "\n\nEach one is submitted to the employer and confirmed one at a time."))
         if answer != QMessageBox.StandardButton.Yes:
@@ -756,6 +786,53 @@ class DesktopController(QObject):
             self._status("Prepared application removed", tone="success")
         except ValueError as exc:
             self._status(str(exc), tone="warning")
+        self.refresh()
+
+    def discard_draft(self, draft_id: int) -> None:
+        """Remove a prepared application and skip its job, so later plans do not prepare it again."""
+        draft = db.get_draft(draft_id)
+        try:
+            db.delete_draft(draft_id)
+            if draft is not None:
+                db.set_job_status(str(draft["job_id"]), "skipped")
+            self._status("Prepared application removed and its job skipped", tone="success")
+        except ValueError as exc:
+            self._status(str(exc), tone="warning")
+        self.refresh()
+
+    def set_star(self, job_id: str, starred: bool) -> None:
+        try:
+            db.set_job_star(job_id, bool(starred))
+        except ValueError as exc:
+            self._status(str(exc), tone="warning")
+            return
+        job = db.get_job(job_id)
+        name = f"{job.company} · {job.title}" if job else "Application"
+        self._status(f"Starred {name}. It waits for you to approve it." if starred else f"Removed the star from {name}",
+                     tone="success")
+        self.refresh()
+
+    def mark_sent(self, job_id: str) -> None:
+        """Record an application the candidate sent themselves; it moves to the Tracker."""
+        try:
+            db.mark_application_sent(job_id)
+        except ValueError as exc:
+            self._status(str(exc), tone="warning")
+            self.refresh()
+            return
+        job = db.get_job(job_id)
+        db.add_event(f"Marked as sent by you: {job.company} / {job.title}" if job else "Marked as sent by you",
+                     "success", job_id)
+        self._status(f"Marked {job.company if job else 'it'} as sent · it is in the Tracker now", tone="success")
+        self.refresh()
+
+    def hide_application(self, app_id: int) -> None:
+        try:
+            db.hide_application(app_id)
+        except ValueError as exc:
+            self._status(str(exc), tone="warning")
+            return
+        self._status("Removed from Applications. Its history is kept.", tone="success")
         self.refresh()
 
     def reset_unfinished(self, include_attempts: bool) -> None:

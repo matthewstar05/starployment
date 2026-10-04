@@ -21,17 +21,37 @@ _missing_boards_lock = threading.Lock()
 
 
 class SourceJobs(list):
-    """List-compatible result with observable partial source failures."""
+    """List-compatible result with observable partial source failures.
+
+    ``board_results`` maps each discovered board that was read to its job
+    count, or None when it could not be read, so the scheduler can rotate and
+    rest boards.
+    """
 
     def __init__(self, jobs=(), warnings=(), notices=()):
         super().__init__(jobs)
         self.warnings = list(warnings)
         self.notices = list(notices)
+        self.board_results: dict[str, int | None] = {}
 
 
-def fetch_boards(slugs: list[str], fetch_one, settings: dict, *, source: str | None = None) -> SourceJobs:
+def discovered_boards(settings: dict, source: str) -> list[str]:
+    """Boards found in other listings that this scan should also read (see scheduler.scan_once)."""
+    return list((settings.get("_discovered_boards") or {}).get(source) or [])
+
+
+def fetch_boards(slugs: list[str], fetch_one, settings: dict, *, source: str | None = None,
+                 discovered: list[str] | None = None) -> SourceJobs:
+    """Read every configured board, then any discovered ones.
+
+    Configured boards report failures as warnings. Discovered boards are best
+    effort: their failures are counted in one notice and recorded in
+    ``board_results`` instead of making the scan look broken.
+    """
     defaults = set(DEFAULT_SETTINGS["companies"].get(source, [])) if source else set()
     unique_slugs = list(dict.fromkeys(slugs))
+    configured = {slug.casefold() for slug in unique_slugs}
+    extra = [slug for slug in dict.fromkeys(discovered or []) if slug.casefold() not in configured]
 
     def attempt(slug):
         key = (source, slug)
@@ -50,6 +70,12 @@ def fetch_boards(slugs: list[str], fetch_one, settings: dict, *, source: str | N
         except Exception as exc:
             return [], f"{slug}: {type(exc).__name__}: {str(exc)[:180]}", None, False, False
 
+    def attempt_discovered(slug):
+        try:
+            return fetch_one(slug, settings)
+        except Exception:  # noqa: BLE001 - recorded in board_results
+            return None
+
     result = SourceJobs()
     missing: list[str] = []
     cached = 0
@@ -63,6 +89,11 @@ def fetch_boards(slugs: list[str], fetch_one, settings: dict, *, source: str | N
                 result.warnings.append(warning)
             if absent:
                 missing.append(absent)
+        for slug, jobs in zip(extra, executor.map(attempt_discovered, extra)):
+            result.board_results[slug] = None if jobs is None else len(jobs)
+            if jobs is not None:
+                result.extend(jobs)
+                successful += 1
     if missing:
         names = ', '.join(missing[:5])
         if len(missing) > 5:
@@ -70,7 +101,10 @@ def fetch_boards(slugs: list[str], fetch_one, settings: dict, *, source: str | N
         result.notices.append(f"Bundled boards unavailable (404), retrying within 24 hours: {names}")
     if cached:
         result.notices.append(f"{cached} bundled board(s) in a 24-hour retry window")
-    if unique_slugs and not successful:
+    if extra:
+        read = sum(found is not None for found in result.board_results.values())
+        result.notices.append(f"Read {read} of {len(extra)} discovered board(s)")
+    if (unique_slugs or extra) and not successful:
         detail = "; ".join((result.warnings + result.notices)[:3])
         if not detail:
             detail = "Bundled boards are in their 24-hour retry window"

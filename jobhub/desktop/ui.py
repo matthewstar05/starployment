@@ -316,7 +316,13 @@ class JobHubWindow(QMainWindow):
             self.stack.setCurrentIndex(index)
 
     def show_jobs(self, status: str = "all") -> None:
-        self.jobs.set_filter(status or "all")
+        """Open Jobs on a status filter; ``fresh`` shows new roles posted in the last 24 hours."""
+        if status == "fresh":
+            self.jobs.set_filter("new")
+            self.jobs.set_posted_window(24)
+        else:
+            self.jobs.set_filter(status or "all")
+            self.jobs.set_posted_window(0)
         self.nav.setCurrentRow(JOBS)
 
     def show_application(self, app_id: object = None) -> None:
@@ -415,7 +421,10 @@ class JobHubWindow(QMainWindow):
             self.dashboard.set_setup_complete(self._setup_complete)
             self.dashboard.set_settings(settings)
             backend = (settings.get("agent") or {}).get("backend", "none")
-            self.apps.set_context(practice=bool(settings.get("dry_run")), luna_connected=backend not in ("", "none"))
+            priority = list(settings.get("priority_companies") or [])
+            self.apps.set_context(practice=bool(settings.get("dry_run")), luna_connected=backend not in ("", "none"),
+                                  priority=priority)
+            self.jobs.set_priority(priority)
             tracking = settings.get("email_tracking") or {}
             self.tracker.set_email_state(bool(tracking.get("enabled")), (mail or {}).get("last_checked"),
                                          int((mail or {}).get("unmatched", 0)))

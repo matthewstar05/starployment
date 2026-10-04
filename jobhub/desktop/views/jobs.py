@@ -1,9 +1,16 @@
-"""Jobs page: searchable, filterable, paginated table of ranked postings."""
+"""Jobs page: searchable, filterable, sortable, paginated table of ranked postings.
+
+Sorting and the posting-date window run in SQL (``db.list_jobs``) so they
+apply across every page, not only the rows on screen. Click a column header
+or use the Sort menu; the Posted menu keeps roles published in a window such
+as the last 24 hours.
+"""
 from __future__ import annotations
 
+import time
 from typing import Any
 
-from PySide6.QtCore import QTimer, Qt, Signal
+from PySide6.QtCore import QEvent, QTimer, Qt, Signal
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QPainter
 from PySide6.QtWidgets import (
     QDialog,
@@ -16,23 +23,29 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ...models import posted_epoch
+from ...priority import is_starred
 from ..delegates import (
     ACTION_ROLE,
+    POSTED_AT_ROLE,
     SCORE_ROLE,
     SEARCH_ROLE,
+    STAR_ROLE,
     STATUS_ROLE,
     SUBTITLE_ROLE,
     ActionDelegate,
     GlassTable,
+    PostedDelegate,
     RoleDelegate,
     ScoreDelegate,
     StatusDelegate,
     TextDelegate,
     configure_columns,
 )
-from ..format import salary, status_label
+from ..format import local_time, posted_label, salary, status_label
 from ..native_glass import prepare_window
 from ..widgets import (
+    ChoiceButton,
     EmptyState,
     GlassPanel,
     PageHeader,
@@ -42,6 +55,16 @@ from ..widgets import (
     label,
     paint_backdrop,
 )
+
+# (menu text, value): a posting window in hours; 0 is any time.
+POSTED_WINDOWS = (("Any time", 0), ("Last 24 hours", 24), ("Last 3 days", 72), ("Last week", 168),
+                  ("Last 30 days", 720))
+POSTED_PHRASES = {24: "in the last 24 hours", 72: "in the last 3 days", 168: "in the last week",
+                  720: "in the last 30 days"}
+# (menu text, sort key, descending)
+JOB_SORTS = (("Best match", "match", True), ("Newest posted", "posted", True), ("Recently found", "found", True),
+             ("Highest salary", "salary", True), ("Company A–Z", "company", False), ("Title A–Z", "title", False),
+             ("Status", "status", False))
 
 
 class AddPostingSheet(QDialog):
@@ -112,10 +135,14 @@ class JobsView(QWidget):
     status_requested = Signal(str, str)
     open_requested = Signal(str)
     import_requested = Signal(str)
+    star_requested = Signal(str, bool)
+    mark_sent_requested = Signal(str)
     query_changed = Signal()
     page_size = 100
 
-    ROLE, SALARY, MATCH, STATUS, ACTION = range(5)
+    ROLE, POSTED, SALARY, MATCH, STATUS, ACTION = range(6)
+    # Header click -> sort key; the second click on the same column reverses it.
+    COLUMN_SORTS = {0: "title", 1: "posted", 2: "salary", 3: "match", 4: "status"}
     FILTERS = (("All", "all"), ("New", "new"), ("Prepared", "prepared"), ("Applied", "applied"),
                ("Review", "needs_human"), ("Skipped", "skipped"))
 
@@ -125,6 +152,9 @@ class JobsView(QWidget):
         self.page = 0
         self.total_jobs = 0
         self.jobs: list[Any] = []
+        self.priority: list[str] = []
+        self.sort_key = "match"
+        self.sort_descending = True
         self._signature: object = None
         self._query_timer = QTimer(self)
         self._query_timer.setSingleShot(True)
@@ -135,9 +165,19 @@ class JobsView(QWidget):
         column.setContentsMargins(30, 26, 30, 22)
         column.setSpacing(14)
         self.header = PageHeader("Jobs", "Roles ranked against your profile.")
+        self.posted = ChoiceButton("clock", "Posted")
+        for text, hours in POSTED_WINDOWS:
+            self.posted.add_option(text, hours)
+        self.posted.changed.connect(self._reset_query)
+        self.sort = ChoiceButton("sort", "Sort")
+        for text, key, _descending in JOB_SORTS:
+            self.sort.add_option(text, key)
+        self.sort.changed.connect(self._sort_chosen)
         add = button("Add posting", "secondary", icon="plus")
         add.setToolTip("Import a Greenhouse, Lever, or Ashby link (⌘N)")
         add.clicked.connect(self._import_dialog)
+        self.header.add_action(self.posted)
+        self.header.add_action(self.sort)
         self.header.add_action(add)
         column.addWidget(self.header)
 
@@ -158,15 +198,23 @@ class JobsView(QWidget):
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(8, 6, 8, 8)
         card_layout.setSpacing(4)
-        self.table = GlassTable(0, 5)
-        self.table.setHorizontalHeaderLabels(["ROLE", "SALARY", "MATCH", "STATUS", ""])
+        self.table = GlassTable(0, 6)
+        self.table.setHorizontalHeaderLabels(["ROLE", "POSTED", "SALARY", "MATCH", "STATUS", ""])
         self.table.setAccessibleName("Jobs")
         self.table.setItemDelegateForColumn(self.ROLE, RoleDelegate(self.table))
+        self.table.setItemDelegateForColumn(self.POSTED, PostedDelegate(self.table))
         self.table.setItemDelegateForColumn(self.SALARY, TextDelegate(self.table))
         self.table.setItemDelegateForColumn(self.MATCH, ScoreDelegate(self.table))
         self.table.setItemDelegateForColumn(self.STATUS, StatusDelegate(self.table))
         self.table.setItemDelegateForColumn(self.ACTION, ActionDelegate(self.table))
-        configure_columns(self.table, self.ROLE, {self.SALARY: 116, self.MATCH: 70, self.STATUS: 122, self.ACTION: 100})
+        configure_columns(self.table, self.ROLE, {self.POSTED: 136, self.SALARY: 110, self.MATCH: 68,
+                                                   self.STATUS: 118, self.ACTION: 96})
+        header = self.table.horizontalHeader()
+        header.setSectionsClickable(True)
+        header.setSortIndicatorShown(True)
+        header.setSortIndicator(self.MATCH, Qt.SortOrder.DescendingOrder)
+        header.sectionClicked.connect(self._header_clicked)
+        self.table.installEventFilter(self)
         self.table.verticalHeader().setDefaultSectionSize(56)
         self.table.cellClicked.connect(self._cell_clicked)
         self.table.cellDoubleClicked.connect(lambda row, _column: self._open_row(row))
@@ -208,6 +256,8 @@ class JobsView(QWidget):
         self.search.textChanged.connect(self._reset_query)
         self.filter.currentIndexChanged.connect(self._filter_rows)
         self.filter.currentIndexChanged.connect(self._reset_query)
+        self.posted.changed.connect(self._filter_rows)
+        self._retryable: set[str] = set()
 
     # ----------------------------------------------------------------- query
     @property
@@ -218,10 +268,54 @@ class JobsView(QWidget):
     def selected_status(self) -> str:
         return str(self.filter.currentData() or "all")
 
+    @property
+    def posted_hours(self) -> int:
+        return int(self.posted.value() or 0)
+
     def set_filter(self, status: str) -> None:
         index = self.filter.findData(status)
         if index >= 0:
             self.filter.setCurrentIndex(index)
+
+    def set_posted_window(self, hours: int) -> None:
+        if hours != self.posted_hours:
+            self.posted.set_value(hours)
+            self._filter_rows()
+            self._reset_query()
+
+    def set_priority(self, companies: list[str]) -> None:
+        """The priority-company list decides which roles are starred automatically."""
+        companies = list(companies or [])
+        if companies != self.priority:
+            self.priority = companies
+            self._signature = None
+            if self.jobs:
+                self.set_jobs(self.jobs, self._retryable, self.total_jobs)
+
+    def set_sort(self, key: str, descending: bool | None = None) -> None:
+        defaults = {k: d for _text, k, d in JOB_SORTS}
+        self.sort_key = key
+        self.sort_descending = defaults.get(key, True) if descending is None else descending
+        self.sort.set_value(key)
+        column = next((c for c, k in self.COLUMN_SORTS.items() if k == key), -1)
+        header = self.table.horizontalHeader()
+        if column >= 0:
+            header.setSortIndicator(column, Qt.SortOrder.DescendingOrder if self.sort_descending
+                                    else Qt.SortOrder.AscendingOrder)
+        else:
+            header.setSortIndicator(-1, Qt.SortOrder.DescendingOrder)
+        self._reset_query()
+
+    def _sort_chosen(self, key: object) -> None:
+        self.set_sort(str(key))
+
+    def _header_clicked(self, column: int) -> None:
+        key = self.COLUMN_SORTS.get(column)
+        if key is None:
+            # Keep the indicator on the active column when an unsortable header is clicked.
+            self.set_sort(self.sort_key, self.sort_descending)
+            return
+        self.set_sort(key, not self.sort_descending if key == self.sort_key else None)
 
     def _reset_query(self, *_args) -> None:
         self.page = 0
@@ -239,6 +333,7 @@ class JobsView(QWidget):
     def set_jobs(self, jobs: list[Any], retryable_ids: set[str] | None = None,
                  total_count: int | None = None) -> None:
         retryable_ids = retryable_ids or set()
+        self._retryable = retryable_ids
         self.jobs = list(jobs)
         self.total_jobs = len(jobs) if total_count is None else total_count
         first = self.page * self.page_size + 1 if self.total_jobs else 0
@@ -246,13 +341,17 @@ class JobsView(QWidget):
         self.page_label.setText(f"{first}–{last} of {self.total_jobs:,} jobs")
         self.previous_page.setEnabled(self.page > 0)
         self.next_page.setEnabled(last < self.total_jobs)
-        self.header.set_subtitle(
-            f"{self.total_jobs:,} roles ranked against your profile." if self.total_jobs
-            else "Roles ranked against your profile."
-        )
+        phrase = POSTED_PHRASES.get(self.posted_hours)
+        if phrase:
+            self.header.set_subtitle(f"{self.total_jobs:,} role{'s' if self.total_jobs != 1 else ''} posted {phrase}.")
+        else:
+            self.header.set_subtitle(
+                f"{self.total_jobs:,} roles ranked against your profile." if self.total_jobs
+                else "Roles ranked against your profile."
+            )
         signature = (self.page, tuple(
-            (j.id, j.status, round(j.score, 1), j.title, j.company, j.location,
-             j.salary_min, j.salary_max, j.id in retryable_ids) for j in jobs
+            (j.id, j.status, round(j.score, 1), j.title, j.company, j.location, j.posted_at,
+             j.salary_min, j.salary_max, j.id in retryable_ids, is_starred(j, self.priority)) for j in jobs
         ))
         if signature != self._signature:
             self._signature = signature
@@ -268,11 +367,17 @@ class JobsView(QWidget):
         restore_row = -1
         for row, job in enumerate(jobs):
             location = job.location or ("Remote" if job.remote else "Location not listed")
+            starred = is_starred(job, self.priority)
             role = QTableWidgetItem(job.title)
             role.setData(SUBTITLE_ROLE, f"{job.company} · {location}")
             role.setData(Qt.ItemDataRole.UserRole, job.id)
             role.setData(SEARCH_ROLE, f"{job.title} {job.company} {location}".casefold())
-            role.setToolTip(f"{job.title}\n{job.company} · {location}")
+            role.setData(STAR_ROLE, starred)
+            role.setToolTip(f"{job.title}\n{job.company} · {location}" + ("\nStarred" if starred else ""))
+            posted = QTableWidgetItem(" · ".join(x for x in posted_label(job.posted_at) if x))
+            posted.setData(POSTED_AT_ROLE, job.posted_at)
+            posted.setToolTip(("Posted " + local_time(job.posted_at) if job.posted_at else "Posting date not published")
+                              + (f"\nFound by Starployment {local_time(job.discovered_at)}" if job.discovered_at else ""))
             pay = QTableWidgetItem(salary(job.salary_min, job.salary_max))
             match = QTableWidgetItem(f"{job.score:.0f}")
             match.setData(SCORE_ROLE, float(job.score))
@@ -293,7 +398,7 @@ class JobsView(QWidget):
             action.setToolTip({"apply": "Prepare this application for your review",
                                "review": "Review the prepared application",
                                "retry": "Try this application again", "view": "Open the posting"}[kind])
-            for column, item in enumerate((role, pay, match, status, action)):
+            for column, item in enumerate((role, posted, pay, match, status, action)):
                 self.table.setItem(row, column, item)
             if job.id == selected:
                 restore_row = row
@@ -308,6 +413,9 @@ class JobsView(QWidget):
         if not visible:
             if self.query:
                 self.empty.set_text("No results", f"Nothing matches “{self.query}”. Try a shorter search.")
+            elif self.posted_hours:
+                self.empty.set_text("Nothing posted yet", f"No roles here were posted {POSTED_PHRASES.get(self.posted_hours, 'recently')}. "
+                                    "Refresh jobs, or widen the Posted range.")
             elif self.selected_status != "all":
                 self.empty.set_text("Nothing here yet", f"No jobs are marked {self.filter.currentText().lower()}.")
             else:
@@ -380,15 +488,20 @@ class JobsView(QWidget):
         menu.addAction("Open posting", lambda: self.open_requested.emit(job.url))
         action_item = self.table.item(row, self.ACTION)
         kind = action_item.data(Qt.ItemDataRole.UserRole) if action_item is not None else None
+        starred = is_starred(job, self.priority)
         if kind == "apply":
             menu.addAction("Prepare application", lambda: self.prepare_requested.emit(job.id))
-            menu.addAction("Apply now, without review", lambda: self.apply_requested.emit(job.id))
+            if not starred:   # starred roles always get a prepared, reviewed application
+                menu.addAction("Apply now, without review", lambda: self.apply_requested.emit(job.id))
         elif kind == "review":
             menu.addAction("Review prepared application", lambda: self.review_requested.emit(job.id))
         elif kind == "retry":
             menu.addAction("Retry", lambda: self.apply_requested.emit(job.id))
         menu.addAction("Copy link", lambda: QGuiApplication.clipboard().setText(job.url))
         menu.addSeparator()
+        menu.addAction("Remove star" if starred else "Star", lambda: self.star_requested.emit(job.id, not starred))
+        if job.status not in ("applied", "queued", "applying"):
+            menu.addAction("Mark as sent…", lambda: self.mark_sent_requested.emit(job.id))
         if job.status == "skipped":
             menu.addAction("Restore to New", lambda: self.status_requested.emit(job.id, "new"))
         elif job.status in ("new", "failed"):
@@ -407,12 +520,22 @@ class JobsView(QWidget):
     def _filter_rows(self, *_args) -> None:
         query = self.search.text().casefold().strip()
         selected = self.filter.currentData()
+        cutoff = time.time() - self.posted_hours * 3600 if self.posted_hours else None
         for row in range(self.table.rowCount()):
             role = self.table.item(row, self.ROLE)
             status = self.table.item(row, self.STATUS)
+            posted = self.table.item(row, self.POSTED)
             text = str(role.data(SEARCH_ROLE) or "") if role else ""
             value = status.data(STATUS_ROLE) if status else None
+            stamp = posted_epoch(posted.data(POSTED_AT_ROLE)) if posted else None
+            outside = cutoff is not None and (stamp is None or stamp < cutoff)
             self.table.setRowHidden(
-                row, bool(query and query not in text) or (selected != "all" and value != selected)
+                row, bool(query and query not in text) or (selected != "all" and value != selected) or outside
             )
         self._update_empty_state()
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched is self.table and event.type() == QEvent.Type.Resize:
+            # Salary yields its column to role titles in a narrow window.
+            self.table.setColumnHidden(self.SALARY, event.size().width() < 760)
+        return super().eventFilter(watched, event)

@@ -38,14 +38,24 @@ The wizard has five steps: **Resume → About you → What to look for → Answe
 
 ## Applying: prepare, review, send
 
-1. **Overview → Apply.** Choose how many to prepare (top 100 matches by default), a minimum match score, and one
-   per company. Starployment reads each employer's published form (Greenhouse, Lever, and Ashby), fills every
-   answer your saved facts support, asks Luna to draft the custom questions, and builds the resume for the role.
-   Nothing is sent.
-2. **Applications** lists the prepared applications with filters (To review, Approved, Sent, Issues) and search.
-   Each shows its questions (what still needs you first), where every answer came from (profile, saved answer, Luna
-   draft, AI Autofill, or needs you), the resume, and the posting. "Select all that apply" questions are checklists.
-   Edit anything, then **Approve & send**, or approve several and use **Send approved**.
+1. **Overview → Apply.** Choose how many to prepare (top 100 matches by default), how recently the roles were
+   **posted** (any time, 24 hours, 3 days, or a week), the **order** (best match or newest first), a minimum match
+   score, and one per company. For example: the top 50 roles posted in the last 24 hours, so you apply early.
+   Starployment reads each employer's published form (Greenhouse, Lever, and Ashby), fills every answer your saved
+   facts support, asks Luna to draft the custom questions, and builds the resume for the role. Nothing is sent.
+2. **Applications** lists the prepared applications with filters (Starred, To review, Approved, Sent, Issues),
+   search, and a **Sort** menu (recent activity, newest posted, best match, company, status). Each shows its
+   questions (what still needs you first), where every answer came from (profile, saved answer, Luna draft, AI
+   Autofill, or needs you), the resume, and the posting. "Select all that apply" questions are checklists. Edit
+   anything, then **Approve & send**, or use **Send ready** for every application that is ready.
+   - **Right-click** an application to star it, **Mark as sent…** (you applied on the employer's site yourself; it
+     moves to the Tracker as Applied and is never sent again), or remove it. Removing a prepared application returns
+     its job to Jobs (or skips it); removing an attempt hides it from the list while its history and Tracker row stay.
+   - **Stars and priority companies.** Star any application you want to refine. Applications to your priority
+     companies (FAANG+ by default: Google, Meta, Apple, Amazon, Netflix, Microsoft, Nvidia, OpenAI, Anthropic, top
+     trading firms, and more; edit the list in **Settings → Priority companies**) are starred automatically. Starred
+     applications are prepared like any other, but **Send ready** and automatic runs skip them: each one waits for
+     its own Approve & send.
    - **Answer once, fill everywhere:** a general answer you give in one application (offers, prior interviews,
      languages, office attendance) fills the same question in your other prepared applications and joins your
      question bank. Legal acknowledgements stay per application. Saving Profile → Answers refills every draft.
@@ -60,7 +70,22 @@ The wizard has five steps: **Resume → About you → What to look for → Answe
    that was submitted is always kept.
 
 Practice mode (Settings → Automation) fills forms without clicking Submit, even when you send. Automatic
-applications without review remain available and off by default.
+applications without review remain available and off by default; they never apply to a priority company or a
+starred role.
+
+## Finding jobs
+
+**Jobs** ranks every role against your profile. The **Posted** column shows when each role was published (with the
+time when the source gives one, and how long ago; roles from the last 24 hours show their age in green). Use the
+**Posted** menu to keep roles from the last 24 hours, 3 days, week, or 30 days, and sort by clicking a column
+header or with the **Sort** menu (best match, newest posted, recently found, salary, company, title, status).
+Sorting and the date window apply to every page. Overview's **Posted in 24 hours** tile opens the newest roles.
+
+Scans read the bundled Greenhouse, Lever, and Ashby boards (about 200 companies), Simplify's new-grad list,
+RemoteOK, and JobSpy searches on Indeed, LinkedIn, and Google Jobs. With **Discover more boards** on (Settings →
+Company job boards), every posting found on a Greenhouse, Lever, or Ashby board also adds that company's whole board
+to later scans, read about 120 boards per provider at a time. Greenhouse boards are read from their compact listing,
+and full descriptions are fetched only for new matches.
 
 ## Resume builder and resume files
 
@@ -130,7 +155,7 @@ dark versions of each ([overview](docs/screenshots/starployment-overview-dark.pn
 
 | Area | Current behavior |
 | --- | --- |
-| Discovery | Public Greenhouse, Lever, and Ashby boards, Simplify's new-grad list, RemoteOK, and JobSpy searches. |
+| Discovery | Public Greenhouse, Lever, and Ashby boards (bundled, your own, and boards discovered from other listings), Simplify's new-grad list, RemoteOK, and JobSpy searches. |
 | Ranking | Explainable title, skill, experience, location, pay, freshness, and form-support factors. A score ranks; it is not a probability. |
 | Forms | Greenhouse, Lever, and Ashby. Workday, LinkedIn Easy Apply, logins, and CAPTCHAs are not supported submission paths. |
 | Answers | Saved facts, resume facts, and answers you approved. Unknown required answers stop the attempt. |

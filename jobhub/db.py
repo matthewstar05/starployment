@@ -5,11 +5,13 @@ import json
 import os
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
 
 from . import config
-from .models import Job, Profile, job_fingerprint, now_iso
+from .models import Job, Profile, board_of, job_fingerprint, now_iso, posted_epoch
 
 _lock = threading.RLock()
 
@@ -50,6 +52,10 @@ CREATE TABLE IF NOT EXISTS mail_events (
 CREATE TABLE IF NOT EXISTS resume_files (
   id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT UNIQUE, label TEXT, category TEXT DEFAULT 'general',
   is_default INTEGER DEFAULT 0, added_at TEXT
+);
+CREATE TABLE IF NOT EXISTS boards (
+  ats TEXT, slug TEXT, discovered_at TEXT, last_scanned_at TEXT, last_ok_at TEXT,
+  failures INTEGER DEFAULT 0, jobs_found INTEGER DEFAULT 0, PRIMARY KEY (ats, slug)
 );
 """
 
@@ -107,11 +113,15 @@ def init() -> None:
     with conn() as c:
         c.executescript(SCHEMA)
         for table, fields in {
-            "jobs": {"canonical_key": "TEXT"},
+            # posted_ts: the posting date as UTC epoch seconds, for "posted within" filters and sorting.
+            # starred: NULL follows the priority-company list; 1/0 is the candidate's own choice.
+            "jobs": {"canonical_key": "TEXT", "posted_ts": "REAL", "starred": "INTEGER"},
             "applications": {"submission_attempted": "INTEGER DEFAULT 0", "worker_pid": "INTEGER",
                               "candidate_note": "TEXT DEFAULT ''", "stage": "TEXT DEFAULT ''",
                               "stage_source": "TEXT DEFAULT ''", "stage_updated_at": "TEXT",
-                              "questions": "TEXT DEFAULT '[]'"},
+                              "questions": "TEXT DEFAULT '[]'",
+                              # hidden: removed from the Applications list; history and the Tracker keep it.
+                              "hidden": "INTEGER DEFAULT 0"},
             "runs": {"worker_pid": "INTEGER"},
         }.items():
             existing = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
@@ -122,7 +132,55 @@ def init() -> None:
             job = _job_from_row(row)
             c.execute("UPDATE jobs SET canonical_key=? WHERE id=?", (job_fingerprint(job), job.id))
         c.execute("CREATE INDEX IF NOT EXISTS idx_jobs_canonical ON jobs(canonical_key)")
+        rows = c.execute("SELECT id, posted_at FROM jobs WHERE posted_ts IS NULL AND posted_at IS NOT NULL").fetchall()
+        c.executemany("UPDATE jobs SET posted_ts=? WHERE id=?",
+                      [(posted_epoch(r["posted_at"]), r["id"]) for r in rows if posted_epoch(r["posted_at"]) is not None])
+        c.execute("CREATE INDEX IF NOT EXISTS idx_jobs_posted ON jobs(posted_ts)")
+        if c.execute("SELECT 1 FROM boards LIMIT 1").fetchone() is None:
+            # One-time: learn company boards from postings found before discovery existed.
+            _insert_boards(c, (board for r in c.execute("SELECT url, apply_url FROM jobs").fetchall()
+                               for board in (board_of(r["apply_url"]), board_of(r["url"])) if board))
+        _upgrade_settings(c)
     seed_settings()
+
+
+def _upgrade_settings(c: sqlite3.Connection) -> None:
+    """Bring an existing install's saved settings up to the current board catalog, once.
+
+    Only boards new to the catalog are added, so a board the candidate removed
+    stays removed. JobSpy defaults move only if they were never changed.
+    """
+    rows = {r["key"]: r["value"] for r in c.execute("SELECT key, value FROM settings").fetchall()}
+    if not rows:
+        return   # fresh install: the defaults are already current
+    try:
+        version = int(json.loads(rows.get("catalog_version", "1")))
+    except (TypeError, ValueError):
+        version = 1
+    if version >= config.CATALOG_VERSION:
+        return
+    try:
+        companies = json.loads(rows["companies"]) if "companies" in rows else None
+    except json.JSONDecodeError:
+        companies = None
+    if isinstance(companies, dict):
+        for ats, additions in config.CATALOG_ADDITIONS.items():
+            current = [str(slug) for slug in companies.get(ats) or []]
+            known = {slug.casefold() for slug in current}
+            companies[ats] = (current + [slug for slug in additions if slug.casefold() not in known])[:500]
+        c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('companies', ?)", (json.dumps(companies),))
+    try:
+        jobspy = json.loads(rows["jobspy"]) if "jobspy" in rows else None
+    except json.JSONDecodeError:
+        jobspy = None
+    if isinstance(jobspy, dict):
+        if jobspy.get("results_wanted") == 20:
+            jobspy["results_wanted"] = 50
+        sites = [site for site in jobspy.get("sites") or [] if site != "zip_recruiter"]
+        jobspy["sites"] = sites or ["indeed"]
+        c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('jobspy', ?)", (json.dumps(jobspy),))
+    c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES ('catalog_version', ?)",
+              (json.dumps(config.CATALOG_VERSION),))
 
 
 def close() -> None:
@@ -192,13 +250,14 @@ def upsert_jobs(jobs: list[Job]) -> int:
                     "UPDATE jobs SET company=CASE WHEN length(?)>0 THEN ? ELSE company END, "
                     "title=CASE WHEN length(?)>0 THEN ? ELSE title END, "
                     "location=CASE WHEN length(?)>0 THEN ? ELSE location END, remote=CASE WHEN length(?)>0 THEN ? ELSE remote END, "
-                    "posted_at=COALESCE(?, posted_at), salary_min=COALESCE(?, salary_min), salary_max=COALESCE(?, salary_max), "
+                    "posted_at=COALESCE(?, posted_at), posted_ts=COALESCE(?, posted_ts), "
+                    "salary_min=COALESCE(?, salary_min), salary_max=COALESCE(?, salary_max), "
                     "description=CASE WHEN length(?)>0 THEN ? ELSE description END, "
                     "ats=CASE WHEN ? IN ('greenhouse','lever','ashby') THEN ? ELSE ats END, "
                     "apply_url=CASE WHEN ? IN ('greenhouse','lever','ashby') THEN ? ELSE apply_url END, "
                     "updated_at=? WHERE id=?",
                     (j.company, j.company, j.title, j.title, j.location, j.location, j.location, j.remote, j.posted_at,
-                     j.salary_min, j.salary_max, j.description, j.description, j.ats, j.ats,
+                     posted_epoch(j.posted_at), j.salary_min, j.salary_max, j.description, j.description, j.ats, j.ats,
                      j.ats, j.apply_url, now_iso(), exists["id"]))
                 j.id = exists["id"]
                 continue
@@ -210,7 +269,7 @@ def upsert_jobs(jobs: list[Job]) -> int:
                 (j.id, j.source, j.ats, j.company, j.title, j.location, int(j.remote), j.salary_min,
                  j.salary_max, j.url, j.apply_url, j.description, j.posted_at, j.discovered_at, j.score,
                  json.dumps(j.score_json), j.status, json.dumps(j.raw), now_iso()))
-            c.execute("UPDATE jobs SET canonical_key=? WHERE id=?", (key, j.id))
+            c.execute("UPDATE jobs SET canonical_key=?, posted_ts=? WHERE id=?", (key, posted_epoch(j.posted_at), j.id))
     return new
 
 
@@ -231,11 +290,11 @@ def refresh_job_metadata(job_id: str, fresh: Job) -> Job:
             raise ValueError("Refreshed posting does not match the stored vacancy")
         c.execute(
             "UPDATE jobs SET source=?, ats=?, company=?, title=?, location=?, remote=?, "
-            "salary_min=?, salary_max=?, url=?, apply_url=?, description=?, posted_at=?, raw=?, updated_at=? "
-            "WHERE id=?",
+            "salary_min=?, salary_max=?, url=?, apply_url=?, description=?, posted_at=?, posted_ts=?, raw=?, "
+            "updated_at=? WHERE id=?",
             (fresh.source, fresh.ats, fresh.company, fresh.title, fresh.location, int(fresh.remote),
              fresh.salary_min, fresh.salary_max, fresh.url, fresh.apply_url, fresh.description,
-             fresh.posted_at, json.dumps(fresh.raw), now_iso(), job_id),
+             fresh.posted_at, posted_epoch(fresh.posted_at), json.dumps(fresh.raw), now_iso(), job_id),
         )
     return get_job(job_id)
 
@@ -256,12 +315,31 @@ def _job_from_row(r: sqlite3.Row) -> Job:
             # Earlier versions truncated raw JSON mid-string. Preserve the stored row and keep it readable.
             d[key] = {}
     d.pop("updated_at", None)
+    d.pop("posted_ts", None)
     return Job.model_validate(d)
+
+
+# Sort orders for list_jobs. ``{d}`` is ASC or DESC; unknown dates and salaries always sort last.
+JOB_ORDERS = {
+    "match": "score {d}, discovered_at DESC",
+    "posted": "posted_ts IS NULL, posted_ts {d}, score DESC",
+    "found": "discovered_at {d}, score DESC",
+    "salary": "COALESCE(salary_max, salary_min) IS NULL, COALESCE(salary_max, salary_min) {d}, score DESC",
+    "company": "company COLLATE NOCASE {d}, score DESC",
+    "title": "title COLLATE NOCASE {d}, score DESC",
+    "status": "status {d}, score DESC",
+}
+
+
+def _posted_cutoff(hours: float | None) -> float | None:
+    return time.time() - float(hours) * 3600 if hours else None
 
 
 def list_jobs(status: str | None = None, q: str | None = None, limit: int = 200,
               min_score: float | None = None, ats: str | None = None,
-              offset: int = 0) -> list[Job]:
+              offset: int = 0, posted_within_hours: float | None = None,
+              order: str = "match", descending: bool = True) -> list[Job]:
+    """Deduplicated vacancies. ``posted_within_hours`` keeps postings published in that window."""
     sql, args = DEDUPED_JOBS + " SELECT * FROM ranked_jobs WHERE posting_rank=1", []
     if status and status != "all":
         sql += " AND status = ?"; args.append(status)
@@ -271,13 +349,18 @@ def list_jobs(status: str | None = None, q: str | None = None, limit: int = 200,
         sql += " AND score >= ?"; args.append(min_score)
     if ats:
         sql += " AND ats = ?"; args.append(ats)
-    sql += " ORDER BY score DESC, discovered_at DESC LIMIT ? OFFSET ?"
+    cutoff = _posted_cutoff(posted_within_hours)
+    if cutoff is not None:
+        sql += " AND posted_ts >= ?"; args.append(cutoff)
+    if order not in JOB_ORDERS:
+        raise ValueError(f"Unknown job order: {order}")
+    sql += " ORDER BY " + JOB_ORDERS[order].format(d="DESC" if descending else "ASC") + ", id LIMIT ? OFFSET ?"
     args.extend((limit, max(0, offset)))
     with conn() as c:
         return [_job_from_row(r) for r in c.execute(sql, args).fetchall()]
 
 
-def count_jobs(status: str | None = None, q: str | None = None) -> int:
+def count_jobs(status: str | None = None, q: str | None = None, posted_within_hours: float | None = None) -> int:
     """Count the same deduplicated vacancy set shown by ``list_jobs``."""
     sql, args = DEDUPED_JOBS + " SELECT COUNT(*) FROM ranked_jobs WHERE posting_rank=1", []
     if status and status != "all":
@@ -286,8 +369,44 @@ def count_jobs(status: str | None = None, q: str | None = None) -> int:
     if q:
         sql += " AND (title LIKE ? OR company LIKE ? OR location LIKE ?)"
         args.extend([f"%{q}%"] * 3)
+    cutoff = _posted_cutoff(posted_within_hours)
+    if cutoff is not None:
+        sql += " AND posted_ts >= ?"
+        args.append(cutoff)
     with conn() as c:
         return int(c.execute(sql, args).fetchone()[0])
+
+
+FRESH_WINDOWS = (24, 72, 168)
+
+
+def fresh_counts() -> dict[str, int]:
+    """New vacancies by posting age: ``fresh_24`` etc. for all, ``preparable_24`` etc. on supported forms."""
+    now = time.time()
+    columns = []
+    args: list[float] = []
+    for hours in FRESH_WINDOWS:
+        columns.append(f"SUM(posted_ts >= ?) AS fresh_{hours}")
+        args.append(now - hours * 3600)
+    columns.append("SUM(ats IN ('greenhouse','lever','ashby')) AS preparable_0")
+    for hours in FRESH_WINDOWS:
+        columns.append(f"SUM(ats IN ('greenhouse','lever','ashby') AND posted_ts >= ?) AS preparable_{hours}")
+        args.append(now - hours * 3600)
+    with conn() as c:
+        row = c.execute(DEDUPED_JOBS + " SELECT " + ", ".join(columns) +
+                        " FROM ranked_jobs WHERE posting_rank=1 AND status='new'", args).fetchone()
+    return {key: int(row[key] or 0) for key in row.keys()}
+
+
+def set_job_star(job_id: str, starred: bool | None) -> None:
+    """Star or unstar a vacancy (every stored duplicate of it). ``None`` returns to the priority list."""
+    value = None if starred is None else int(bool(starred))
+    with conn() as c:
+        row = c.execute("SELECT canonical_key FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if row is None:
+            raise ValueError("Job not found")
+        c.execute("UPDATE jobs SET starred=?, updated_at=? WHERE id=? OR (canonical_key IS NOT NULL AND canonical_key=?)",
+                  (value, now_iso(), job_id, row["canonical_key"]))
 
 
 def get_job(job_id: str) -> Job | None:
@@ -440,11 +559,16 @@ def finish_application(app_id: int, status: str, log: list[str], screenshots: li
                   (new_status, now_iso(), app_id))
 
 
+_APPLICATION_SELECT = (
+    "SELECT a.*, j.company, j.title, j.url, j.location, j.ats, j.canonical_key, j.posted_at, j.score, j.starred "
+    "FROM applications a LEFT JOIN jobs j ON j.id = a.job_id"
+)
+
+
 def list_applications(limit: int = 100) -> list[dict]:
+    """Newest attempts first, including ones hidden from the Applications list (``hidden`` = 1)."""
     with conn() as c:
-        rows = c.execute(
-            "SELECT a.*, j.company, j.title, j.url, j.location, j.ats, j.canonical_key FROM applications a "
-            "LEFT JOIN jobs j ON j.id = a.job_id ORDER BY a.id DESC LIMIT ?", (limit,)).fetchall()
+        rows = c.execute(_APPLICATION_SELECT + " ORDER BY a.id DESC LIMIT ?", (limit,)).fetchall()
     return [_application_dict(r) for r in rows]
 
 
@@ -460,10 +584,58 @@ def _application_dict(row: sqlite3.Row) -> dict:
 
 def get_application(app_id: int) -> dict | None:
     with conn() as c:
-        row = c.execute(
-            "SELECT a.*, j.company, j.title, j.url, j.location, j.ats, j.canonical_key FROM applications a "
-            "LEFT JOIN jobs j ON j.id = a.job_id WHERE a.id=?", (app_id,)).fetchone()
+        row = c.execute(_APPLICATION_SELECT + " WHERE a.id=?", (app_id,)).fetchone()
     return _application_dict(row) if row else None
+
+
+def hide_application(app_id: int) -> None:
+    """Remove an attempt from the Applications list. The record, its evidence, and the Tracker row stay."""
+    with conn() as c:
+        row = c.execute("SELECT status FROM applications WHERE id=?", (app_id,)).fetchone()
+        if row is None:
+            raise ValueError("Application record not found")
+        if row["status"] in ("queued", "running"):
+            raise ValueError("An application that is being sent cannot be removed")
+        c.execute("UPDATE applications SET hidden=1 WHERE id=?", (app_id,))
+
+
+def mark_application_sent(job_id: str) -> int:
+    """Record that the candidate sent this application themselves, outside Starployment.
+
+    Like ``add_manual_application``, this is the candidate's own record
+    (``method='manual'``), not a browser submission. It moves the vacancy to
+    the Tracker, closes its prepared draft, and blocks any later automatic
+    attempt for the same posting. Returns the new application id.
+    """
+    with conn() as c:
+        job = c.execute("SELECT status, canonical_key FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if job is None:
+            raise ValueError("Job not found")
+        if job["status"] in ("queued", "applying") or c.execute(
+                "SELECT 1 FROM applications WHERE job_id=? AND status IN ('queued','running')", (job_id,)).fetchone():
+            raise ValueError("This application is being sent right now")
+        if c.execute("SELECT 1 FROM applications a JOIN jobs j ON j.id=a.job_id WHERE (a.job_id=? OR "
+                     "(j.canonical_key IS NOT NULL AND j.canonical_key=?)) AND a.status='applied' LIMIT 1",
+                     (job_id, job["canonical_key"])).fetchone():
+            raise ValueError("This application is already recorded as sent")
+        draft = c.execute("SELECT id, status, resume_path FROM drafts WHERE job_id=?", (job_id,)).fetchone()
+        if draft is not None and draft["status"] == "sending":
+            raise ValueError("This application is being sent right now")
+        stamp = now_iso()
+        cur = c.execute(
+            "INSERT INTO applications(job_id, status, method, started_at, finished_at, submission_attempted, stage, "
+            "stage_source, stage_updated_at, resume_path, log) VALUES (?, 'applied', 'manual', ?, ?, 1, 'applied', "
+            "'manual', ?, ?, ?)",
+            (job_id, stamp, stamp, stamp, draft["resume_path"] if draft is not None else "",
+             json.dumps(["Marked as sent by the candidate (applied outside Starployment)"])))
+        app_id = int(cur.lastrowid)
+        # Earlier unfinished attempts for this vacancy are superseded by the candidate's record.
+        c.execute("UPDATE applications SET hidden=1 WHERE job_id=? AND id<>?", (job_id, app_id))
+        c.execute("UPDATE jobs SET status='applied', updated_at=? WHERE id=?", (stamp, job_id))
+        if draft is not None:
+            c.execute("UPDATE drafts SET status='sent', application_id=?, error='', updated_at=? WHERE id=?",
+                      (app_id, stamp, draft["id"]))
+        return app_id
 
 
 def set_application_note(app_id: int, note: str) -> None:
@@ -535,7 +707,7 @@ def _draft_dict(row: sqlite3.Row) -> dict:
 
 _DRAFT_SELECT = (
     "SELECT d.*, j.company, j.title, j.location, j.remote, j.url, j.apply_url, j.ats, j.score, "
-    "j.salary_min, j.salary_max, j.status AS job_status, j.canonical_key "
+    "j.salary_min, j.salary_max, j.status AS job_status, j.canonical_key, j.posted_at, j.starred "
     "FROM drafts d LEFT JOIN jobs j ON j.id=d.job_id"
 )
 
@@ -809,6 +981,64 @@ def list_mail_events(limit: int = 200) -> list[dict]:
             "SELECT m.*, j.company, j.title FROM mail_events m LEFT JOIN applications a ON a.id=m.application_id "
             "LEFT JOIN jobs j ON j.id=a.job_id WHERE m.dismissed=0 ORDER BY m.received_at DESC LIMIT ?", (limit,)).fetchall()
     return [dict(r) for r in rows]
+
+
+# ---------------- company boards found in other listings ----------------
+# Every posting URL on a public Greenhouse, Lever, or Ashby board names that
+# company's board. Scans then read the whole board, which finds roles the
+# aggregator never listed. Boards rotate so each scan stays bounded.
+BOARD_RETRY_AFTER = timedelta(days=7)
+
+
+def _insert_boards(c: sqlite3.Connection, boards) -> int:
+    before = c.total_changes
+    c.executemany("INSERT OR IGNORE INTO boards(ats, slug, discovered_at) VALUES (?, ?, ?)",
+                  [(ats, slug, now_iso()) for ats, slug in set(boards)])
+    return c.total_changes - before
+
+
+def discover_boards(jobs: list[Job]) -> int:
+    """Remember the boards behind these postings. Returns how many boards are new."""
+    found = {board for job in jobs for board in (board_of(job.apply_url), board_of(job.url)) if board}
+    if not found:
+        return 0
+    with conn() as c:
+        return _insert_boards(c, found)
+
+
+def boards_for_scan(ats: str, exclude: set[str], limit: int) -> list[str]:
+    """Discovered boards to read this scan, least recently scanned first.
+
+    A board that failed three times in a row rests for a week before retrying.
+    """
+    retry_before = (datetime.now(timezone.utc) - BOARD_RETRY_AFTER).isoformat(timespec="seconds")
+    excluded = {slug.casefold() for slug in exclude}
+    with conn() as c:
+        rows = c.execute(
+            "SELECT slug FROM boards WHERE ats=? AND (failures < 3 OR last_scanned_at < ?) "
+            "ORDER BY last_scanned_at IS NOT NULL, last_scanned_at, slug LIMIT ?",
+            (ats, retry_before, limit + len(excluded))).fetchall()
+    return [r["slug"] for r in rows if r["slug"].casefold() not in excluded][:limit]
+
+
+def record_board_scans(ats: str, results: dict[str, int | None]) -> None:
+    """``results`` maps a board to its relevant job count, or None when it could not be read."""
+    stamp = now_iso()
+    with conn() as c:
+        for slug, found in results.items():
+            if found is None:
+                c.execute("UPDATE boards SET last_scanned_at=?, failures=failures+1 WHERE ats=? AND slug=?",
+                          (stamp, ats, slug))
+            else:
+                c.execute("UPDATE boards SET last_scanned_at=?, last_ok_at=?, failures=0, jobs_found=? "
+                          "WHERE ats=? AND slug=?", (stamp, stamp, int(found), ats, slug))
+
+
+def board_counts() -> dict[str, int]:
+    """Discovered boards that are still being read, per job-board provider."""
+    with conn() as c:
+        rows = c.execute("SELECT ats, COUNT(*) n FROM boards WHERE failures < 3 GROUP BY ats").fetchall()
+    return {r["ats"]: r["n"] for r in rows}
 
 
 # ---------------- resume files (role-specific uploads) ----------------

@@ -6,14 +6,20 @@ Save, tracked by ``DirtyTracker`` so a refresh never overwrites edits.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QFrame, QLineEdit, QScrollArea, QSpinBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QLabel, QLineEdit, QScrollArea, QSpinBox, QVBoxLayout, QWidget
 
-from ...config import ASHBY_COMPANIES, GREENHOUSE_COMPANIES, LEVER_COMPANIES
+from ...config import ASHBY_COMPANIES, GREENHOUSE_COMPANIES, LEVER_COMPANIES, PRIORITY_COMPANIES
 from ..editors import TagEditor
 from ..widgets import DirtyTracker, FormGroup, PageHeader, SegmentedControl, Stepper, ToggleSwitch, button
 from .connections import EmailConnection, LunaConnection
 
-DEFAULT_SUBTITLE = "Connections, automation, search preferences, and appearance."
+DEFAULT_SUBTITLE = "Connections, automation, priority companies, search preferences, and appearance."
+COMPANY_SUGGESTIONS = sorted(set(PRIORITY_COMPANIES) | {
+    "Adobe", "AMD", "Bloomberg", "Coinbase", "DoorDash", "Figma", "Intel", "Lyft", "Notion", "Oracle", "Pinterest",
+    "Ramp", "Reddit", "Robinhood", "Roblox", "Salesforce", "Scale AI", "Shopify", "Snap", "Snowflake", "Spotify",
+    "TikTok", "ByteDance", "Waymo", "xAI", "Millennium", "Point72", "Akuna Capital", "DRW", "Virtu",
+})
+DISCOVER_NOTE = "Also read the public Greenhouse, Lever, and Ashby boards of companies found in other listings."
 TITLE_SUGGESTIONS = ["Software Engineer", "Software Developer", "Backend Engineer", "Frontend Engineer",
                      "Full Stack Engineer", "Data Scientist", "Data Analyst", "Data Engineer", "Machine Learning Engineer",
                      "Quantitative Developer", "Quantitative Researcher", "Research Engineer", "Product Manager",
@@ -93,6 +99,18 @@ class SettingsView(QWidget):
         automation.add_row("Minimum match score", Stepper(self.min_score), "Automatic runs only apply at or above this.")
         groups.addWidget(automation)
 
+        # Priority companies ---------------------------------------------------
+        priority = FormGroup("Priority companies",
+                             "Applications to these employers are starred and prepared like any other, then wait "
+                             "for you: automatic runs and Send ready skip them, so you approve each one yourself.")
+        self.priority_companies = TagEditor("Add a company", COMPANY_SUGGESTIONS, lowercase_unique=True)
+        priority.add_row("Companies", self.priority_companies)
+        restore = button("Restore FAANG+ list", "quiet")
+        restore.setToolTip("Replace this list with the default FAANG+ companies")
+        restore.clicked.connect(self._restore_priority)
+        priority.add_row("", restore)
+        groups.addWidget(priority)
+
         # Search ---------------------------------------------------------------
         search = FormGroup("What to look for", "Changes re-rank every saved job.")
         self.target_titles = TagEditor("Add a title", TITLE_SUGGESTIONS)
@@ -144,6 +162,9 @@ class SettingsView(QWidget):
         sources.add_row("Lever", self.lever)
         sources.add_row("Ashby", self.ashby)
         sources.add_row("Job-site searches", self.search_terms, "Phrases used on Indeed, LinkedIn, and Google Jobs.")
+        self.discover_boards = ToggleSwitch()
+        self.discover_boards.setAccessibleName("Discover more company boards")
+        self._discover_row = sources.add_row("Discover more boards", self.discover_boards, DISCOVER_NOTE)
         groups.addWidget(sources)
         groups.addStretch(1)
 
@@ -151,7 +172,7 @@ class SettingsView(QWidget):
             self.auto_apply, self.dry_run, self.interval, self.max_apply, self.min_score, self.luna, self.email,
             self.target_titles, self.locations, self.exclude_words, self.remote_ok, self.include_internships,
             self.min_salary, self.years_experience, self.one_page, self.max_skills, self.greenhouse, self.lever,
-            self.ashby, self.search_terms,
+            self.ashby, self.search_terms, self.priority_companies, self.discover_boards,
         )
 
     # Compatibility aliases for the email fields.
@@ -194,6 +215,16 @@ class SettingsView(QWidget):
     def show_connections(self) -> None:
         self.scroll.ensureWidgetVisible(self.luna, 0, 0)
 
+    def _restore_priority(self) -> None:
+        self.priority_companies.set_values(list(PRIORITY_COMPANIES))
+        self.priority_companies.changed.emit()
+
+    def set_board_count(self, count: int) -> None:
+        """Show how many discovered boards scans are reading."""
+        note = self._discover_row.findChild(QLabel, "rowNote")
+        if note is not None:
+            note.setText(DISCOVER_NOTE + (f" {count:,} found so far." if count else ""))
+
     def set_settings(self, s: dict) -> None:
         with self.tracker.suspended():
             appearance = str(s.get("appearance", "System")).title()
@@ -221,6 +252,8 @@ class SettingsView(QWidget):
             self.lever.set_values(list(companies.get("lever") or []))
             self.ashby.set_values(list(companies.get("ashby") or []))
             self.search_terms.set_values(list((s.get("jobspy") or {}).get("search_terms") or []))
+            self.priority_companies.set_values(list(s.get("priority_companies") or []))
+            self.discover_boards.setChecked(bool(s.get("discover_boards", True)))
         self.tracker.reset()
 
     def _save(self) -> None:
@@ -247,6 +280,8 @@ class SettingsView(QWidget):
             "companies": {"greenhouse": self.greenhouse.values(), "lever": self.lever.values(),
                           "ashby": self.ashby.values()},
             "jobspy": {"search_terms": self.search_terms.values()[:20]},
+            "priority_companies": self.priority_companies.values(),
+            "discover_boards": self.discover_boards.isChecked(),
         }
         self.save_requested.emit(patch)
         with self.tracker.suspended():

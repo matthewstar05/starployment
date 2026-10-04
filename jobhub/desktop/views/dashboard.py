@@ -22,6 +22,7 @@ from ..widgets import (
     FormGroup,
     IconBadge,
     PageHeader,
+    SegmentedControl,
     StatusDot,
     Stepper,
     ToggleSwitch,
@@ -155,10 +156,12 @@ class ApplyHero(QWidget):
         actions.addStretch(1)
         row.addLayout(actions)
 
-    def set_counts(self, review: int, approved: int, focus: int, new: int) -> None:
+    def set_counts(self, review: int, approved: int, focus: int, new: int, fresh: int = 0) -> None:
         parts = []
         if new:
             parts.append(f"{new:,} new matches")
+        if fresh:
+            parts.append(f"{fresh:,} posted in the last 24 hours")
         if review:
             parts.append(f"{review} to review")
         if approved:
@@ -210,10 +213,20 @@ class ApplyHero(QWidget):
         painter.end()
 
 
-class ApplyPlanSheet(QDialog):
-    """Choose how many applications to prepare and how."""
+PLAN_WINDOWS = (("Any time", 0), ("24 hours", 24), ("3 days", 72), ("Week", 168))
+WINDOW_PHRASES = {0: "", 24: " posted in the last 24 hours", 72: " posted in the last 3 days",
+                  168: " posted in the last week"}
 
-    def __init__(self, settings: dict, new_matches: int, parent: QWidget | None = None):
+
+class ApplyPlanSheet(QDialog):
+    """Choose how many applications to prepare and how.
+
+    ``counts`` holds new roles on supported forms by posting window
+    (``preparable_0`` for any time, ``preparable_24`` and so on).
+    """
+
+    def __init__(self, settings: dict, new_matches: int, parent: QWidget | None = None,
+                 counts: dict | None = None):
         super().__init__(parent)
         self.setWindowTitle("Prepare applications")
         prepare_window(self)
@@ -238,12 +251,23 @@ class ApplyPlanSheet(QDialog):
         self.min_score.setValue(int(plan.get("min_score", 60)))
         self.one_per_company = ToggleSwitch()
         self.one_per_company.setChecked(bool(plan.get("one_per_company", True)))
+        self._counts = dict(counts or {})
+        self.window_choice = SegmentedControl()
+        for text, hours in PLAN_WINDOWS:
+            self.window_choice.addItem(text, hours)
+        self.window_choice.setCurrentIndex(max(0, self.window_choice.findData(int(plan.get("posted_within_hours", 0) or 0))))
+        self.order = SegmentedControl()
+        self.order.addItem("Best match", "match")
+        self.order.addItem("Newest first", "newest")
+        self.order.setCurrentIndex(max(0, self.order.findData(str(plan.get("order", "match")))))
         self.use_luna = ToggleSwitch()
         backend = (settings.get("agent") or {}).get("backend", "none")
         connected = backend not in ("", "none")
         self.use_luna.setChecked(connected and bool((settings.get("luna") or {}).get("draft_answers", True)))
         self.use_luna.setEnabled(connected)
-        group.add_row("Prepare the top", Stepper(self.count, width=110), "Highest match scores first.")
+        group.add_row("Prepare the top", Stepper(self.count, width=110), "Picked in the order below.")
+        group.add_row("Posted within", self.window_choice, "Early applicants get seen first.")
+        group.add_row("Order", self.order, "Best match, or newest postings.")
         group.add_row("Minimum match", Stepper(self.min_score), "Skip roles below this score.")
         group.add_row("One per company", self.one_per_company, "Spread applications across employers.")
         group.add_row("AI Autofill every question", self.use_luna,
@@ -254,8 +278,13 @@ class ApplyPlanSheet(QDialog):
                     "original": "Your main resume"}.get(str(settings.get("resume_strategy", "tailored")), "")
         group.add_row("Resume", label(strategy, "rowNote"), "Change this in Settings → Resume.")
         column.addWidget(group)
-        column.addWidget(label(f"You have {new_matches:,} new matches. Greenhouse, Lever, and Ashby roles can be "
-                               "prepared; others stay in Jobs.", "caption"))
+        self._new_matches = new_matches
+        self.available = label("", "caption")
+        column.addWidget(self.available)
+        priority = [c for c in settings.get("priority_companies") or [] if c]
+        if priority:
+            column.addWidget(label("Priority companies (" + ", ".join(priority[:4]) + (" and more" if len(priority) > 4 else "")
+                                   + ") are prepared and starred, then wait for you to approve each one.", "caption"))
         if settings.get("dry_run"):
             column.addWidget(label("Practice mode is on, so sending fills forms without clicking Submit. "
                                    "Turn it off in Settings when you are ready to submit for real.", "questions"))
@@ -269,6 +298,7 @@ class ApplyPlanSheet(QDialog):
         self.go.setCursor(Qt.CursorShape.PointingHandCursor)
         self.go.clicked.connect(self.accept)
         self.count.valueChanged.connect(self._label)
+        self.window_choice.currentIndexChanged.connect(self._label)
         self._label()
         actions.addWidget(cancel)
         actions.addWidget(self.go)
@@ -277,6 +307,14 @@ class ApplyPlanSheet(QDialog):
     def _label(self, *_args) -> None:
         count = self.count.value()
         self.go.setText(f"Prepare {count} application{'s' if count != 1 else ''}")
+        hours = int(self.window_choice.currentData() or 0)
+        if f"preparable_{hours}" in self._counts:
+            ready = int(self._counts[f"preparable_{hours}"])
+            self.available.setText(f"{ready:,} new role{'s' if ready != 1 else ''} on Greenhouse, Lever, or Ashby "
+                                   f"forms{WINDOW_PHRASES.get(hours, '')}. Other roles stay in Jobs.")
+        else:
+            self.available.setText(f"You have {self._new_matches:,} new matches. Greenhouse, Lever, and Ashby roles "
+                                   "can be prepared; others stay in Jobs.")
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -285,7 +323,9 @@ class ApplyPlanSheet(QDialog):
 
     def plan(self) -> dict:
         return {"count": self.count.value(), "min_score": float(self.min_score.value()),
-                "one_per_company": self.one_per_company.isChecked(), "use_luna": self.use_luna.isChecked()}
+                "one_per_company": self.one_per_company.isChecked(), "use_luna": self.use_luna.isChecked(),
+                "posted_within_hours": int(self.window_choice.currentData() or 0),
+                "order": str(self.order.currentData() or "match")}
 
 
 class DashboardView(QWidget):
@@ -293,7 +333,7 @@ class DashboardView(QWidget):
     review_requested = Signal()
     prepare_requested = Signal(str)
     setup_requested = Signal()
-    jobs_requested = Signal(str)          # filter: all | new | applied | needs_human
+    jobs_requested = Signal(str)          # filter: all | new | applied | needs_human | fresh (posted in 24 hours)
     applications_requested = Signal(object)  # application id or None
     apply_requested = Signal(str)
     open_url_requested = Signal(str)
@@ -308,6 +348,8 @@ class DashboardView(QWidget):
         self._signatures: dict[str, object] = {}
         self._settings: dict = {}
         self._new_matches = 0
+        self._fresh = 0
+        self._plan_counts: dict = {}
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea()
@@ -366,9 +408,9 @@ class DashboardView(QWidget):
         self.tiles: dict[str, MetricTile] = {}
         for key, title, icon, tone, target in (
             ("new", "New matches", "trending", "accent", "new"),
+            ("fresh_24", "Posted in 24 hours", "clock", "indigo", "fresh"),
             ("applied", "Applied", "success", "green", "applied"),
             ("needs_human", "Needs review", "alert", "amber", None),
-            ("total", "Tracked roles", "layers", "indigo", "all"),
         ):
             tile = MetricTile(title, icon, tone)
             if target is None:
@@ -445,7 +487,7 @@ class DashboardView(QWidget):
     def set_pipeline(self, drafts: dict[str, int], focus: list[dict]) -> None:
         """Counts of prepared applications and the applications needing your focus."""
         review = sum(drafts.get(s, 0) for s in ("ready", "needs_answers", "practice"))
-        self.hero.set_counts(review, drafts.get("approved", 0), len(focus), self._new_matches)
+        self.hero.set_counts(review, drafts.get("approved", 0), len(focus), self._new_matches, self._fresh)
         signature = tuple((r.get("id"), r.get("stage")) for r in focus[:5])
         if not self._changed("focus", signature):
             return
@@ -468,12 +510,14 @@ class DashboardView(QWidget):
             self.focus_card.add_row(row)
 
     def _open_plan(self) -> None:
-        sheet = ApplyPlanSheet(self._settings, self._new_matches, self.window())
+        sheet = ApplyPlanSheet(self._settings, self._new_matches, self.window(), counts=self._plan_counts)
         if sheet.exec() == QDialog.DialogCode.Accepted:
             self.apply_plan_requested.emit(sheet.plan())
 
     def set_stats(self, stats: dict) -> None:
         self._new_matches = int(stats.get("new", 0) or 0)
+        self._fresh = int(stats.get("fresh_24", 0) or 0)
+        self._plan_counts = {key: value for key, value in stats.items() if key.startswith("preparable_")}
         for key, tile in self.tiles.items():
             tile.value.set_value(int(stats.get(key, 0) or 0))
         new, review = int(stats.get("new", 0) or 0), int(stats.get("needs_human", 0) or 0)
@@ -540,8 +584,8 @@ class DashboardView(QWidget):
             if not job_id or job_id in seen_jobs:
                 continue
             seen_jobs.add(job_id)
-            if app.get("status") != "needs_human":
-                continue
+            if app.get("status") != "needs_human" or app.get("hidden"):
+                continue   # removed from Applications by the candidate
             questions = list(dict.fromkeys(app.get("unanswered", []) or []))
             if questions:
                 pending.append((app, len(questions)))
