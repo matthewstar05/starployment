@@ -17,6 +17,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "pyside6>=6.8,<7",
     "keyring>=25.0,<26",
+    "fonttools[woff]>=4.50 ; sys_platform == 'win32'",
 ]
 
 [project.scripts]

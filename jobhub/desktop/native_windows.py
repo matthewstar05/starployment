@@ -14,7 +14,7 @@ import sys
 
 from PySide6.QtCore import QEvent, QObject, Qt
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import QApplication, QWidget
+from PySide6.QtWidgets import QApplication, QLabel, QWidget
 
 APP_USER_MODEL_ID = "local.starployment.desktop"
 # DWMWA_USE_IMMERSIVE_DARK_MODE: 20 on Windows 10 20H1+ and 11, 19 before that.
@@ -76,7 +76,12 @@ class _TitleBarFilter(QObject):
     """Themes windows created later (dialogs, the setup wizard, message boxes)."""
 
     def eventFilter(self, obj, event):  # noqa: N802 (Qt API)
-        if event.type() == QEvent.Type.Show and isinstance(obj, QWidget) and obj.isWindow():
+        # Only framed windows that already have a native handle: calling winId()
+        # on anything else (stray top-level labels, popups) would create one.
+        if (event.type() == QEvent.Type.Show and isinstance(obj, QWidget) and obj.isWindow()
+                and obj.windowType() in (Qt.WindowType.Window, Qt.WindowType.Dialog)
+                and obj.windowHandle() is not None
+                and not isinstance(obj, QLabel)):
             set_dark_title_bar(obj, _scheme_is_dark())
         return False
 

@@ -20,7 +20,7 @@ COMPANY_SUGGESTIONS = sorted(set(PRIORITY_COMPANIES) | {
     "Ramp", "Reddit", "Robinhood", "Roblox", "Salesforce", "Scale AI", "Shopify", "Snap", "Snowflake", "Spotify",
     "TikTok", "ByteDance", "Waymo", "xAI", "Millennium", "Point72", "Akuna Capital", "DRW", "Virtu",
 })
-TYPEFACE_NOTE = "Claude uses Anthropic Sans and Serif from the Claude app on this Mac."
+TYPEFACE_NOTE = "Claude uses Anthropic Sans and Serif from the Claude app on this computer."
 TYPEFACE_MISSING = "Claude's fonts appear when the Claude desktop app is installed; until then the system font is used."
 DISCOVER_NOTE = "Also read the public Greenhouse, Lever, and Ashby boards of companies found in other listings."
 TITLE_SUGGESTIONS = ["Software Engineer", "Software Developer", "Backend Engineer", "Frontend Engineer",

@@ -28,7 +28,7 @@ PALETTES: dict[str, dict[str, str]] = {
         "surface_alt": "#F3F4F7",
         "surface_hover": "#E6E8EE",
         "text": "#1D1D1F",
-        "text_muted": "#65656A",
+        "text_muted": "#626267",
         "text_subtle": "#6E6E73",
         "border": "#D1D3DA",
         "border_soft": "#E2E4EA",

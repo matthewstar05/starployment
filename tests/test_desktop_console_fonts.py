@@ -53,8 +53,16 @@ def test_system_font_is_used_when_claude_is_not_installed(monkeypatch):
         apply_typeface(app, "Claude")
 
 
-@pytest.mark.skipif(not any((d / "AnthropicSans-Romans-Variable-25x258.ttf").is_file() for d in fonts.claude_font_dirs()),
-                    reason="the Claude desktop app is not installed here")
+def _claude_fonts_installed() -> bool:
+    for folder in fonts.claude_font_dirs():
+        if (folder / "AnthropicSans-Romans-Variable-25x258.ttf").is_file():  # macOS bundle
+            return True
+        if folder.is_dir() and any(folder.glob("AnthropicSerif-Roman-*.woff2")):  # Windows MSIX package
+            return True
+    return False
+
+
+@pytest.mark.skipif(not _claude_fonts_installed(), reason="the Claude desktop app is not installed here")
 def test_claude_font_choice_uses_anthropic_sans_and_serif_titles():
     from jobhub.desktop.styles import app_font, apply_typeface, stylesheet
 

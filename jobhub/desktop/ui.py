@@ -13,6 +13,7 @@ import sys
 import time
 from typing import Any
 
+import shiboken6
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, Signal
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QPixmap
 from PySide6.QtWidgets import (
@@ -360,8 +361,17 @@ class JobHubWindow(QMainWindow):
         if reduced_motion() or not self.isVisible() or root is None or window_has_native_glass(self):
             change()
             return
-        if self._crossfade is not None:
-            self._crossfade.stop()
+        # The previous fade is parented to its overlay, which deletes itself (and the
+        # animation) when the fade ends. If one is still running, stop it and remove
+        # its overlay too, or a frozen frame of the old theme would stay on top.
+        previous = self._crossfade
+        self._crossfade = None
+        if previous is not None and shiboken6.isValid(previous):
+            previous.stop()
+            overlay = previous.parent()
+            if overlay is not None and shiboken6.isValid(overlay):
+                overlay.hide()
+                overlay.deleteLater()
         snapshot = root.grab()
         overlay = QLabel(root)
         overlay.setPixmap(snapshot)
