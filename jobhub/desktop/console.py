@@ -27,7 +27,7 @@ def tone_colors() -> dict[str, str]:
     on a dark terminal in Dark mode and on a light panel in Light mode."""
     c = current_colors()
     return {"success": c["green"], "green": c["green"], "warning": c["amber"], "amber": c["amber"],
-            "error": c["red"], "red": c["red"], "busy": c["accent_text"], "accent": c["accent_text"],
+            "error": c["red"], "red": c["red"], "busy": c["info"], "accent": c["info"],
             "info": c["text"], "neutral": c["text_muted"], "time": c["text_subtle"]}
 
 

@@ -42,6 +42,8 @@ def stylesheet(appearance: str | None = None) -> str:
     # Page titles use Claude's serif at a regular weight, the way Claude sets its headings.
     title_rule = f"font-family: '{display}'; font-weight: 500;" if fonts.active() == fonts.CLAUDE \
         else "font-weight: 700;"
+    brand_rule = f"font-family: '{display}'; font-size: 19px; font-weight: 600;" if fonts.active() == fonts.CLAUDE \
+        else "font-size: 17px; font-weight: 700;"
     check_icon = icon_path("check").as_posix()
     up_icon = icon_path("chevron-up").as_posix()
     down_icon = icon_path("chevron-down").as_posix()
@@ -50,7 +52,7 @@ def stylesheet(appearance: str | None = None) -> str:
     secondary_fill = "rgba(255,255,255,0.09)" if dark else "rgba(255,255,255,0.82)"
     secondary_hover = "rgba(255,255,255,0.14)" if dark else "rgba(255,255,255,1.0)"
     secondary_pressed = "rgba(255,255,255,0.06)" if dark else "rgba(235,236,240,1.0)"
-    primary_top = "#2E8CFF" if dark else "#1A84F0"
+    primary_top = c['button_top']
     scroll_handle = "rgba(255,255,255,0.22)" if dark else "rgba(0,0,0,0.20)"
     scroll_handle_hover = "rgba(255,255,255,0.34)" if dark else "rgba(0,0,0,0.32)"
     # Notes and logs inside a panel read as soft wells, not darker boxes with borders.
@@ -73,7 +75,7 @@ def stylesheet(appearance: str | None = None) -> str:
     QSplitter::handle {{ background: transparent; }}
 
     /* Typography (select with objectName) ------------------------------ */
-    QLabel#brand {{ color: {c['text']}; font-size: 17px; font-weight: 700; }}
+    QLabel#brand {{ color: {c['text']}; {brand_rule} }}
     QLabel#eyebrow {{ color: {c['text_muted']}; font-size: 11px; font-weight: 600; }}
     QLabel#pageTitle {{ color: {c['text']}; font-size: 28px; {title_rule} }}
     QLabel#sheetTitle {{ color: {c['text']}; font-size: 22px; {title_rule} }}
@@ -110,7 +112,7 @@ def stylesheet(appearance: str | None = None) -> str:
     QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox {{
         background-color: {c['fill_control']}; color: {c['text']};
         border: 1px solid {control_line}; border-radius: 9px; padding: 6px 10px;
-        selection-background-color: {c['accent']}; selection-color: #FFFFFF; }}
+        selection-background-color: {c['button_fill']}; selection-color: #FFFFFF; }}
     QLineEdit:hover, QTextEdit:hover, QPlainTextEdit:hover, QSpinBox:hover, QComboBox:hover {{
         border-color: {control_line_hover}; }}
     QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {{
@@ -149,7 +151,7 @@ def stylesheet(appearance: str | None = None) -> str:
     QComboBox {{ padding-right: 26px; }}
     QComboBox::drop-down {{ border: none; width: 24px; }}
     QComboBox QAbstractItemView {{ background: {c['surface']}; border: 1px solid {control_line}; border-radius: 8px;
-        selection-background-color: {c['accent']}; selection-color: #FFFFFF; padding: 4px; }}
+        selection-background-color: {c['button_fill']}; selection-color: #FFFFFF; padding: 4px; }}
 
     /* Buttons: capsules ------------------------------------------------- */
     QPushButton {{ background: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 {primary_top}, stop:1 {c['button_fill']});
@@ -216,7 +218,7 @@ def stylesheet(appearance: str | None = None) -> str:
     QCheckBox, QRadioButton {{ spacing: 8px; padding: 3px 0; color: {c['text']}; background: transparent; }}
     QCheckBox::indicator {{ width: 16px; height: 16px; border: 1px solid {control_line_hover}; border-radius: 5px;
         background-color: {c['fill_control']}; }}
-    QCheckBox::indicator:checked {{ border-color: {c['accent']}; background-color: {c['accent']}; image: url("{check_icon}"); }}
+    QCheckBox::indicator:checked {{ border-color: {c['button_fill']}; background-color: {c['button_fill']}; image: url("{check_icon}"); }}
     QTabWidget::pane {{ border: none; background: transparent; }}
     QTabBar::tab {{ background: transparent; color: {c['text_muted']}; padding: 7px 12px; border: none; }}
     QTabBar::tab:selected {{ color: {c['text']}; font-weight: 600; }}
@@ -225,7 +227,7 @@ def stylesheet(appearance: str | None = None) -> str:
     QMenu {{ background-color: {c['glass_thick']}; color: {c['text']}; border: 1px solid {control_line};
         border-radius: 10px; padding: 5px; }}
     QMenu::item {{ padding: 6px 22px 6px 12px; border-radius: 6px; }}
-    QMenu::item:selected {{ background-color: {c['accent']}; color: #FFFFFF; }}
+    QMenu::item:selected {{ background-color: {c['button_fill']}; color: #FFFFFF; }}
     QMenu::item:disabled {{ color: {c['disabled']}; }}
     QMenu::separator {{ height: 1px; background-color: {c['separator']}; margin: 4px 8px; }}
     QMenuBar {{ background-color: transparent; color: {c['text']}; }}
@@ -275,15 +277,15 @@ def color_for_status(status: str, appearance: str | None = None) -> tuple[str, s
         "applied": (c["green"], c["green_soft"]),
         "needs_human": (c["amber"], c["amber_soft"]),
         "failed": (c["red"], c["red_soft"]),
-        "queued": (c["accent_text"], c["accent_soft"]),
-        "applying": (c["accent_text"], c["accent_soft"]),
+        "queued": (c["info"], c["info_soft"]),
+        "applying": (c["info"], c["info_soft"]),
         "dry_run": (c["indigo"], c["indigo_soft"]),
         # prepared applications
-        "prepared": (c["accent_text"], c["accent_soft"]),
-        "ready": (c["accent_text"], c["accent_soft"]),
+        "prepared": (c["info"], c["info_soft"]),
+        "ready": (c["info"], c["info_soft"]),
         "needs_answers": (c["amber"], c["amber_soft"]),
         "approved": (c["indigo"], c["indigo_soft"]),
-        "sending": (c["accent_text"], c["accent_soft"]),
+        "sending": (c["info"], c["info_soft"]),
         "sent": (c["green"], c["green_soft"]),
         "practice": (c["indigo"], c["indigo_soft"]),
         "unconfirmed": (c["amber"], c["amber_soft"]),

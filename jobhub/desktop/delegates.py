@@ -200,7 +200,7 @@ def score_color(score: float) -> str:
     if score >= 75:
         return colors["green"]
     if score >= 55:
-        return colors["accent"]
+        return colors["info"]   # blue, so the bands stay distinct from the gold highlight and amber
     if score >= 35:
         return colors["amber"]
     return colors["text_subtle"]
@@ -262,7 +262,7 @@ class ActionDelegate(QStyledItemDelegate):
             "retry": (colors["amber"], colors["amber_soft"]),
         }.get(kind, (colors["text"], colors["fill_quiet"]))
         if hovered and kind == "apply":
-            fg, bg = "#FFFFFF", colors["accent"]
+            fg, bg = "#FFFFFF", colors["button_fill"]
         elif hovered:
             bg = with_alpha(bg, min(1.0, qcolor(bg).alphaF() + 0.18))
         font = ui_font(12, QFont.Weight.DemiBold)

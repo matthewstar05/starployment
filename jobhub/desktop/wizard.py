@@ -141,7 +141,7 @@ class StepIndicator(QWidget):
                 if current:
                     painter.setBrush(with_alpha(colors["accent"], 0.18))
                     painter.drawEllipse(circle.adjusted(-4, -4, 4, 4))
-                painter.setBrush(qcolor(colors["accent"]))
+                painter.setBrush(qcolor(colors["button_fill"]))   # carries a white numeral
                 painter.drawEllipse(circle)
             else:
                 painter.setBrush(qcolor(colors["surface"]))

@@ -187,6 +187,15 @@ def ui_font(pixel_size: int, weight: QFont.Weight = QFont.Weight.Normal) -> QFon
     return font
 
 
+def display_font(pixel_size: int, weight: QFont.Weight = QFont.Weight.Normal) -> QFont:
+    """Title font at an exact pixel size: Claude's serif, or the interface font with System type."""
+    family = fonts.display_family()
+    font = QFont(family) if family else QFont()
+    font.setPixelSize(pixel_size)
+    font.setWeight(weight)
+    return font
+
+
 # --------------------------------------------------------------------------- painting
 
 @lru_cache(maxsize=2)
@@ -595,7 +604,9 @@ class _NavDelegate(QStyledItemDelegate):
                 "accent": (colors["accent_text"], colors["accent_soft"]),
             }.get(tone, (colors["text_muted"], colors["fill_quiet"]))
             paint_pill(painter, badge_rect, badge, fg, bg, font)
-        font = ui_font(13, QFont.Weight.DemiBold if selected else QFont.Weight.Medium)
+        # Page names share the serif of the app title when Claude's type is in use.
+        serif = fonts.active() == fonts.CLAUDE
+        font = display_font(14 if serif else 13, QFont.Weight.DemiBold if selected else QFont.Weight.Medium)
         painter.setFont(font)
         painter.setPen(qcolor(colors["text"]))
         text_rect = QRectF(text_left, rect.top(), rect.right() - text_left - badge_width - 12, rect.height())
