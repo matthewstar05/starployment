@@ -128,6 +128,10 @@ class AddPostingSheet(QDialog):
         return self.url.text().strip()
 
 
+ATS_NAMES = {"workday": "Workday", "linkedin": "LinkedIn", "indeed": "Indeed", "smartrecruiters": "SmartRecruiters",
+             "icims": "iCIMS", "workable": "Workable"}
+
+
 class JobsView(QWidget):
     apply_requested = Signal(str)
     prepare_requested = Signal(str)
@@ -395,9 +399,13 @@ class JobsView(QWidget):
             action = QTableWidgetItem({"apply": "Prepare", "review": "Review", "retry": "Retry", "view": "View"}[kind])
             action.setData(ACTION_ROLE, "apply" if kind == "review" else kind)
             action.setData(Qt.ItemDataRole.UserRole, kind)
-            action.setToolTip({"apply": "Prepare this application for your review",
-                               "review": "Review the prepared application",
-                               "retry": "Try this application again", "view": "Open the posting"}[kind])
+            tip = {"apply": "Prepare this application for your review", "review": "Review the prepared application",
+                   "retry": "Try this application again", "view": "Open the posting"}[kind]
+            if kind == "view" and job.status == "new":
+                # Only Greenhouse, Lever, and Ashby forms can be filled here.
+                site = ATS_NAMES.get(job.ats, "This employer's")
+                tip = f"{site} applications are filled on the employer's site. Open the posting to apply there."
+            action.setToolTip(tip)
             for column, item in enumerate((role, posted, pay, match, status, action)):
                 self.table.setItem(row, column, item)
             if job.id == selected:

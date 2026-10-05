@@ -154,6 +154,13 @@ def scan_once() -> dict:
                     db.add_event(f"Source {name} failed: {error}", "warn")
         if enabled and not successful:
             status = "error"
+        try:
+            from .sources.base import resolve_hosted_greenhouse
+            hosted = resolve_hosted_greenhouse(jobs)
+            if hosted:
+                log.append(f"linked {hosted} careers-page posting(s) to their Greenhouse boards")
+        except Exception as error:  # noqa: BLE001 - never lose a scan over this
+            log.append(f"careers-page links: WARNING {error}")
         by_key: dict[str, Job] = {}
         for job in jobs:
             if not job.url:

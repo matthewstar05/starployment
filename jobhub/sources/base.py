@@ -119,6 +119,58 @@ def client(timeout: float = 25.0, *, follow_redirects: bool = True) -> httpx.Cli
                         follow_redirects=follow_redirects)
 
 
+# Greenhouse postings listed on a company's own careers page ("seatgeek.com/jobs/123?gh_jid=123")
+# belong to a Greenhouse board the link does not name. Given only the job id, Greenhouse's
+# application embed redirects to "?for=<board>", which makes the posting preparable like
+# any board posting. Answers are cached for the life of the process ("" = no such job).
+_GREENHOUSE_BOARD_OF: dict[str, str] = {}
+_BOARD_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
+
+
+def _greenhouse_board_for(job_id: str) -> str | None:
+    if job_id in _GREENHOUSE_BOARD_OF:
+        return _GREENHOUSE_BOARD_OF[job_id]
+    try:
+        with client(15.0) as http:
+            response = http.get(f"https://boards.greenhouse.io/embed/job_app?token={job_id}")
+    except httpx.HTTPError:
+        return None   # try again in a later scan
+    from urllib.parse import parse_qs, urlsplit
+
+    board = (parse_qs(urlsplit(str(response.url)).query).get("for") or [""])[0] if response.status_code == 200 else ""
+    _GREENHOUSE_BOARD_OF[job_id] = board if _BOARD_NAME.match(board) else ""
+    return _GREENHOUSE_BOARD_OF[job_id]
+
+
+def resolve_hosted_greenhouse(jobs: list, workers: int = 8) -> int:
+    """Point careers-page links that carry ``gh_jid`` at their Greenhouse board. Returns how many."""
+    from urllib.parse import parse_qs, urlsplit
+
+    pending: dict[str, list] = {}
+    for job in jobs:
+        if job.ats in ("greenhouse", "lever", "ashby"):
+            continue
+        for url in (job.apply_url, job.url):
+            job_id = (parse_qs(urlsplit(url or "").query).get("gh_jid") or [""])[0]
+            if job_id.isdigit():
+                pending.setdefault(job_id, []).append(job)
+                break
+    if not pending:
+        return 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        boards = dict(zip(pending, pool.map(_greenhouse_board_for, pending)))
+    resolved = 0
+    for job_id, board in boards.items():
+        if not board:
+            continue
+        for job in pending[job_id]:
+            job.ats = "greenhouse"
+            job.apply_url = f"https://job-boards.greenhouse.io/{board}/jobs/{job_id}"
+            job.raw = {**(job.raw or {}), "slug": board, "gh_id": job_id}
+            resolved += 1
+    return resolved
+
+
 def strip_html(s: str | None) -> str:
     if not s:
         return ""

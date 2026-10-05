@@ -680,6 +680,13 @@ contrast) and look at the screenshots.
   Audit with `--answers loose` (saved answers such as "Flexible" and
   "Negotiable") as well as the default exact values; the Dexmate failure
   (2026-10-04) passed every exact-value audit.
+- Simplify lists some Greenhouse jobs by the employer's careers page
+  (`seatgeek.com/jobs/123?gh_jid=123`). Each scan points those at their board
+  (`sources.base.resolve_hosted_greenhouse`: Greenhouse's application embed
+  redirects a bare job id to `?for=<board>`, cached per process), so they are
+  preparable and dedupe with the board's own listing. Jobs on other systems
+  (Workday, LinkedIn, Indeed, iCIMS...) stay "View": the Jobs action tooltip
+  says the application is filled on the employer's site.
 - New bundled boards go in `config.CATALOG_ADDITIONS` with a bumped
   `CATALOG_VERSION`; existing installs receive only the additions, once.
 - ZipRecruiter blocks JobSpy (HTTP 403) and RemoteOK can fail DNS on some
