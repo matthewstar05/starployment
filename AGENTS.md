@@ -196,7 +196,7 @@ interpreter is equivalent.
 | Desktop tests only | `QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q tests/test_desktop_*.py tests/test_application_notes.py` |
 | Lint | `uvx ruff check --select F,E9,B --ignore B008,B905,B904 jobhub packaging scripts tests` (unused `app = QApplication(...)` in tests is intentional) |
 | Screenshots of every view | `.venv/bin/python scripts/render_screenshots.py` → `tmp/screenshots/` (`--docs` refreshes `docs/screenshots/`) |
-| Audit the send pipeline on real forms | `.venv/bin/python scripts/form_audit.py --api 300 --live 50` → `tmp/form_audit/` (practice mode, fictional candidate, uploads and submits blocked; `--skip N` for a fresh sample, `--urls` for specific postings) |
+| Audit the send pipeline on real forms | `.venv/bin/python scripts/form_audit.py --api 300 --live 50` → `tmp/form_audit/` (practice mode, fictional candidate, uploads and submits blocked; `--skip N` for a fresh sample, `--urls` for specific postings, `--answers loose` for phrase answers such as "Flexible") |
 | Build the app bundle | `.venv/bin/python packaging/build_desktop.py` → `dist/Starployment.app` |
 | Smoke-test the bundle | `.venv/bin/python packaging/smoke_bundle.py` |
 | Build, install to /Applications, relaunch | `.venv/bin/python packaging/install_app.py --build` (end of every iteration; flags: `--launch`, `--no-launch`, `--wait SECONDS`) |
@@ -360,8 +360,8 @@ motion and minimal chrome. Concretely:
   capsules. Cards use radius 16–18, grouped settings 14, and rows 10–12. Corner
   radii nest: inner radius is roughly outer radius minus the padding.
 - **Type.** Claude's typefaces by default (Settings → Appearance → Font):
-  Anthropic Sans for interface text and Anthropic Serif (weight 500) for page,
-  sheet, and hero titles. `desktop/fonts.py` registers them at runtime from an
+  Anthropic Sans for interface text and Anthropic Serif for page, sheet, and
+  hero titles, the sidebar's app name, and its page names (`widgets.display_font`). `desktop/fonts.py` registers them at runtime from an
   installed `/Applications/Claude.app`; they are licensed to Anthropic, so never
   copy, bundle, commit, or embed them (resume PDFs use standard Helvetica).
   Without the Claude app, or with Font → System, the system UI font
@@ -369,8 +369,11 @@ motion and minimal chrome. Concretely:
   `styles.app_font` / `widgets.ui_font` at paint time, never a hard-coded family.
   Sizes in px: 28 page titles, 15 semibold card titles, 13 body, 12 secondary,
   11 captions and eyebrows. Select label roles with `objectName` (see §5.4).
-- **Color.** Semantic tones only: accent (blue), green (applied/success), amber
-  (needs review/warning), red (issue/error), indigo (practice runs/tracked).
+- **Color.** Semantic tones only: accent (dark gold, the highlight: selection,
+  focus, switches, links, buttons; white text sits only on `button_*` fills),
+  info (blue: applications in progress and mid-range scores, kept apart from
+  gold and amber), green (applied/success), amber (needs review/warning), red
+  (issue/error), indigo (practice runs/tracked, Luna's notes).
   Status colors come from `styles.color_for_status`; tone pairs from
   `widgets.tone_colors`.
 - **Copy.** Sentence case, short, calm, specific. Say what happened and what to
@@ -643,7 +646,16 @@ contrast) and look at the screenshots.
   searches, then "Other"); Greenhouse consent boxes (`data_compliance`), read
   ahead with their standard wording; Yes/No questions rendered as boxes;
   answers approved for one send (`answers.approved_answers`) may tick an
-  acknowledgement box, saved answers never can.
+  acknowledgement box, saved answers never can. From the 2026-10-04 loose-answer
+  audit: jQuery Chosen lists (the hidden real `<select>` is filled, as with
+  select2); cookie banners over an embedded form (career sites that iframe
+  Greenhouse) are hidden, never answered, because a covered option swallows
+  the click while the browser reports success; a checkbox inside a block of
+  other inputs (Ashby's Education History "Still student?") is a part of that
+  block, not a required question; a fill that times out is retried once in the
+  next pass; employment start month/year lists come from the saved
+  availability, "U.S. person" from a confirmed citizen-or-permanent-resident
+  yes, and "current or most recent employer" from the resume's latest role.
 - Ashby renders "select all that apply" as `fieldset.ashby-application-form-input-checkbox-group`
   and dates as a react-datepicker text input. The engine labels each box
   "<question> - <option>" (matching `prepare.expand_answer`) and types dates
@@ -652,6 +664,22 @@ contrast) and look at the screenshots.
   add a group's boxes to a draft as separate questions
   (`prepare.drop_option_duplicates`), and keep AI Autofill answers when a
   draft is re-answered (`answer_questions` skips `you`, `luna`, `autofill`).
+- Typed fields refuse text that is not their type, and a refused field only
+  surfaces at Submit. Ashby publishes Date, Number, Email, Phone, and Url types
+  (`prepare._ASHBY_FORMATS` → `question["format"]`); the engine records each
+  input's HTML type (`inputType`). `answers.fit_answer` is the one place an
+  answer is fitted: MM/DD/YYYY for dates, the candidate's own figure as digits
+  ("$120k" → 120000), https:// for web addresses. An answer that cannot fit
+  ("Negotiable" in a number box) leaves the question open with a note, so the
+  draft asks before sending. A start-date picker turns an availability phrase
+  ("Flexible", "ASAP", "2 weeks notice") into its date on the day the form is
+  sent (`answers.availability_date`), never at preparation, so a waiting draft
+  cannot go stale. Luna and AI Autofill are told each format and checked with
+  the same function. Ashby's optional "Autofill from resume" upload is skipped:
+  its parsing locks the form for seconds and can overwrite entered answers.
+  Audit with `--answers loose` (saved answers such as "Flexible" and
+  "Negotiable") as well as the default exact values; the Dexmate failure
+  (2026-10-04) passed every exact-value audit.
 - New bundled boards go in `config.CATALOG_ADDITIONS` with a bumped
   `CATALOG_VERSION`; existing installs receive only the additions, once.
 - ZipRecruiter blocks JobSpy (HTTP 403) and RemoteOK can fail DNS on some

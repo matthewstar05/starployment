@@ -18,7 +18,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from . import config, db
-from .answers import Q, missing_answer as missing, rule_answer, us_date
+from .answers import FORMAT_NAMES, Q, fit_answer, missing_answer as missing, rule_answer
 from .models import Job, Profile
 from .sources.base import client, strip_html
 from .sources.import_job import parse_job_url
@@ -374,6 +374,9 @@ _ASHBY_QUERY = """query ApiJobPosting($organizationHostedJobsPageName: String!, 
 _ASHBY_KINDS = {"String": "text", "Email": "text", "Phone": "text", "SocialLink": "text", "Url": "text", "Number": "text",
                 "Date": "text", "LongText": "textarea", "Boolean": "radio", "ValueSelect": "select",
                 "MultiValueSelect": "checkbox", "File": "file", "Location": "combobox"}
+# Ashby validates these types in the browser; a date picker takes only MM/DD/YYYY.
+_ASHBY_FORMATS = {"Date": "date", "Number": "number", "Email": "email", "Phone": "phone", "Url": "url",
+                  "SocialLink": "url"}
 
 
 def ashby_questions(job: Job) -> list[dict]:
@@ -398,8 +401,8 @@ def ashby_questions(job: Job) -> list[dict]:
                 v.get("label") for v in field.get("selectableValues") or [] if isinstance(v, dict)]
             out.append(_question(len(out) + 1, field.get("title") or "", kind, options,
                                  entry.get("isRequired") is True, str(field.get("path") or "")))
-            if field.get("type") == "Date":
-                out[-1]["format"] = "date"   # a date picker: answered as MM/DD/YYYY
+            if fmt := _ASHBY_FORMATS.get(str(field.get("type"))):
+                out[-1]["format"] = fmt   # a typed field: its answer is checked before sending
     return out
 
 
@@ -442,15 +445,22 @@ def answer_questions(questions: list[dict], profile: Profile, settings: dict, jo
             if single is not None and single.value not in (None, ""):
                 answer = type(single)([single.value], single.source)
         if answer is None or answer.value in ("", None, []):
-            question.update(answer=None, source="none", approved=False)
+            question.update(answer=None, source="none", approved=False, note="")
             continue
         value = answer.value
         declined = isinstance(value, str) and re.search(r"decline|prefer not|don.?t wish|not to (?:say|answer|disclose)",
                                                         value, re.I)
         source = {"user": "saved", "rule": "profile", "resume": "resume"}.get(answer.source, "profile")
-        if question.get("format") == "date" and isinstance(value, str):
-            value = us_date(value) or value   # show exactly what the date picker will receive
-        question.update(answer=value, source="declined" if declined else source, approved=True)
+        # A typed field (a date picker, a number box) refuses text that is not its type.
+        # Show exactly what it will receive, or ask now instead of failing at Submit.
+        fitted = fit_answer(question.get("format"), question.get("label", ""), value)
+        if fitted is None:
+            question.update(answer=None, source="none", approved=False,
+                            note=f"Needs {FORMAT_NAMES[question['format']]}; your saved answer “{value}” "
+                                 "doesn't fit this field")
+            continue
+        value, note = fitted
+        question.update(answer=value, source="declined" if declined else source, approved=True, note=note)
     return questions
 
 

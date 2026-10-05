@@ -10,7 +10,7 @@ import pytest
 
 from jobhub import db, prepare, scheduler
 from jobhub.answers import form_date, missing_answer, us_date
-from jobhub.models import Education, Job, Profile
+from jobhub.models import Education, Experience, Job, Profile
 
 GROUP = "What type of work are you most interested in? Select 2."
 WORK = ["Applied AI (NY, SF)", "Backend (SF)", "Data (SF)", "Open to Anything "]
@@ -168,3 +168,91 @@ def test_autofill_can_leave_a_single_checkbox_unticked(candidate, monkeypatch):
     assert out["q1"]["answer"] is False and out["q2"]["answer"] is True
     assert "single checkbox (true or false)" in prompts[0]
     assert "select all that apply" not in prompts[0].split("QUESTIONS")[-1]
+
+
+# ------------------------------------------------------------------ typed fields (the Dexmate send)
+def test_saved_answers_are_fitted_to_typed_fields_or_asked_for_before_sending(candidate):
+    from jobhub.answers import fit_answer
+
+    settings = {"answers": {"available_start": "Flexible", "salary_expectation": "Negotiable",
+                            "confirmed_fields": ["available_start", "salary_expectation"]}}
+    questions = [prepare._question(1, "What's your earliest start date?", "text", [], True, "start"),
+                 prepare._question(2, "What is your expected salary?", "text", [], True, "pay")]
+    questions[0]["format"], questions[1]["format"] = "date", "number"
+    profile = db.get_profile()
+    start, pay = prepare.answer_questions(questions, profile, settings, candidate)
+    # "Flexible" stays as written and becomes the send date in the browser.
+    assert start["answer"] == "Flexible" and start["approved"] and "when the application is sent" in start["note"]
+    # A phrase cannot go into a number box: the draft asks for it now, not at Submit.
+    assert pay["answer"] is None and missing_answer(pay) and "Needs a number" in pay["note"]
+    assert prepare.draft_status([start, pay]) == "needs_answers"
+
+    assert fit_answer("number", "Salary", "$100k - $130k") == ("100000", "Entered as 100000 from “$100k - $130k”")
+    assert fit_answer("date", "Graduation date", "Flexible") is None   # only start dates mean "now"
+    assert fit_answer("url", "LinkedIn", "linkedin.com/in/ada")[0] == "https://linkedin.com/in/ada"
+    assert fit_answer("email", "Email", "not an email") is None
+
+
+def test_availability_phrases_have_one_date_counted_from_the_send_day():
+    from datetime import date
+    from jobhub.answers import availability_date
+
+    day = date(2026, 10, 5)
+    assert availability_date("Earliest start date", "Flexible", day)[0] == day
+    assert availability_date("When can you start?", "ASAP", day)[0] == day
+    assert availability_date("Available start date", "Two weeks notice", day)[0] == date(2026, 10, 19)
+    assert availability_date("Start date", "1 month", day)[0] == date(2026, 11, 4)
+    assert availability_date("Graduation date", "Flexible", day) is None
+    assert availability_date("Start date", "After my internship ends", day) is None
+
+
+def test_ashby_typed_fields_are_marked_and_luna_must_match_them(monkeypatch):
+    from jobhub.luna import _question_entry, _validated
+
+    payload = {"data": {"jobPosting": {"applicationForm": {"sections": [{"fieldEntries": [
+        {"isRequired": True, "field": {"type": t, "title": t, "path": t}} for t in ("Number", "Url", "Email", "Date")]}]}}}}
+
+    class Client:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, *args, **kwargs):
+            return type("R", (), {"raise_for_status": lambda self: None, "json": lambda self: payload})()
+
+    monkeypatch.setattr(prepare, "client", lambda **kw: Client())
+    job = Job(source="a", ats="ashby", company="A", title="T",
+              url="https://jobs.ashbyhq.com/a/0e5c4b0a-1234-4cde-8f00-123456789abc")
+    number, url, email, when = prepare.ashby_questions(job)
+    assert [q["format"] for q in (number, url, email, when)] == ["number", "url", "email", "date"]
+    assert "MM/DD/YYYY" in _question_entry(when, Profile(), job)["format"]
+    assert _validated(when, "Soon") is None and _validated(when, "June 1, 2026") == "06/01/2026"
+    assert _validated(number, "about 3") == "3" and _validated(number, "a few") is None
+
+
+def test_employment_start_us_person_and_recent_employer_come_from_saved_facts():
+    from datetime import date
+    from jobhub.answers import MONTHS, Q, rule_answer
+
+    profile = Profile(first_name="Ada", experience=[Experience(company="Northbeam", title="Intern", end="Sep 2025")],
+                      education=[Education(school="Example U", start="Sep 2022", end="May 2026")])
+    settings = {"answers": {"available_start": "Flexible", "us_citizen_or_permanent_resident": "Yes",
+                            "confirmed_fields": ["available_start", "us_citizen_or_permanent_resident"]}}
+    today = date.today()
+    # Jane Street's "ft_employment_start_month/year": a saved "Flexible" is this month.
+    month = rule_answer(Q(label="ft_employment_start_month", kind="select", options=MONTHS), profile, settings, None)
+    year = rule_answer(Q(label="ft_employment_start_year", kind="text"), profile, settings, None)
+    assert (month.value, year.value) == (MONTHS[today.month - 1], str(today.year))
+    school_month = rule_answer(Q(label="Education start month", kind="select", options=MONTHS), profile, settings, None)
+    assert school_month.value == "September"   # a school's start month is still the school's
+    # Every U.S. citizen and permanent resident is a "U.S. person"; a "No" leaves it to the candidate.
+    us_person = Q(label="Are you a U.S. person, which means you are one of the following: U.S. citizen; U.S. national",
+                  kind="radio", options=["Yes", "No"])
+    assert rule_answer(us_person, profile, settings, None).value == "Yes"
+    settings["answers"]["us_citizen_or_permanent_resident"] = "No"
+    assert rule_answer(us_person, profile, settings, None) is None
+    # "Current or most recent": the resume's latest role; "current" alone needs a current role.
+    assert rule_answer(Q(label="Current or most recent employer", kind="text"), profile, settings, None).value == "Northbeam"
+    assert rule_answer(Q(label="Current employer", kind="text"), profile, settings, None) is None

@@ -13,7 +13,7 @@ import re
 from typing import Any
 
 from .agents import AgentError, complete
-from .answers import pick_option, relevant_skills
+from .answers import fit_answer, pick_option, relevant_skills
 from .llm import extract_json
 from .models import Job, Profile
 
@@ -112,11 +112,18 @@ cover-letter template.
 - Do not repeat the question or recite the company's mission back to them."""
 
 
+# Typed fields refuse anything else, so Luna is told the format and her answer is checked (fit_answer).
+_FORMAT_HINTS = {"date": "a date as MM/DD/YYYY", "number": "a number, digits only", "email": "an email address",
+                 "url": "a full web address", "phone": "a phone number"}
+
+
 def _question_entry(question: dict, profile: Profile, job: Job) -> dict[str, Any]:
     """One question as Luna sees it; free-text questions carry the few skills that fit them."""
     entry: dict[str, Any] = {"id": question["id"], "question": question["label"], "type": _question_type(question)}
     if question.get("options"):
         entry["options"] = list(question["options"])[:60]
+    if question.get("format") in _FORMAT_HINTS:
+        entry["format"] = _FORMAT_HINTS[question["format"]]
     if question.get("kind") in ("text", "textarea") and not question.get("options"):
         picked = relevant_skills(profile, job, question["label"], limit=4)
         if picked:
@@ -212,7 +219,8 @@ def _validated(question: dict, value: Any):
     if re.search(r"\[[A-Z][^\]]{1,40}\]|\{\{|lorem ipsum", value, re.I):
         return None   # an unfilled template is worse than no answer
     value = re.sub(r"\*\*|__|^#+\s*", "", value, flags=re.M)
-    return value[:MAX_TEXT]
+    fitted = fit_answer(question.get("format"), str(question.get("label") or ""), value[:MAX_TEXT])
+    return fitted[0] if fitted else None   # a date picker cannot take "Soon"
 
 
 def select_resume_content(profile: Profile, job: Job, settings: dict) -> dict | None:

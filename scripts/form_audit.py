@@ -64,6 +64,10 @@ CANDIDATE = Profile(
 ANSWERS = {"work_authorized_us": "Yes", "requires_sponsorship": "No", "us_citizen_or_permanent_resident": "Yes",
            "willing_to_relocate": "Yes", "salary_expectation": "120000", "available_start": "June 2026",
            "how_heard": "LinkedIn", "years_experience": "1"}
+# ``--answers loose``: saved answers written the way candidates often write them. Typed fields
+# (date pickers, number boxes) must still end up with a value they accept.
+LOOSE_ANSWERS = {**ANSWERS, "salary_expectation": "Negotiable", "available_start": "Flexible",
+                 "how_heard": "Job board", "years_experience": ""}
 ESSAY = ("At Northbeam I rebuilt a nightly reporting job as an Airflow pipeline, which cut it from three hours to "
          "forty minutes and let analysts see results before standup. I like work where a careful design makes a "
          "slow, fragile process quick and dependable, and this role looks like more of that.")
@@ -71,7 +75,7 @@ DECLINE = re.compile(r"decline|prefer not|don.?t wish|not to (?:say|answer|discl
 DEMOGRAPHIC = re.compile(r"gender|race|ethnic|hispanic|veteran|disab|sexual|orientation|pronoun|transgender", re.I)
 
 
-def setup_store() -> None:
+def setup_store(answers: dict | None = None) -> None:
     from reportlab.pdfgen import canvas
 
     db.init()
@@ -88,7 +92,8 @@ def setup_store() -> None:
     settings = db.get_settings()
     db.set_settings({"setup_complete": True, "dry_run": True, "resume_strategy": "original",
                      "target_titles": ["Software Engineer"],
-                     "answers": {**settings["answers"], **ANSWERS, "confirmed_fields": list(ANSWERS)}})
+                     "answers": {**settings["answers"], **(answers or ANSWERS),
+                                 "confirmed_fields": [k for k, v in (answers or ANSWERS).items() if v]}})
 
 
 def fictional_answer(question: dict):
@@ -112,8 +117,15 @@ def fictional_answer(question: dict):
         if re.search(r"previously (?:worked|employed|applied)|former|current employee|related to|relative", label, re.I):
             return no or options[-1]
         return next((o for o in options if o.strip().casefold() in {"yes", "yes."}), None) or options[0]
-    if question.get("format") == "date" or re.search(r"\bdate\b", label, re.I):
+    fmt = question.get("format")
+    if fmt == "date" or re.search(r"\bdate\b", label, re.I):
         return "06/01/2026"
+    if fmt == "number":
+        return "120000" if re.search(r"salary|compensation|pay", label, re.I) else "2"
+    if fmt == "email":
+        return CANDIDATE.email
+    if fmt == "phone":
+        return CANDIDATE.phone
     if re.search(r"linkedin", label, re.I):
         return CANDIDATE.linkedin
     if re.search(r"github|portfolio|website|url|link", label, re.I):
@@ -332,7 +344,8 @@ def practice(url: str) -> dict:
                       invalid=[line.split("Invalid after filling: ", 1)[1] for line in log
                                if "Invalid after filling: " in line],
                       unanswered=result.get("unanswered") or [],
-                      added=[q["label"] for q in (after or {}).get("questions", [])][record["read_ahead"]:])
+                      added=[q["label"] for q in (after or {}).get("questions", [])][record["read_ahead"]:],
+                      log=log)
     except Exception as error:  # noqa: BLE001
         record.update(status="crash", message=f"{type(error).__name__}: {str(error)[:300]}")
     return record
@@ -384,8 +397,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--skip", type=int, default=0, help="skip this many postings per provider (a fresh sample)")
     parser.add_argument("--db", type=Path, help="Starployment database to take postings from (read-only)")
     parser.add_argument("--urls", nargs="*", help="posting URLs instead of a database")
+    parser.add_argument("--answers", choices=("exact", "loose"), default="exact",
+                        help="saved answers as exact values, or as phrases such as Flexible and Negotiable")
     args = parser.parse_args(argv)
-    setup_store()
+    setup_store(LOOSE_ANSWERS if args.answers == "loose" else ANSWERS)
     rows = [("", "", url) for url in args.urls] if args.urls else snapshot_jobs(args.db)
     OUT.mkdir(parents=True, exist_ok=True)
     report: dict = {}

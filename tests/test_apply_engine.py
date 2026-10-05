@@ -591,6 +591,92 @@ def test_date_picker_reports_an_unreadable_date_instead_of_guessing(fixture_form
     assert page.locator("#grad").input_value() == ""
 
 
+# The Dexmate send stopped here: a start-date picker and the saved answer "Flexible".
+START_PICKER = DATE_PICKER.replace("Graduation Date", "What's your earliest start date?")
+
+
+def test_start_date_picker_turns_a_saved_availability_phrase_into_the_send_date(fixture_form):
+    from datetime import date, timedelta
+
+    fixture_form[1]["What's your earliest start date?"] = "Flexible"
+    result, page, _ = execute(fixture_form, START_PICKER, dry=True)
+    assert not result.unanswered
+    assert page.locator("#grad").input_value() == date.today().strftime("%m/%d/%Y")
+    assert page.locator("#grad").evaluate("e => e.validity.valid")
+    assert any("Entered “Flexible” as" in line for line in result.log)
+
+    fixture_form[1]["What's your earliest start date?"] = "2 weeks notice"
+    result, page, _ = execute(fixture_form, START_PICKER, dry=True)
+    assert page.locator("#grad").input_value() == (date.today() + timedelta(days=14)).strftime("%m/%d/%Y")
+
+
+def test_typed_inputs_receive_the_candidates_own_value_in_their_format(fixture_form):
+    fixture_form[1].update({"Expected salary": "$120k", "Portfolio website": "ada.example.test"})
+    result, page, _ = execute(fixture_form, '''
+      <label for="pay">Expected salary *</label><input id="pay" type="number" required>
+      <label for="site">Portfolio website</label><input id="site" type="url">''', dry=True)
+    assert not result.unanswered
+    assert page.locator("#pay").input_value() == "120000"
+    assert page.locator("#site").input_value() == "https://ada.example.test"
+    assert not any("Invalid after filling" in line for line in result.log)
+
+
+def test_a_phrase_for_a_number_field_is_reported_instead_of_typed(fixture_form):
+    fixture_form[1]["Expected salary"] = "Negotiable"
+    result, page, _ = execute(fixture_form, '''
+      <label for="pay">Expected salary *</label><input id="pay" type="number" required>''', dry=True)
+    assert result.unanswered == ["Expected salary (required)"]
+    assert any("“Negotiable” is not a number" in line for line in result.log)
+
+
+def test_ashby_autofill_from_resume_upload_is_skipped(fixture_form):
+    result, page, _ = execute(fixture_form, '''
+      <label for="parse">Autofill from resume</label><input id="parse" type="file">''', dry=True)
+    assert page.locator("#parse").evaluate("e => e.files.length") == 0
+    assert page.locator("#resume").evaluate("e => e.files.length") == 1
+    assert not result.unanswered
+
+
+def test_a_checkbox_inside_a_block_of_fields_is_not_its_own_required_question(fixture_form):
+    # Ashby's Education History: school, degree, dates, and an optional "Still student?" box.
+    fixture_form[1]["School"] = "Example University"
+    result, page, _ = execute(fixture_form, '''
+      <div class="ashby-application-form-field-entry">
+        <label class="ashby-application-form-question-title _required_x" for="edu-history">Education History</label>
+        <label for="school">School</label><input id="school" required>
+        <label for="still">Still student?</label><input id="still" type="checkbox">
+      </div>''', dry=True)
+    assert page.locator("#school").input_value() == "Example University"
+    assert not any("Invalid after filling" in line for line in result.log)
+    assert "would stop" not in result.message
+
+
+def test_a_cookie_banner_over_the_form_is_hidden_without_giving_consent(fixture_form):
+    result, page, _ = execute(fixture_form, before='''
+      <div id="banner" style="position:fixed;left:0;right:0;bottom:0;height:300px;background:#fff;z-index:9">
+        We use cookies to personalize your experience. <button onclick="window.accepted=1">Accept all</button>
+      </div>''', dry=True)
+    assert page.locator("#banner").evaluate("e => getComputedStyle(e).display") == "none"
+    assert page.evaluate("window.accepted") is None
+    assert any("no consent given" in line for line in result.log)
+
+
+def test_a_jquery_chosen_list_fills_its_hidden_real_select(fixture_form):
+    # Jane Street's start month: the <select> is hidden behind Chosen's stand-in and search box.
+    fixture_form[1]["Start month"] = "October"
+    result, page, _ = execute(fixture_form, '''
+      <label for="month">Start month *</label>
+      <select id="month" class="chosen-select" style="display:none" required>
+        <option value=""></option><option>January</option><option>October</option></select>
+      <div class="chosen-container" id="month_chosen" style="width:200px;height:30px">
+        <a class="chosen-single"><span>Select an option</span></a>
+        <div class="chosen-drop" style="position:absolute;left:-9999px">
+          <div class="chosen-search"><input class="chosen-search-input" type="text"></div></div></div>''', dry=True)
+    assert page.locator("#month").input_value() == "October"
+    assert not result.unanswered
+    assert not any("Could not fill" in line for line in result.log)
+
+
 def test_practice_run_names_what_would_stop_a_real_send(fixture_form):
     fixture_form[1]["Postal code"] = "not a code"
     result, _, _ = execute(fixture_form, '''
@@ -667,3 +753,17 @@ def test_school_suggestions_match_by_their_first_line_and_fall_back_to_other(fix
     result, page = _located(fixture_form, SCHOOL_SEARCH, dry=True)
     assert page.locator("#school").input_value() == "Other"
     assert any("chose Other" in line for line in result.log)
+
+
+def test_a_state_question_in_a_location_search_picks_the_state_itself():
+    # Crusoe's "Which state do you live in?" searches places: "California" also finds
+    # California City and four towns named California. The state is "California, United States".
+    from types import SimpleNamespace
+
+    options = ["California, United States", "California City, California, United States",
+               "California, Pennsylvania, United States", "California, Maryland, United States"]
+    us = SimpleNamespace(profile=Profile(country="United States"))
+    assert FormEngine._region_option(us, options, "California") == "California, United States"
+    unknown_country = SimpleNamespace(profile=Profile())
+    assert FormEngine._region_option(unknown_country, options, "California") == "California, United States"
+    assert FormEngine._region_option(us, options, "Ontario") is None

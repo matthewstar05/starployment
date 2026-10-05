@@ -183,6 +183,100 @@ def us_date(value: Any) -> str | None:
     return parsed[0].strftime("%m/%d/%Y") if parsed else None
 
 
+# A start-date question ("earliest start date", "when are you available") may be a date
+# picker while the candidate's saved answer is a phrase such as "Flexible" or "2 weeks
+# notice". Those phrases have one faithful date, counted from the day the form is sent.
+AVAILABILITY_LABEL_RE = re.compile(r"\bstart|availab|\bbegin|\bjoin|notice period|earliest|commence", re.I)
+_AVAILABLE_NOW_RE = re.compile(
+    r"^\s*(?:available\s+)?(?:immediately|immediate|asap|as soon as possible|now|right away|any ?time|flexible|"
+    r"open|whenever|today)\b", re.I)
+_AVAILABLE_AFTER_RE = re.compile(r"\b(\d{1,2}|one|two|three|four|five|six|eight)\s*(?:-\s*\d{1,2}\s*)?"
+                                 r"(day|week|month)s?\b", re.I)
+_SMALL_NUMBERS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "eight": 8}
+
+
+def availability_date(label: str, value: Any, today: "date | None" = None) -> tuple["date", str] | None:
+    """The date a start-date picker should receive for a saved availability phrase.
+
+    "Flexible", "Immediately", or "ASAP" mean the send date; "2 weeks notice" means two
+    weeks after it. Only start-date questions qualify, and anything else returns None.
+    """
+    from datetime import date, timedelta
+
+    text = " ".join(str(value or "").split())
+    if not text or not AVAILABILITY_LABEL_RE.search(label or ""):
+        return None
+    today = today or date.today()
+    if _AVAILABLE_NOW_RE.search(text):
+        return today, "available now"
+    match = _AVAILABLE_AFTER_RE.search(text)
+    if match and len(text) <= 40:
+        count = int(match.group(1)) if match.group(1).isdigit() else _SMALL_NUMBERS[match.group(1).lower()]
+        days = count * {"day": 1, "week": 7, "month": 30}[match.group(2).lower()]
+        return today + timedelta(days=days), f"{text}, counted from the day it is sent"
+    return None
+
+
+def _availability_part(q: Q, saved: Any, part: str) -> Answer | None:
+    """The month or year the candidate can start work, from a saved date or availability phrase."""
+    parsed = form_date(saved)
+    available = availability_date("start", saved)
+    when = parsed[0] if parsed else available[0] if available else None
+    if when is None:
+        return None
+    month = MONTHS[when.month - 1]
+    candidates = [str(when.year)] if part == "year" else [month, month[:3], f"{when.month:02d}", str(when.month)]
+    if not q.options:
+        return Answer(candidates[0], "user")
+    for candidate in candidates:
+        if picked := pick_option(q.options, candidate):
+            return Answer(picked, "user")
+    return None
+
+
+FORMAT_NAMES = {"date": "a date", "number": "a number", "email": "an email address", "url": "a web address",
+                "phone": "a phone number"}
+
+
+def fit_answer(fmt: str | None, label: str, value: Any) -> tuple[Any, str] | None:
+    """Fit an answer to a typed form field, or None when it cannot go there.
+
+    Returns ``(value, note)``; the note says what changed. A date becomes
+    MM/DD/YYYY. An availability phrase on a start-date question stays a phrase
+    and is dated when the form is sent (``availability_date``). A number keeps
+    the candidate's own figure as digits ("$120k" → 120000; a range gives its
+    low end). A web address gains https://. Nothing is invented: an answer that
+    does not contain the needed value returns None, so the draft asks for it.
+    """
+    if not fmt or not isinstance(value, str):
+        return value, ""
+    text = " ".join(value.split())
+    if fmt == "date":
+        if formatted := us_date(text):
+            return formatted, ""
+        if availability_date(label, text):
+            return text, f"“{text}” is entered as a date when the application is sent"
+        return None
+    if fmt == "number":
+        match = re.search(r"(\d[\d,]*(?:\.\d+)?)\s*(k\b)?", text, re.I)
+        if not match:
+            return None
+        number = float(match.group(1).replace(",", "")) * (1000 if match.group(2) else 1)
+        digits = str(int(number)) if number.is_integer() else f"{number:g}"
+        return digits, ("" if digits == text else f"Entered as {digits} from “{text}”")
+    if fmt == "email":
+        return (text, "") if re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", text) else None
+    if fmt == "url":
+        if re.match(r"https?://\S+$", text, re.I):
+            return text, ""
+        if re.fullmatch(r"(?:www\.)?[\w-]+(?:\.[\w-]+)+(?:/\S*)?", text):
+            return "https://" + text, ""
+        return None
+    if fmt == "phone":
+        return (text, "") if len(re.sub(r"\D", "", text)) >= 7 else None
+    return value, ""
+
+
 def _end_parts(e) -> tuple[str, str]:
     s = e.end or ""
     m = re.search(r"([A-Za-z]{3,9})\.?\s*(20\d\d)", s)
@@ -494,6 +588,12 @@ def rule_answer(q: Q, profile: Profile, settings: dict, job: Job | None) -> Answ
         label.rstrip("?. "),
     ):
         return known("us_citizen_or_permanent_resident")
+    # Export-control rules define a "U.S. person" to include every U.S. citizen and permanent
+    # resident, so a confirmed yes to that combined question answers this one. A no does not
+    # (refugees and asylees are U.S. persons too), so it stays with the candidate.
+    if matches(r"^(?:are you\s+)?(?:a\s+)?(?:u\.?\s?s\.?|united states)\s+person\b"):
+        saved = str(answers.get("us_citizen_or_permanent_resident") or "").strip().casefold()
+        return value("Yes") if "us_citizen_or_permanent_resident" in confirmed and saved in {"yes", "true"} else None
     if matches(r"citizenship|citizen|nationality|clearance|\b18\b|legal age|over the age|criminal|convict|felony|non.compete|relative|family member|offer deadline|previously applied|former employee|worked (here|for us)|currently employed by"):
         return None
     if matches(r"sponsor"):
@@ -643,6 +743,11 @@ def rule_answer(q: Q, profile: Profile, settings: dict, job: Job | None) -> Answ
         month_number = MONTHS.index(month) + 1 if month in MONTHS else 0
         season = "Spring" if 1 <= month_number <= 5 else "Fall" if 9 <= month_number <= 12 else ""
         return value(f"{season} {year}") if season and year else None
+    # When the candidate can start work, split into a month and a year ("ft_employment_start_month").
+    if matches(r"start.*(?:month|year)") and matches(r"employ|full.?time|\bft\b|^ft_|\bjob\b|\bwork|position|join") \
+            and not matches(r"school|universit|college|degree|education|stud"):
+        saved = answers.get("available_start") if "available_start" in confirmed else None
+        return _availability_part(q, saved, "month" if matches(r"start.*month") else "year")
     if matches(r"start.*month"):
         return value(_start_parts(e)[0] if e else "")
     if matches(r"start.*year"):
@@ -662,6 +767,9 @@ def rule_answer(q: Q, profile: Profile, settings: dict, job: Job | None) -> Answ
             return value(recent.title if re.search(r"title", q.id or q.name or "") else recent.company)
     if matches(r"current (company|employer)|current title|current role|most recent (company|employer)|company name"):
         current = [item for item in profile.experience if re.search(r"present|current", item.end, re.I)]
+        if not current and matches(r"most recent|previous|last (company|employer)"):
+            # "Current or most recent employer": the resume's first entry, as in the employment block.
+            current = [item for item in profile.experience if not item.hidden][:1]
         # Multiple current roles cannot be collapsed into one employer by guessing.
         if len(current) != 1:
             return None

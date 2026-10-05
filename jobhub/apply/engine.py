@@ -21,7 +21,8 @@ from urllib.parse import urlsplit, urlunsplit
 from playwright.sync_api import Page, sync_playwright
 
 from .. import config, db
-from ..answers import Answer, Q, US_STATES, form_date, llm_answers, pick_option, rule_answer
+from ..answers import (FORMAT_NAMES, Answer, Q, US_STATES, availability_date, fit_answer, form_date, llm_answers,
+                       pick_option, rule_answer)
 from ..models import ApplyResult, Job, Profile
 from .adapters import Adapter
 from .email_verification import EmailVerificationInbox
@@ -92,11 +93,15 @@ SCAN_JS = r"""
     if (e.disabled || e.getAttribute('aria-disabled') === 'true' ||
         ['hidden','submit','button','reset'].includes(type) && e.getAttribute('role') !== 'combobox') continue;
     if (seen.has(e)) continue;
-    // select2 draws a stand-in for a real <select>, which is what gets filled.
-    if (e.closest('.select2-container')) continue;
+    // select2 and jQuery Chosen draw a stand-in for a real <select>, which is what gets filled.
+    if (e.closest('.select2-container,.chosen-container')) continue;
+    const chosenWidget = e.tagName === 'SELECT' &&
+      (e.nextElementSibling?.classList?.contains('chosen-container') ? e.nextElementSibling
+        : e.id ? document.getElementById(e.id + '_chosen') : null);
     // Custom radios/checkboxes often hide the native control behind a visible label.
     const labeledVisible = [...(e.labels || [])].some(visible);
-    if (type !== 'file' && !visible(e) && !(['radio','checkbox'].includes(type) && labeledVisible)) continue;
+    if (type !== 'file' && !visible(e) && !(chosenWidget && visible(chosenWidget)) &&
+        !(['radio','checkbox'].includes(type) && labeledVisible)) continue;
     let rawLabel = labelFor(e);
     // Ashby's repeatable education block labels its fields "Start Date", "School"...
     if (e.closest('.ashby-application-form-input-education-entry') && !/education/i.test(rawLabel)) {
@@ -143,10 +148,16 @@ SCAN_JS = r"""
                               '.ashby-application-form-field-entry,.application-question');
       const members = group ? [...group.querySelectorAll('input[type=checkbox]')] : [];
       const title = group?.querySelector('legend,.ashby-application-form-question-title,.application-label');
+      // A box inside a block of other inputs (Ashby's Education History: school, degree, dates,
+      // and "Still student?") is one part of that block, not a question of its own: its
+      // required mark belongs to the block, and unticked is a real answer.
+      const composite = !!group?.querySelector(
+        'input:not([type=checkbox]):not([type=radio]):not([type=hidden]):not([type=file]),select,textarea');
+      if (composite && members.length === 1) rec.required = !!(e.required || e.getAttribute('aria-required') === 'true');
       // One box under its own question ("Please review the privacy policy" / "Acknowledge") is
       // labelled like a group option, matching how the question was prepared.
-      if (members.length > 1 || (members.length === 1 && title && clean(title.innerText) &&
-                                 clean(title.innerText) !== rec.label)) {
+      else if (members.length > 1 || (members.length === 1 && title && clean(title.innerText) &&
+                                      clean(title.innerText) !== rec.label)) {
         rec.groupLabel = clean(title?.innerText) || 'Checkbox choices';
         rec.groupEmpty = !members.some(m => m.checked);
         rec.groupMembers = members.map(idFor);
@@ -180,6 +191,27 @@ SCAN_JS = r"""
     out.push(rec);
   }
   return out;
+}
+"""
+
+# Cookie and consent banners float over the page. On a career site that embeds the form in
+# an iframe, a banner covering a dropdown swallows the click even though the browser reports
+# it as delivered. Hiding the banner gives no consent (no choice is clicked or sent); the
+# site treats an unanswered banner as "no" to optional cookies.
+HIDE_BANNERS_JS = r"""
+() => {
+  const consent = /cookie|consent|privacy (?:preferences|choices|settings)|we use (?:cookies|technologies)|gdpr/i;
+  let hidden = 0;
+  for (const e of document.querySelectorAll('body *')) {
+    const s = getComputedStyle(e);
+    if ((s.position !== 'fixed' && s.position !== 'sticky') || s.display === 'none' || e.offsetHeight < 40) continue;
+    if (e.querySelector('form, iframe, input[type=file], textarea')) continue;   // never the application itself
+    const text = (e.innerText || '').slice(0, 3000);
+    const marked = /onetrust|evidon|cookie|consent|truste|cybot|osano|didomi|usercentrics|qc-cmp/i
+      .test(e.id + ' ' + e.className);
+    if (marked || consent.test(text)) { e.style.setProperty('display', 'none', 'important'); hidden++; }
+  }
+  return hidden;
 }
 """
 
@@ -335,6 +367,7 @@ class FormEngine:
         self._filled: set[str] = set()
         self._answered_signatures: dict[tuple[str, str, str, str], object] = {}
         self._failures: dict[str, str] = {}
+        self._timeouts: dict[str, int] = {}   # fields whose fill timed out, retried once in a later pass
         self._opened_at = time.monotonic()
         self._rng = random.Random()
 
@@ -475,6 +508,7 @@ class FormEngine:
             self._shot(page, "noform")
             return self._result("needs_human", "No supported application form found. The job may be closed, login-gated, or use a different flow.")
         self.root = root
+        self._hide_banners(page)
         if self._captcha(page):
             self._shot(page, "captcha")
             return self._result("needs_human", "A CAPTCHA or security check must be completed manually.")
@@ -544,7 +578,12 @@ class FormEngine:
                         chosen.casefold().startswith(str(expected).casefold().strip() + ","))
         if field.get("datePicker"):
             actual, wanted = form_date(field.get("value")), form_date(expected)
+            if wanted is None and (available := availability_date(field["label"], expected)):
+                wanted = (available[0], True)
             return bool(actual and wanted and actual[0] == wanted[0])
+        fmt = "number" if kind == "number" else {"email": "email", "url": "url"}.get(str(field.get("type") or ""))
+        if fmt and (fitted := fit_answer(fmt, field["label"], str(expected))):
+            expected = fitted[0]   # compare with what was typed ("$120k" was entered as 120000)
         if field.get("type") == "tel" or re.search(r"\b(?:phone|mobile|telephone)\b", field["label"], re.I):
             actual_digits = re.sub(r"\D", "", str(field.get("value") or ""))
             expected_digits = re.sub(r"\D", "", str(expected))
@@ -671,6 +710,11 @@ class FormEngine:
             except Exception as exc:  # noqa: BLE001
                 self._failures[field["idx"]] = str(exc).splitlines()[0][:160]
                 self._log(f"Could not fill {question.label[:70]}: {self._failures[field['idx']]}")
+                if "Timeout" in self._failures[field["idx"]] and not self._timeouts.get(field["idx"]):
+                    # A form still settling (an overlay, a parse in progress) blocks clicks
+                    # for a moment. Try once more in the next pass.
+                    self._timeouts[field["idx"]] = 1
+                    self._tried.discard(field["idx"])
                 if not self._loc(page, field).count():
                     for remaining in fields[index:]:
                         self._tried.discard(remaining["idx"])
@@ -711,6 +755,10 @@ class FormEngine:
             return Answer(cover_letter_pdf(self.profile, self.job, self.settings), "rule")
         if re.search(r"cover|transcript|portfolio|other|additional|photo|picture", label):
             return None
+        if re.search(r"autofill|auto-fill|parse", label) and not question.required:
+            # Ashby's "Autofill from resume" only prefills the form. Its parsing locks the
+            # fields for several seconds and can overwrite answers already entered.
+            return None
         if re.search(r"resume|résumé|\bcv\b", label):
             return Answer(self.resume_path, "rule")
         return None
@@ -730,6 +778,13 @@ class FormEngine:
             return
         if kind in {"text", "number", "textarea"}:
             text = str(value)
+            fmt = {"number": "number", "email": "email", "url": "url"}.get(
+                "number" if kind == "number" else str(field.get("type") or ""))
+            if fmt:
+                fitted = fit_answer(fmt, question.label, text)
+                if fitted is None:
+                    raise RuntimeError(f"“{text}” is not {FORMAT_NAMES[fmt]}, which this field needs")
+                text = str(fitted[0])
             if locator.input_value() == text:
                 pass   # already correct (for example, the form's own resume autofill)
             elif human_pacing():
@@ -747,7 +802,7 @@ class FormEngine:
             else:
                 locator.fill(text)
             locator.press("Tab")
-            if locator.input_value() != str(value) and not locator.input_value().strip():
+            if locator.input_value() != text and not locator.input_value().strip():
                 raise RuntimeError("The form did not retain the supplied value")
             return
         if kind == "select":
@@ -759,8 +814,10 @@ class FormEngine:
                     self._log(f"{question.label}: not in the form's list, chose Other")
             if option is None:
                 raise RuntimeError("No unambiguous matching option")
-            # Lists enhanced by select2 keep the real <select> visually hidden.
+            # Lists enhanced by select2 or Chosen keep the real <select> visually hidden.
             locator.select_option(label=option, force=True)
+            locator.evaluate("e => { if (window.jQuery && e.classList.contains('chosen-select')) "
+                             "window.jQuery(e).trigger('chosen:updated'); }")   # redraw Chosen's stand-in
             return
         if kind == "checkbox":
             if not isinstance(value, bool):
@@ -818,6 +875,10 @@ class FormEngine:
         could submit the form.
         """
         parsed = form_date(text)
+        if parsed is None and (available := availability_date(str(field.get("label") or ""), text)):
+            # A saved "Flexible" or "2 weeks notice" becomes the date it means, as of today.
+            parsed = (available[0], True)
+            self._log(f"Entered “{text}” as {available[0]:%m/%d/%Y} ({available[1]})")
         if field.get("nativeDate"):
             if parsed is None:
                 raise RuntimeError(f"“{text}” is not a date this field accepts")
@@ -863,15 +924,39 @@ class FormEngine:
         return [text for text in (options.nth(i).inner_text().strip() for i in range(min(options.count(), 80)))
                 if text and not re.search(r"^no (options|results)", text, re.I)]
 
+    def _hide_banners(self, page: Page) -> None:
+        """Hide cookie and consent banners on the page and in the form's frame (see HIDE_BANNERS_JS)."""
+        hidden = 0
+        for scope in dict.fromkeys([page.main_frame, getattr(self.root, "page", None) and self.root]):
+            if scope is None:
+                continue
+            try:
+                hidden += int(scope.evaluate(HIDE_BANNERS_JS) or 0)
+            except Exception:  # noqa: BLE001 - a frame may be detached or the root a locator
+                pass
+        if hidden:
+            self._log("Hid a cookie banner covering the form (no consent given)")
+
     def _click_option(self, text: str) -> None:
         options = self.root.locator(self.OPT_SEL)
         for index in range(min(options.count(), 80)):
             if options.nth(index).inner_text().strip() == text:
                 if options.nth(index).get_attribute("aria-disabled") == "true":
                     raise RuntimeError("The matching option is disabled")
-                self._click(options.nth(index))
+                self._click(options.nth(index))   # never scroll first: many lists close on scroll
                 return
         raise RuntimeError("The matching option disappeared")
+
+    def _region_option(self, options: list[str], region: str) -> str | None:
+        """The one option that is exactly "<region>, <the candidate's country>"."""
+        countries = {self.profile.country.strip().casefold()} - {""}
+        us = {"united states", "united states of america", "us", "usa"}
+        if countries & us or region.strip().casefold() in {name.casefold() for name in US_STATES.values()}:
+            countries |= us
+        matches = [option for option in options
+                   if len(parts := [part.strip().casefold() for part in option.split(",")]) == 2
+                   and parts[0] == region.strip().casefold() and parts[1] in countries]
+        return matches[0] if len(matches) == 1 else None
 
     def _current_location_option(self, options: list[str]) -> str | None:
         """Select the candidate's exact city, region, and country if unique."""
@@ -921,6 +1006,11 @@ class FormEngine:
                            option.casefold().endswith(", " + country)]
                 if len(matches) == 1:
                     chosen = matches[0]
+            if chosen is None and re.search(r"\bstate\b|province|\bregion\b", question.label, re.I) and \
+                    not re.search(r"\bcity\b", question.label, re.I):
+                # A location search answers "California" with places named California;
+                # the state itself is listed as "California, United States".
+                chosen = self._region_option(options, value)
             # Catalog searches (schools, degrees) often match only a shorter prefix:
             # "California Polytechnic" finds "California Polytechnic State University - San Luis Obispo".
             words = re.sub(r"[^\w&' ]+", " ", value).split()
