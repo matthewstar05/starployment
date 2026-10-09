@@ -58,6 +58,7 @@ def test_profile_page_saves_library_answers_and_facts(store, make_pdf, monkeypat
     finally:
         controller.stop()
         window.close()
+        window.deleteLater()
 
 
 def test_resume_files_are_copied_into_the_library_and_matched_by_role(store, make_pdf, monkeypatch):
@@ -81,3 +82,4 @@ def test_resume_files_are_copied_into_the_library_and_matched_by_role(store, mak
     finally:
         controller.stop()
         window.close()
+        window.deleteLater()

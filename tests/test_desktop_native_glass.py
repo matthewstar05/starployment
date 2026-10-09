@@ -7,14 +7,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtWidgets import QApplication, QGraphicsOpacityEffect, QScrollArea, QWidget
+from PySide6.QtWidgets import QGraphicsOpacityEffect, QScrollArea, QWidget
 
 from jobhub.desktop import native_glass
 
-
-@pytest.fixture
-def app():
-    return QApplication.instance() or QApplication([])
 
 
 @pytest.mark.parametrize(

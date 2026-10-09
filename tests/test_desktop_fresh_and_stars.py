@@ -22,12 +22,6 @@ def posting(slug: str, number: int, *, company: str = "Example", hours: float | 
 
 
 @pytest.fixture
-def app():
-    from PySide6.QtWidgets import QApplication
-    return QApplication.instance() or QApplication([])
-
-
-@pytest.fixture
 def controller(store, app, monkeypatch):
     from jobhub import db, scheduler
     from jobhub.desktop.controller import DesktopController
@@ -40,6 +34,7 @@ def controller(store, app, monkeypatch):
     yield instance
     instance.stop()
     window.close()
+    window.deleteLater()
     scheduler.STATE.stop = False
 
 
@@ -62,12 +57,12 @@ def test_jobs_table_shows_posting_dates_stars_and_sorts_by_header(app):
     from jobhub.desktop.views.jobs import JobsView
 
     view = JobsView()
-    view.set_priority(["Google"])
-    google, other = posting("google", 1, company="Google"), posting("example", 2, hours=None)
-    view.set_jobs([google, other])
+    view.set_priority(["PriorityCo"])
+    priority_job, other = posting("p", 1, company="PriorityCo"), posting("example", 2, hours=None)
+    view.set_jobs([priority_job, other])
     assert view.table.horizontalHeaderItem(JobsView.POSTED).text() == "POSTED"
-    assert view.table.item(0, JobsView.POSTED).data(POSTED_AT_ROLE) == google.posted_at
-    assert view.table.item(0, JobsView.ROLE).data(STAR_ROLE) is True
+    assert view.table.item(0, JobsView.POSTED).data(POSTED_AT_ROLE) == priority_job.posted_at
+    assert view.table.item(0, JobsView.ROLE).data(STAR_ROLE) == "amber"
     assert view.table.item(1, JobsView.ROLE).data(STAR_ROLE) is False
     assert view.table.item(1, JobsView.POSTED).text() == "—"
 
@@ -85,6 +80,8 @@ def test_jobs_table_shows_posting_dates_stars_and_sorts_by_header(app):
 
     view.set_priority([])                                     # star follows the list
     assert view.table.item(0, JobsView.ROLE).data(STAR_ROLE) is False
+    view.close()
+    view.deleteLater()
 
 
 def test_posting_window_hides_older_rows_until_the_query_returns(app):
@@ -97,6 +94,8 @@ def test_posting_window_hides_older_rows_until_the_query_returns(app):
     assert view.posted_hours == 24
     view.set_jobs([], total_count=0)
     assert "24 hours" in view.header.subtitle_label.text()
+    view.close()
+    view.deleteLater()
 
 
 def test_controller_queries_jobs_with_the_window_and_sort(controller):
@@ -201,6 +200,8 @@ def test_applications_star_filter_hidden_rows_and_send_ready_count(app):
     view.draft_detail.star.click()
     assert toggled == [("g", False)]
     assert "1 application" in view.list_count.text()
+    view.close()
+    view.deleteLater()
 
 
 def test_context_actions_confirm_then_emit(app, monkeypatch):
@@ -221,6 +222,8 @@ def test_context_actions_confirm_then_emit(app, monkeypatch):
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.No)
     view._confirm_mark_sent({"kind": "draft", "id": 5, "job_id": "job-5"})
     assert sent == ["job-4"]
+    view.close()
+    view.deleteLater()
 
 
 def test_controller_star_mark_sent_hide_and_discard(controller):
@@ -267,3 +270,45 @@ def test_settings_page_edits_priority_companies_and_discovery(app):
     assert patches[0]["priority_companies"] == config.PRIORITY_COMPANIES
     view.set_board_count(42)
     assert "42 found so far" in view._discover_row.findChild(type(view.header.subtitle_label), "rowNote").text()
+    view.close()
+    view.deleteLater()
+
+
+def test_unpreparable_toggle_and_action_header(app):
+    from jobhub.desktop.views.jobs import JobsView
+    from jobhub.models import Job
+
+    view = JobsView()
+    # ATS greenhouse -> kind is 'apply' (preparable)
+    preparable = posting("greenhouse-co", 1, company="ApplyCo")
+    # ATS other -> kind is 'view' (unpreparable)
+    unpreparable = Job(source="custom", ats="custom", company="ViewCo", title="Software Engineer 2",
+                       url="https://example.com/jobs/2", location="Remote", score=80)
+    view.set_jobs([preparable, unpreparable])
+
+    # 1. When unpreparable_toggle is checked (True), both rows are visible
+    assert view.unpreparable_toggle.isChecked() is True
+    assert not view.table.isRowHidden(0)
+    assert not view.table.isRowHidden(1)
+
+    # 2. When unpreparable_toggle is toggled to False, row with kind=='view' is hidden, kind=='apply' remains visible
+    view.unpreparable_toggle.setChecked(False)
+    assert not view.table.isRowHidden(0)
+    assert view.table.isRowHidden(1)
+
+    # 3. When toggled back to True, row with kind=='view' is restored
+    view.unpreparable_toggle.setChecked(True)
+    assert not view.table.isRowHidden(0)
+    assert not view.table.isRowHidden(1)
+
+    # 4. Clicking the ACTION header toggles unpreparable_toggle
+    view._header_clicked(JobsView.ACTION)
+    assert view.unpreparable_toggle.isChecked() is False
+    assert view.table.isRowHidden(1)
+
+    view._header_clicked(JobsView.ACTION)
+    assert view.unpreparable_toggle.isChecked() is True
+    assert not view.table.isRowHidden(1)
+    view.close()
+    view.deleteLater()
+

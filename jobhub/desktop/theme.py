@@ -243,6 +243,9 @@ class ThemeManager:
         self.app = app
         self.appearance = normalize_appearance(appearance)
         self._requested_hint = Qt.ColorScheme.Unknown
+        self._applied_scheme: str | None = None
+        self._applied_appearance: str | None = None
+        self._applied_typeface: str | None = None
         app._jobhub_theme_manager = self
         # Connect once and retain this manager on QApplication so the callback remains alive.
         try:
@@ -255,12 +258,30 @@ class ThemeManager:
     def resolved(self) -> str:
         return resolve_appearance(self.appearance, self.app)
 
-    def set_appearance(self, appearance: str) -> str:
-        self.appearance = normalize_appearance(appearance)
-        self.apply()
+    def set_appearance(self, appearance: str, force: bool = False) -> str:
+        normalized = normalize_appearance(appearance)
+        if not force and normalized == self.appearance and self.resolved == self._applied_scheme:
+            return self.resolved
+        self.appearance = normalized
+        self.apply(force=force)
         return self.resolved
 
-    def apply(self) -> str:
+    def apply(self, force: bool = False) -> str:
+        from . import fonts
+
+        current_typeface = getattr(fonts, "active", lambda: None)()
+        scheme = self.resolved
+        if (
+            not force
+            and scheme == self._applied_scheme
+            and self.appearance == self._applied_appearance
+            and current_typeface == self._applied_typeface
+            and self.app.property("jobhubResolvedAppearance") == scheme
+            and self.app.property("jobhubAppearance") == self.appearance
+            and bool(self.app.styleSheet())
+        ):
+            return scheme
+
         desired_hint = {
             LIGHT: Qt.ColorScheme.Light,
             DARK: Qt.ColorScheme.Dark,
@@ -272,7 +293,6 @@ class ThemeManager:
                 self.app.styleHints().setColorScheme(desired_hint)
             except (AttributeError, RuntimeError):
                 pass
-        scheme = self.resolved
         colors = PALETTES[scheme]
         self.app.setProperty("jobhubAppearance", self.appearance)
         self.app.setProperty("jobhubResolvedAppearance", scheme)
@@ -289,19 +309,22 @@ class ThemeManager:
         # Custom-painted widgets cache scheme-dependent pixmaps; repaint them.
         for widget in self.app.allWidgets():
             widget.update()
+        self._applied_scheme = scheme
+        self._applied_appearance = self.appearance
+        self._applied_typeface = current_typeface
         return scheme
 
     def _system_appearance_changed(self, *_args) -> None:
-        if self.appearance == SYSTEM:
+        if self.appearance == SYSTEM and self.resolved != self._applied_scheme:
             self.apply()
 
 
-def apply_appearance(app: QApplication, appearance: str = SYSTEM) -> str:
+def apply_appearance(app: QApplication, appearance: str = SYSTEM, force: bool = False) -> str:
     """Apply appearance and retain a manager that can follow later OS changes."""
     manager = getattr(app, "_jobhub_theme_manager", None)
     if manager is None:
         manager = ThemeManager(app, appearance)
         app._jobhub_theme_manager = manager
     else:
-        manager.set_appearance(appearance)
+        manager.set_appearance(appearance, force=force)
     return manager.resolved

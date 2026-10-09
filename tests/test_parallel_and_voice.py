@@ -180,6 +180,7 @@ def controller(store, monkeypatch):
     yield instance
     instance.stop()
     window.close()
+    window.deleteLater()
     scheduler.STATE.stop = False
 
 

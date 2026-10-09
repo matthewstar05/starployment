@@ -40,8 +40,9 @@ from PySide6.QtWidgets import (
 )
 
 from ...answers import missing_answer
+from ...fortune import fortune_rank
 from ...models import posted_epoch
-from ...priority import is_starred
+from ...priority import held_from_bulk_send, is_starred
 from ..delegates import RECORD_ROLE, SEARCH_ROLE, SUBTITLE_ROLE, ApplicationDelegate
 from ..editors import FlowLayout, _AutoText
 from ..format import (local_time, parse_time, plural, posted_label, pretty_log_line, relative_time,
@@ -235,6 +236,7 @@ class DraftDetail(QWidget):
         super().__init__(parent)
         self.setObjectName("page")
         self.draft: dict | None = None
+        self.priority: list[str] = []
         self.rows: list[QuestionRow] = []
         self._show_all = False
         self._practice = False
@@ -324,8 +326,10 @@ class DraftDetail(QWidget):
         column.addStretch(1)
 
     # -------------------------------------------------------------- data
-    def set_context(self, *, practice: bool, luna_connected: bool) -> None:
+    def set_context(self, *, practice: bool, luna_connected: bool, priority: list[str] | None = None) -> None:
         self._practice, self._luna_connected = practice, luna_connected
+        if priority is not None:
+            self.priority = list(priority)
         if self.draft is not None:
             self.practice_note.setVisible(practice)
             self.luna.setEnabled(self.draft.get("status") in ("ready", "needs_answers", "practice", "error"))
@@ -393,11 +397,23 @@ class DraftDetail(QWidget):
         self.resume.setVisible(bool(draft.get("resume_path")))
         self.posting.setVisible(bool(draft.get("url")))
         self.remove.setEnabled(status not in ("sending",))
-        starred = bool(draft.get("_starred"))
+        starred = is_starred(draft, self.priority)
+        held = held_from_bulk_send(draft, self.priority)
+        rank = fortune_rank(draft.get('company', ''))
+        if starred == 'red':
+            self.starred_note.setText('Fortune 500' + (f' (#{rank})' if rank else '') + ' · Starred application · Only sent when you click Approve & send. Unattended runs and Send ready leave it for you.')
+            self.starred_note.show()
+        elif held:
+            self.starred_note.setText('Starred application · Only sent when you click Approve & send. Unattended runs and Send ready leave it for you.')
+            self.starred_note.show()
+        elif starred:
+            self.starred_note.setText('Fortune 1000' + (f' (#{rank})' if rank else '') + ' · Labeled star · Unattended runs and Send ready can send this application normally.')
+            self.starred_note.show()
+        else:
+            self.starred_note.hide()
         self.star.setText("Starred" if starred else "Star")
         self.star.setToolTip("Remove the star. Send ready can then include this application." if starred else
                              "Star this application to refine it. Starred applications are only sent one by one.")
-        self.starred_note.setVisible(starred and status not in ("sending",))
         self._build_rows()
 
     def _toggle_star(self) -> None:
@@ -712,7 +728,7 @@ class ApplicationsView(QWidget):
     # ------------------------------------------------------------------ data
     def set_context(self, *, practice: bool = False, luna_connected: bool = False,
                     priority: list[str] | None = None) -> None:
-        self.draft_detail.set_context(practice=practice, luna_connected=luna_connected)
+        self.draft_detail.set_context(practice=practice, luna_connected=luna_connected, priority=priority)
         if priority is not None and list(priority) != self.priority:
             self.priority = list(priority)
             self._signature = None
@@ -751,15 +767,15 @@ class ApplicationsView(QWidget):
         self.records = records
         approved = sum(1 for d in self.drafts if d.get("status") == "approved")
         # Starred applications are sent one by one, never by Send ready.
-        sendable = sum(1 for d in records if d["kind"] == "draft" and (
-            d.get("status") == "approved" or (d.get("status") == "ready" and not d["_starred"])))
+        sendable = sum(1 for d in records if d['kind'] == 'draft' and (
+            d.get('status') == 'approved' or (d.get('status') == 'ready' and not held_from_bulk_send(d, self.priority))))
         self.send_all_button.setText(f"Send ready ({sendable})" if sendable else "Send ready")
         self.send_all_button.setEnabled(bool(sendable))
         self.autofill_all_button.setEnabled(any(
             d.get("status") in ("ready", "needs_answers") and any(
                 q.get("answer") in (None, "", []) and q.get("kind") != "file" for q in d.get("questions") or [])
             for d in self.drafts))
-        review = sum(1 for d in self.drafts if d.get("status") in ("ready", "needs_answers", "practice"))
+        review = sum(1 for d in self.drafts if d.get("status") in ("ready", "needs_answers", "practice", "preparing"))
         sent = sum(1 for a in self.applications if a.get("status") == "applied")
         self.header.set_subtitle(
             f"{plural(review, 'application')} to review · {approved} approved · {sent} confirmed"

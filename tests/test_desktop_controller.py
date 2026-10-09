@@ -33,6 +33,7 @@ def controller(tmp_path, monkeypatch):
     yield instance
     instance.stop()
     window.close()
+    window.deleteLater()
     db.close()
     scheduler.STATE.stop = False
     from jobhub.desktop.styles import apply_appearance

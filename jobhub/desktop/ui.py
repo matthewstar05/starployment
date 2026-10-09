@@ -37,13 +37,11 @@ from .views.profile import ProfileView
 from .views.settings import SettingsView
 from .views.tracker import TrackerView
 from .widgets import (
-    ActivityIndicator,
     AmbientBackdrop,
     FadeStack,
     GlassNavList,
     GlassPanel,
     Motion,
-    StatusDot,
     Toast,
     button,
     label,

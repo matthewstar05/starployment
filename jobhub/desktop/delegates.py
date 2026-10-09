@@ -130,8 +130,10 @@ class RoleDelegate(QStyledItemDelegate):
         painter.setFont(primary)
         painter.setPen(qcolor(colors["text"]))
         top = QRectF(rect.left(), rect.center().y() - 17, rect.width(), 18)
-        if index.data(STAR_ROLE):
-            paint_star_mark(painter, QPointF(top.left() + 6, top.center().y()), 6, colors["amber"])
+        star = index.data(STAR_ROLE)
+        if star:
+            star_color = colors["red"] if star == "red" else colors["amber"]
+            paint_star_mark(painter, QPointF(top.left() + 6, top.center().y()), 6, star_color)
             top.setLeft(top.left() + 17)
         painter.setPen(qcolor(colors["text"]))
         painter.drawText(top, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -260,8 +262,11 @@ class ActionDelegate(QStyledItemDelegate):
         fg, bg = {
             "apply": (colors["accent_text"], colors["accent_soft"]),
             "retry": (colors["amber"], colors["amber_soft"]),
+            "preparing": (colors["disabled"], colors["fill_quiet"]),
         }.get(kind, (colors["text"], colors["fill_quiet"]))
-        if hovered and kind == "apply":
+        if kind == "preparing":
+            pass
+        elif hovered and kind == "apply":
             fg, bg = "#FFFFFF", colors["button_fill"]
         elif hovered:
             bg = with_alpha(bg, min(1.0, qcolor(bg).alphaF() + 0.18))
@@ -308,14 +313,14 @@ class ApplicationDelegate(QStyledItemDelegate):
         primary = ui_font(13, QFont.Weight.DemiBold)
         painter.setFont(primary)
         painter.setPen(qcolor(colors["text"]))
-        starred = bool(record.get("_starred"))
-        width = pill.left() - text_left - 8 - (16 if starred else 0)
+        star = record.get("_starred")
+        width = pill.left() - text_left - 8 - (16 if star else 0)
         shown = QFontMetrics(primary).elidedText(company, Qt.TextElideMode.ElideRight, int(width))
-        painter.drawText(QRectF(text_left, rect.top() + 11, width, 20), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                         shown)
-        if starred:
+        painter.drawText(QRectF(text_left, rect.top() + 11, width, 20), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, shown)
+        if star:
+            star_color = colors["red"] if star == "red" else colors["amber"]
             star_x = text_left + QFontMetrics(primary).horizontalAdvance(shown) + 10
-            paint_star_mark(painter, QPointF(star_x, rect.top() + 21), 5.5, colors["amber"])
+            paint_star_mark(painter, QPointF(star_x, rect.top() + 21), 5.5, star_color)
         secondary = ui_font(12)
         painter.setFont(secondary)
         painter.setPen(qcolor(colors["text_muted"]))

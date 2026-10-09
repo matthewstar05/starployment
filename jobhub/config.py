@@ -352,7 +352,7 @@ def validate_settings(settings: dict) -> dict:
         max_skills: StrictInt = Field(ge=5, le=80)
 
     class Agent(StrictModel):
-        backend: Literal["none", "claude_cli", "codex_cli", "anthropic_api", "openai_api"]
+        backend: Literal["none", "antigravity_cli", "claude_cli", "codex_cli", "anthropic_api", "openai_api"]
         model: StrictStr = Field(max_length=80)
 
         @field_validator("model")

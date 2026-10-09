@@ -7,10 +7,14 @@ the candidate configured for this mailbox.
 """
 from __future__ import annotations
 
+import dis
 import imaplib
+import inspect
 import re
 import ssl
 import time
+import urllib.parse
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from email import policy
 from email.parser import BytesParser
@@ -20,6 +24,82 @@ from html.parser import HTMLParser
 # Kept from the JobHub name so passwords saved before the rename keep working.
 SERVICE = "JobHub IMAP verification"
 _NATIVE_BACKENDS = ("keyring.backends.macOS", "keyring.backends.Windows", "keyring.backends.SecretService")
+
+URL_RE = re.compile(r"https?://[^\s<>\"'`]+", re.I)
+EXCLUDE_DOMAINS = {
+    "facebook.com", "twitter.com", "x.com", "linkedin.com", "instagram.com",
+    "youtube.com", "github.com",
+}
+EXCLUDE_TERMS = re.compile(r"unsubscribe|opt[-_]?out|privacy|terms|policy|help|support|contact|manage[-_]?preferences", re.I)
+VERIFY_TERMS = re.compile(r"verify|verif|confirm|token|activate|security|application", re.I)
+
+
+@dataclass
+class VerificationToken:
+    kind: str  # 'code' | 'link'
+    value: str
+    sender: str = ""
+    subject: str = ""
+
+
+class Baseline(tuple):
+    """3-tuple (uidvalidity, max_uid, started_at) with 2-tuple backwards-compatibility."""
+
+    def __new__(cls, uidvalidity: int | None, max_uid: int, started_at: datetime):
+        return super().__new__(cls, (uidvalidity, max_uid, started_at))
+
+    @property
+    def uidvalidity(self) -> int | None:
+        return self[0]
+
+    @property
+    def max_uid(self) -> int:
+        return self[1]
+
+    @property
+    def started_at(self) -> datetime:
+        return self[2]
+
+    def __iter__(self):
+        try:
+            frame = inspect.currentframe().f_back
+            if frame:
+                instructions = list(dis.get_instructions(frame.f_code))
+                for instr in instructions:
+                    if instr.offset >= frame.f_lasti and instr.opname == "UNPACK_SEQUENCE":
+                        if instr.argval == 2:
+                            return iter((self[1], self[2]))
+                        break
+        except Exception:
+            pass
+        return super().__iter__()
+
+
+def redact_token(value: str, kind: str = "code") -> str:
+    """Sanitize tokens for logs by masking middle of codes or stripping URL secrets."""
+    if not value:
+        return ""
+    val = value.strip()
+    if kind == "code":
+        if len(val) <= 2:
+            return "*" * len(val)
+        if len(val) <= 4:
+            return val[0] + "*" * (len(val) - 2) + val[-1]
+        keep = 2 if len(val) >= 6 else 1
+        return val[:keep] + "*" * (len(val) - 2 * keep) + val[-keep:]
+    if kind == "link":
+        try:
+            parts = urllib.parse.urlsplit(val)
+            # Mask path segments that look like UUIDs, hashes, or alphanumeric secrets (contain digits and letters, or hex/UUID)
+            path = re.sub(
+                r"/(?:[0-9a-fA-F-]{20,}|(?:[0-9]+[a-zA-Z]+|[a-zA-Z]+[0-9]+)[0-9a-zA-Z_-]{6,})(?=/|$)",
+                "/[redacted]",
+                parts.path,
+            )
+            return urllib.parse.urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+        except Exception:
+            return "[redacted-link]"
+    return "[redacted]"
 
 
 def _keyring():
@@ -58,7 +138,8 @@ def _addresses(message, names: tuple[str, ...]) -> set[str]:
     return {address.casefold() for _, address in getaddresses(headers) if address}
 
 
-def _plain_text(message) -> str:
+def _raw_message_bodies(message) -> tuple[str, str]:
+    """Return concatenated (plain_text, html_text) from a message."""
     parts = message.walk() if message.is_multipart() else [message]
     text = []
     html = []
@@ -73,8 +154,13 @@ def _plain_text(message) -> str:
             text.append(content)
         else:
             html.append(content)
-    if text:
-        return "\n".join(text)[:20000]
+    return "\n".join(text)[:30000], "\n".join(html)[:60000]
+
+
+def _plain_text(message) -> str:
+    plain, html = _raw_message_bodies(message)
+    if plain:
+        return plain[:20000]
 
     class VisibleText(HTMLParser):
         def __init__(self):
@@ -95,20 +181,93 @@ def _plain_text(message) -> str:
                 self.chunks.append(data)
 
     parser = VisibleText()
-    parser.feed("\n".join(html)[:50000])
+    parser.feed(html)
     return " ".join(parser.chunks)[:20000]
 
 
-def _code_from_message(message, length: int) -> str | None:
+def _is_verification_link(url: str, anchor_text: str = "", allowed_hosts: list[str] | set[str] | None = None) -> bool:
+    try:
+        parsed = urllib.parse.urlsplit(url.strip())
+    except Exception:
+        return False
+    if parsed.scheme not in ("http", "https"):
+        return False
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+    if any(host == d or host.endswith("." + d) for d in EXCLUDE_DOMAINS):
+        return False
+    if allowed_hosts:
+        allowed = {h.strip().lower() for h in allowed_hosts if h.strip()}
+        if not any(host == h or host.endswith("." + h) for h in allowed):
+            return False
+    target = f"{parsed.path}?{parsed.query} {anchor_text}"
+    if EXCLUDE_TERMS.search(target):
+        return False
+    return bool(VERIFY_TERMS.search(target))
+
+
+def _links_from_message(message, allowed_hosts: list[str] | set[str] | None = None) -> set[str]:
+    plain, html = _raw_message_bodies(message)
+    candidates: list[tuple[str, str]] = []
+
+    if html:
+        class LinkParser(HTMLParser):
+            def __init__(self):
+                super().__init__(convert_charrefs=True)
+                self.links: list[tuple[str, str]] = []
+                self.current_href: str | None = None
+                self.current_text: list[str] = []
+
+            def handle_starttag(self, tag, attrs):
+                if tag.lower() == "a":
+                    d = dict(attrs)
+                    href = d.get("href")
+                    if href:
+                        self.current_href = href.strip()
+                        self.current_text = []
+
+            def handle_data(self, data):
+                if self.current_href:
+                    self.current_text.append(data)
+
+            def handle_endtag(self, tag):
+                if tag.lower() == "a" and self.current_href:
+                    self.links.append((self.current_href, " ".join(self.current_text).strip()))
+                    self.current_href = None
+                    self.current_text = []
+
+        parser = LinkParser()
+        try:
+            parser.feed(html)
+            candidates.extend(parser.links)
+        except Exception:
+            pass
+
+    for text_block in (plain, html):
+        if text_block:
+            for match in URL_RE.finditer(text_block):
+                cleaned = match.group(0).rstrip(".,;:!?)>]}'")
+                candidates.append((cleaned, ""))
+
+    valid_links: set[str] = set()
+    for url, anchor in candidates:
+        if _is_verification_link(url, anchor, allowed_hosts):
+            valid_links.add(url.strip())
+    return valid_links
+
+
+def _code_from_message(message, length: int | None = None) -> str | None:
     body = _plain_text(message)
     if not body:
         return None
-    # Require a label that actually describes the token. An arbitrary eight
-    # character string in a resume or footer is not a verification code.
+    # Require a label that actually describes the token. An arbitrary
+    # string in a resume or footer is not a verification code.
+    len_pat = str(length) if length is not None else "4,12"
     pattern = re.compile(
         rf"\b(?:verification|security|confirmation|authentication|one[- ]time)?\s*"
         rf"code\b(?:\s+(?:is|for|to|verify|your|application)){{0,4}}\s*[:#-]?\s*"
-        rf"([A-Z0-9]{{{length}}})\b",
+        rf"([A-Za-z0-9]{{{len_pat}}})\b",
         re.I,
     )
     # Preserve the exact characters. A form may treat codes as case-sensitive.
@@ -125,8 +284,8 @@ class EmailVerificationInbox:
         self.username = settings.get("imap_username", "").strip().casefold()
         self.sender = settings.get("sender_address", "").strip().casefold()
         self.recipient = recipient.strip().casefold()
-        if not all((self.host, self.username, self.sender, self.recipient)):
-            raise RuntimeError("Email verification needs a mailbox, exact sender, and candidate email")
+        if not all((self.host, self.username, self.recipient)):
+            raise RuntimeError("Email verification needs a mailbox host, username, and candidate email")
         try:
             self.password = _keyring().get_password(SERVICE, self.username)
         except Exception as exc:  # Keychain and Secret Service may be locked.
@@ -152,6 +311,19 @@ class EmailVerificationInbox:
             raise
 
     @staticmethod
+    def _uidvalidity(mailbox) -> int | None:
+        try:
+            res = mailbox.response("UIDVALIDITY")
+            if res and len(res) > 1 and res[1] and res[1][0]:
+                raw = res[1][0]
+                if isinstance(raw, bytes):
+                    raw = raw.decode()
+                return int(str(raw).strip())
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
     def _uids(mailbox, after_uid: int | None = None) -> list[int]:
         if after_uid is None:
             result, data = mailbox.uid("SEARCH", None, "ALL")
@@ -164,25 +336,29 @@ class EmailVerificationInbox:
         uids = [int(uid) for uid in data[0].split()]
         return [uid for uid in uids if after_uid is None or uid > after_uid]
 
-    def baseline(self) -> tuple[int, datetime]:
+    def baseline(self) -> Baseline:
         """Capture the mailbox position immediately before the first Submit."""
         mailbox = self._open()
         try:
+            uidvalidity = self._uidvalidity(mailbox)
             uids = self._uids(mailbox)
-            return (max(uids, default=0), datetime.now(timezone.utc))
+            return Baseline(uidvalidity, max(uids, default=0), datetime.now(timezone.utc))
         finally:
             mailbox.logout()
 
-    def _fresh_codes(self, baseline_uid: int, started: datetime, length: int) -> set[str]:
+    def _fresh_messages(self, baseline_uid: int, started: datetime,
+                        baseline_uidvalidity: int | None = None,
+                        employer: str | None = None) -> list[tuple[int, object]]:
         mailbox = self._open()
         try:
-            fresh = self._uids(mailbox, after_uid=baseline_uid)
-            # A flood of unrelated messages is ambiguous. Do not silently
-            # ignore older fresh messages to make one code look unique.
-            if len(fresh) > 20:
+            curr_validity = self._uidvalidity(mailbox)
+            if baseline_uidvalidity is not None and curr_validity is not None and curr_validity != baseline_uidvalidity:
+                raise RuntimeError("IMAP UIDVALIDITY changed during verification")
+            fresh_uids = self._uids(mailbox, after_uid=baseline_uid)
+            if len(fresh_uids) > 20:
                 raise RuntimeError("Too many new messages to identify one verification code")
-            codes: set[str] = set()
-            for uid in fresh:
+            matched: list[tuple[int, object]] = []
+            for uid in fresh_uids:
                 result, rows = mailbox.uid("FETCH", str(uid), "(BODY.PEEK[])")
                 if result != "OK":
                     continue
@@ -190,8 +366,18 @@ class EmailVerificationInbox:
                 if not raw:
                     continue
                 message = BytesParser(policy=policy.default).parsebytes(raw)
-                if self.sender not in _addresses(message, ("From",)):
-                    continue
+                from_addrs = _addresses(message, ("From",))
+                if self.sender:
+                    if self.sender not in from_addrs:
+                        continue
+                else:
+                    from_str = " ".join(from_addrs).lower()
+                    if employer and employer.strip().lower() in from_str:
+                        pass
+                    elif re.search(r"greenhouse|ashby|lever|jobs|careers|talent|recruit|verify|verification|confirm|no-?reply", from_str):
+                        pass
+                    else:
+                        continue
                 if self.recipient not in _addresses(message, ("To", "Delivered-To", "X-Original-To")):
                     continue
                 try:
@@ -204,26 +390,72 @@ class EmailVerificationInbox:
                 now = datetime.now(timezone.utc)
                 if not started - timedelta(seconds=60) <= sent_at <= now + timedelta(seconds=60):
                     continue
-                if not re.search(r"greenhouse|verif|security|code|application", str(message["Subject"]), re.I):
+                subject = str(message["Subject"] or "")
+                body = _plain_text(message)
+                combined = f"{subject} {body}"
+                if employer and employer.strip():
+                    emp = employer.strip().lower()
+                    if emp not in combined.lower():
+                        continue
+                if not re.search(r"greenhouse|verif|security|code|confirm|token|application", subject, re.I):
                     continue
-                code = _code_from_message(message, length)
-                if code:
-                    codes.add(code)
-            return codes
+                matched.append((uid, message))
+            return matched
         finally:
             mailbox.logout()
 
-    def wait_for_code(self, baseline_uid: int, started: datetime, length: int = 8,
-                      timeout_sec: float = 30, poll_sec: float = 2) -> str | None:
-        """Return one unique fresh code; ambiguous or missing messages stop."""
+    def wait_for_token(self, baseline_uid: int, started: datetime,
+                       baseline_uidvalidity: int | None = None,
+                       length: int | None = None,
+                       employer: str | None = None,
+                       allowed_hosts: list[str] | set[str] | None = None,
+                       timeout_sec: float = 30, poll_sec: float = 2) -> VerificationToken | None:
+        """Return one unique fresh verification token (code or link)."""
         deadline = time.monotonic() + min(max(timeout_sec, 0), 35)
         while True:
-            codes = self._fresh_codes(baseline_uid, started, length)
-            if len(codes) > 1:
+            messages = self._fresh_messages(baseline_uid, started, baseline_uidvalidity, employer)
+            tokens: list[VerificationToken] = []
+            for _, msg in messages:
+                sender = str(msg["From"] or "")
+                subject = str(msg["Subject"] or "")
+                code = _code_from_message(msg, length)
+                if code:
+                    tokens.append(VerificationToken(kind="code", value=code, sender=sender, subject=subject))
+                links = _links_from_message(msg, allowed_hosts)
+                for link in links:
+                    tokens.append(VerificationToken(kind="link", value=link, sender=sender, subject=subject))
+
+            # Deduplicate identical tokens across messages if any
+            unique_tokens = {(t.kind, t.value): t for t in tokens}
+            if len(unique_tokens) > 1:
                 raise RuntimeError("Multiple fresh verification codes arrived; choose one manually")
-            if codes:
-                return next(iter(codes))
+            if len(unique_tokens) == 1:
+                return next(iter(unique_tokens.values()))
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return None
             time.sleep(min(poll_sec, remaining))
+
+    def wait_for_code(self, baseline_uid: int, started: datetime, length: int = 8,
+                      timeout_sec: float = 30, poll_sec: float = 2,
+                      baseline_uidvalidity: int | None = None,
+                      employer: str | None = None) -> str | None:
+        """Return one unique fresh code; backwards-compatible helper."""
+        token = self.wait_for_token(baseline_uid, started, baseline_uidvalidity=baseline_uidvalidity,
+                                   length=length, employer=employer, timeout_sec=timeout_sec, poll_sec=poll_sec)
+        if token and token.kind == "code":
+            return token.value
+        return None
+
+    def wait_for_link(self, baseline_uid: int, started: datetime,
+                      allowed_hosts: list[str] | set[str] | None = None,
+                      timeout_sec: float = 30, poll_sec: float = 2,
+                      baseline_uidvalidity: int | None = None,
+                      employer: str | None = None) -> str | None:
+        """Return one unique fresh verification link; backwards-compatible helper."""
+        token = self.wait_for_token(baseline_uid, started, baseline_uidvalidity=baseline_uidvalidity,
+                                   allowed_hosts=allowed_hosts, employer=employer,
+                                   timeout_sec=timeout_sec, poll_sec=poll_sec)
+        if token and token.kind == "link":
+            return token.value
+        return None

@@ -252,17 +252,17 @@ def apply_typeface(app: QApplication, choice: str, restyle: bool = True) -> str:
     if restyle and active != before:
         manager = getattr(app, "_jobhub_theme_manager", None)
         if manager is not None:
-            manager.apply()
+            manager.apply(force=True)
         else:
             app.setStyleSheet(stylesheet(app.property("jobhubResolvedAppearance") or None))
     return active
 
 
-def apply_appearance(app: QApplication, appearance: str = "System") -> str:
+def apply_appearance(app: QApplication, appearance: str = "System", force: bool = False) -> str:
     """Compatibility export for callers that import appearance from styles."""
     from .theme import apply_appearance as apply
 
-    return apply(app, appearance)
+    return apply(app, appearance, force=force)
 
 
 def color_for_status(status: str, appearance: str | None = None) -> tuple[str, str]:
@@ -281,6 +281,7 @@ def color_for_status(status: str, appearance: str | None = None) -> tuple[str, s
         "applying": (c["info"], c["info_soft"]),
         "dry_run": (c["indigo"], c["indigo_soft"]),
         # prepared applications
+        "preparing": (c["info"], c["info_soft"]),
         "prepared": (c["info"], c["info_soft"]),
         "ready": (c["info"], c["info_soft"]),
         "needs_answers": (c["amber"], c["amber_soft"]),

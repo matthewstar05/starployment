@@ -14,7 +14,7 @@ from pydantic import ValidationError
 
 from jobhub import config, db, prepare, scheduler
 from jobhub.models import Job, Profile, board_of, posted_epoch
-from jobhub.priority import held_from_automation, is_priority, is_starred, normalize_company
+from jobhub.priority import held_from_automation, held_from_bulk_send, is_priority, is_starred, normalize_company
 from jobhub.sources import base, greenhouse
 
 
@@ -151,6 +151,46 @@ def test_send_ready_leaves_starred_applications_for_one_by_one_review():
     send, held = prepare.bulk_send_candidates(drafts, ["Google"])
     assert [d["id"] for d in send] == [2, 3, 5]
     assert [d["id"] for d in held] == [1, 4]
+
+
+def test_fortune_stars_and_hold_policies():
+    # Fortune 500 companies (Apple, Walmart): red star, held from bulk send and automation
+    for company in ("Apple", "Walmart"):
+        record = {"company": company, "starred": None}
+        assert is_starred(record, []) == "red"
+        assert held_from_bulk_send(record, []) is True
+        assert held_from_automation(record, []) is True
+
+    # Fortune 501-1000 companies (Snowflake, Synopsys): amber star (star for a label), NOT held from bulk send or automation
+    for company in ("Snowflake", "Synopsys"):
+        record = {"company": company, "starred": None}
+        assert is_starred(record, []) == "amber"
+        assert held_from_bulk_send(record, []) is False
+        assert held_from_automation(record, []) is False
+
+    # Manual star on 501-1000 company (starred=1): amber star, held from bulk send and automation
+    manual_starred = {"company": "Snowflake", "starred": 1}
+    assert is_starred(manual_starred, []) == "amber"
+    assert held_from_bulk_send(manual_starred, []) is True
+    assert held_from_automation(manual_starred, []) is True
+
+    # Explicit unstar on Fortune 500 company (starred=0): is_starred is False, held_from_bulk_send is False
+    unstarred_f500 = {"company": "Apple", "starred": 0}
+    assert is_starred(unstarred_f500, []) is False
+    assert held_from_bulk_send(unstarred_f500, []) is False
+    # held_from_automation remains True if company is priority, but if not in priority, it's False when starred=0
+    assert held_from_automation(unstarred_f500, []) is False
+
+    # bulk_send_candidates sends ready drafts for Fortune 501-1000, holds for Fortune 500
+    drafts = [
+        {"id": 10, "status": "ready", "company": "Apple", "starred": None},     # F500 -> held
+        {"id": 11, "status": "ready", "company": "Snowflake", "starred": None}, # F1000 -> sent
+        {"id": 12, "status": "ready", "company": "Synopsys", "starred": None},  # F1000 -> sent
+        {"id": 13, "status": "ready", "company": "Walmart", "starred": None},   # F500 -> held
+    ]
+    send, held = prepare.bulk_send_candidates(drafts, [])
+    assert [d["id"] for d in send] == [11, 12]
+    assert [d["id"] for d in held] == [10, 13]
 
 
 def test_settings_validate_priority_companies_and_plan_options(store):

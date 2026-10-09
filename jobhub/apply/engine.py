@@ -13,6 +13,7 @@ import re
 import threading
 import time
 import uuid
+from datetime import datetime
 from contextlib import contextmanager
 from contextlib import nullcontext as _nullcontext
 from pathlib import Path
@@ -25,7 +26,7 @@ from ..answers import (FORMAT_NAMES, Answer, Q, US_STATES, availability_date, fi
                        pick_option, rule_answer)
 from ..models import ApplyResult, Job, Profile
 from .adapters import Adapter
-from .email_verification import EmailVerificationInbox
+from .email_verification import Baseline, EmailVerificationInbox, VerificationToken, redact_token
 
 # Field identifiers remain attached to their elements across scans. This matters
 # for conditional forms, duplicate labels, and radio groups after the first pass.
@@ -394,8 +395,7 @@ class FormEngine:
         self._log(f"[{self.adapter.name}] open {url}")
         # A dedicated persistent profile retains login cookies without reading the
         # user's regular browser. Each simultaneous send has its own profile slot.
-        mailbox = (self.adapter.name == "greenhouse"
-                   and bool(self.settings.get("email_verification", {}).get("enabled")))
+        mailbox = bool(self.settings.get("email_verification", {}).get("enabled"))
         with sync_playwright() as playwright, browser_profile_slot() as profile_dir, \
                 (_MAILBOX_LOCK if mailbox else _nullcontext()):
             channel = self.settings.get("browser_channel") or None
@@ -1116,14 +1116,60 @@ class FormEngine:
     def _confirmation_signals(self, page: Page) -> set[str]:
         return {match.group(0).casefold() for match in self.adapter.success_re.finditer(self._page_text(page))}
 
-    def _email_verification_required(self, page: Page) -> bool:
-        """Detect an employer's post-submit email-code step before timeout."""
-        return bool(re.search(
-            r"(?:verification|security) code was sent to|enter the \d+-character code",
-            self._page_text(page), re.I,
-        ))
+    def _allowed_hosts(self) -> set[str]:
+        hosts = {
+            "greenhouse.io", "boards.greenhouse.io", "job-boards.greenhouse.io",
+            "boards.eu.greenhouse.io", "job-boards.eu.greenhouse.io",
+            "ashbyhq.com", "jobs.ashbyhq.com",
+            "lever.co", "jobs.lever.co", "jobs.eu.lever.co",
+            "127.0.0.1", "localhost",
+        }
+        for url_attr in (getattr(self.adapter, "apply_url", None),
+                         getattr(self.job, "apply_url", None),
+                         getattr(self.job, "url", None)):
+            if url_attr:
+                try:
+                    h = urlsplit(url_attr).hostname
+                    if h:
+                        hosts.add(h.lower())
+                except Exception:
+                    pass
+        return hosts
 
-    def _verification_fields(self, page: Page, length: int):
+    def _is_allowed_host(self, host: str | None, allowed_hosts: set[str] | None = None) -> bool:
+        if not host:
+            return False
+        host = host.lower()
+        if allowed_hosts is None:
+            allowed_hosts = self._allowed_hosts()
+        for allowed in allowed_hosts:
+            allowed = allowed.lower()
+            if host == allowed or host.endswith("." + allowed):
+                return True
+        return False
+
+    def _email_verification_challenge(self, page: Page) -> str | None:
+        """Detect whether page presents a verification challenge: 'code', 'link', or None."""
+        text = self._page_text(page)
+        if self._verification_fields(page, None):
+            return "code"
+        if re.search(
+            r"(?:verification|security|confirmation|one[- ]time) code (?:was sent|has been sent|is sent|sent to)|enter the \d+[- ]character code|enter (?:the )?(?:verification|security|confirmation|one[- ]time) code|we sent a code to|check your email for a code",
+            text, re.I
+        ):
+            return "code"
+        if re.search(
+            r"(?:verification|confirmation) link (?:has been |was )?sent|check your email to (?:confirm|verify|complete)|click the link (?:in|sent to) (?:your )?email|we sent a (?:verification|confirmation) email to|verify your email (?:address )?(?:to )?(?:continue|complete)|an email with a verification link",
+            text, re.I
+        ):
+            return "link"
+        return None
+
+    def _email_verification_required(self, page: Page) -> bool:
+        """Detect an employer's email verification step before timeout."""
+        return self._email_verification_challenge(page) is not None
+
+    def _verification_fields(self, page: Page, length: int | None = None):
         """Locate a recognizable one-time-code widget without touching other fields."""
         roots = [page, *(frame for frame in page.frames if frame != page.main_frame)]
         selectors = (
@@ -1142,11 +1188,12 @@ class FormEngine:
                            if locator.nth(index).is_visible() and locator.nth(index).is_enabled()]
                 if len(visible) == 1 and visible[0].get_attribute("maxlength") != "1":
                     return visible
-            locator = root.locator("input[maxlength='1']")
-            visible = [locator.nth(index) for index in range(locator.count())
-                       if locator.nth(index).is_visible() and locator.nth(index).is_enabled()]
-            if len(visible) == length:
-                return visible
+            if length is not None:
+                locator = root.locator("input[maxlength='1']")
+                visible = [locator.nth(index) for index in range(locator.count())
+                           if locator.nth(index).is_visible() and locator.nth(index).is_enabled()]
+                if len(visible) == length:
+                    return visible
             # A generic name="code" is acceptable only with an explicit OTP
             # label. Never mistake another field such as postal_code for it.
             locator = root.locator("input[name='code' i], input[id='code' i]")
@@ -1163,41 +1210,29 @@ class FormEngine:
         url = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
         self._log(f"Employer confirmation after email verification: {url} [{signal}]")
 
-    def _complete_email_verification(self, page: Page, inbox: EmailVerificationInbox,
-                                     baseline_uid: int, started_at, confirmation_baseline: set[str]) -> ApplyResult:
-        text = self._page_text(page)
-        match = re.search(r"enter the (\d+)-character code", text, re.I)
-        length = int(match.group(1)) if match else 8
-        if not 4 <= length <= 12:
-            return self._result("needs_human", "The employer requested an unsupported email code length.")
+    def _complete_email_code_verification(self, page: Page, code: str, confirmation_baseline: set[str]) -> ApplyResult:
+        if not self.submission_attempted:
+            db.mark_submission_attempted(self.job.id)
+            self.submission_attempted = True
         try:
-            code = inbox.wait_for_code(baseline_uid, started_at, length=length)
-        except Exception:
-            return self._result("needs_human", "The verification mailbox could not identify one fresh code. Complete the employer form manually.")
-        if not code:
-            return self._result("needs_human", "No matching fresh email code arrived in time. Complete the employer form manually.")
-        try:
-            fields = self._verification_fields(page, length)
+            fields = self._verification_fields(page, len(code))
             if len(fields) == 1:
                 fields[0].fill(code)
                 if fields[0].input_value() != code:
                     raise RuntimeError("The code field did not retain the code")
-            elif len(fields) == length:
+            elif len(fields) == len(code):
                 for field, character in zip(fields, code):
                     field.fill(character)
                 if "".join(field.input_value() for field in fields) != code:
                     raise RuntimeError("The code fields did not retain the code")
             else:
                 raise RuntimeError("No recognizable code input was found")
-            self._log("Filled a fresh Greenhouse email code")
-            # Some code widgets submit automatically after the final character.
+            self._log("Filled a fresh email verification code")
             page.wait_for_timeout(500)
             signals = self._confirmation_signals(page) - confirmation_baseline
             if signals:
-                # A screenshot could persist the one-time code if the employer
-                # leaves its widget visible beside the confirmation text.
                 self._log_email_confirmation(page, sorted(signals)[0])
-                self.unanswered = [item for item in self.unanswered if item != "Email verification code (required)"]
+                self.unanswered = [item for item in self.unanswered if "verification" not in item.lower()]
                 return self._result("applied", "Application submitted. An employer confirmation appeared after email verification.")
             root = fields[0].locator("xpath=ancestor::form[1]")
             if not root.count():
@@ -1210,10 +1245,7 @@ class FormEngine:
                                candidate.inner_text() or candidate.get_attribute("value") or ""), re.I)), None)
             if button is None:
                 raise RuntimeError("No verification Submit button was found")
-            # The employer may echo the secret in an error. Keep only a
-            # categorical outcome, never its raw error text or a screenshot.
             errors_before = set(page.evaluate(ERROR_JS))
-            # One post-code click only. An uncertain result is never retried.
             button.click(timeout=10000)
             deadline = time.monotonic() + min(float(self.settings.get("submission_timeout_sec", 35)), 35)
             while time.monotonic() < deadline:
@@ -1221,7 +1253,7 @@ class FormEngine:
                 signals = self._confirmation_signals(page) - confirmation_baseline
                 if signals:
                     self._log_email_confirmation(page, sorted(signals)[0])
-                    self.unanswered = [item for item in self.unanswered if item != "Email verification code (required)"]
+                    self.unanswered = [item for item in self.unanswered if "verification" not in item.lower()]
                     return self._result("applied", "Application submitted. An employer confirmation appeared after email verification.")
                 if set(page.evaluate(ERROR_JS)) - errors_before:
                     return self._result("needs_human", "The employer reported an error after email verification. Check the application manually before any retry.")
@@ -1230,6 +1262,105 @@ class FormEngine:
         except Exception:
             return self._result("needs_human", "The email code step could not be completed safely. Check the employer form manually.")
         return self._result("needs_human", "The email code was entered, but no employer confirmation appeared. Check manually before retrying.")
+
+    def _complete_email_link_verification(self, page: Page, link: str, confirmation_baseline: set[str]) -> ApplyResult:
+        if not self.submission_attempted:
+            db.mark_submission_attempted(self.job.id)
+            self.submission_attempted = True
+        try:
+            parsed = urlsplit(link)
+        except Exception:
+            return self._result("needs_human", "The verification link is malformed.")
+        if parsed.scheme not in ("http", "https", "file"):
+            return self._result("needs_human", "The verification link has an invalid scheme.")
+        if parsed.scheme in ("http", "https") and not self._is_allowed_host(parsed.hostname):
+            self._log(f"Rejected verification link to untrusted host: {parsed.hostname}")
+            return self._result("needs_human", "The verification link points to an untrusted domain. Complete verification manually.")
+
+        redacted_link = redact_token(link, kind="link")
+        self._log(f"Navigating to verification link: {redacted_link}")
+        verify_page = page.context.new_page()
+        try:
+            verify_page.goto(link, wait_until="domcontentloaded", timeout=25000)
+            verify_host = (urlsplit(verify_page.url).hostname or "").lower()
+            if parsed.scheme in ("http", "https") and not self._is_allowed_host(verify_host):
+                self._log(f"Verification link redirected to untrusted host: {verify_host}")
+                return self._result("needs_human", "The verification link redirected to an untrusted domain.")
+
+            verify_page.wait_for_timeout(1000)
+            signals = self._confirmation_signals(verify_page) - confirmation_baseline
+            if signals:
+                self._log_email_confirmation(verify_page, sorted(signals)[0])
+                self.unanswered = [item for item in self.unanswered if "verification" not in item.lower()]
+                return self._result("applied", "Application submitted. An employer confirmation appeared after email verification.")
+
+            candidates = verify_page.locator("button[type=submit], input[type=submit], button, a.btn, a.button")
+            action_btn = next((candidates.nth(i) for i in range(candidates.count())
+                               if candidates.nth(i).is_visible() and candidates.nth(i).is_enabled()
+                               and re.search(r"confirm|verify|complete|submit|continue",
+                                             (candidates.nth(i).inner_text() or candidates.nth(i).get_attribute("value") or ""), re.I)), None)
+            if action_btn is not None:
+                action_btn.click(timeout=10000)
+                verify_page.wait_for_timeout(1000)
+                signals = self._confirmation_signals(verify_page) - confirmation_baseline
+                if signals:
+                    self._log_email_confirmation(verify_page, sorted(signals)[0])
+                    self.unanswered = [item for item in self.unanswered if "verification" not in item.lower()]
+                    return self._result("applied", "Application submitted. An employer confirmation appeared after email verification.")
+
+            page.bring_to_front()
+            page.wait_for_timeout(1000)
+            signals = self._confirmation_signals(page) - confirmation_baseline
+            if signals:
+                self._log_email_confirmation(page, sorted(signals)[0])
+                self.unanswered = [item for item in self.unanswered if "verification" not in item.lower()]
+                return self._result("applied", "Application submitted. An employer confirmation appeared after email verification.")
+        except Exception as exc:
+            self._log(f"Verification link processing failed: {exc}")
+            return self._result("needs_human", "The verification link could not be processed safely. Check the application manually.")
+        finally:
+            try:
+                verify_page.close()
+            except Exception:
+                pass
+        return self._result("needs_human", "The verification link was opened, but no employer confirmation appeared. Check manually before retrying.")
+
+    def _complete_email_verification(self, page: Page, inbox: EmailVerificationInbox,
+                                     baseline_data: Baseline | tuple[int, datetime] | None,
+                                     confirmation_baseline: set[str]) -> ApplyResult:
+        if baseline_data is None:
+            return self._result("needs_human", "The email verification baseline was missing. Complete the employer form manually.")
+        if isinstance(baseline_data, Baseline):
+            baseline_uid = baseline_data.last_uid
+            started_at = baseline_data.started_at
+            uidvalidity = baseline_data.uidvalidity
+        else:
+            baseline_uid, started_at = baseline_data
+            uidvalidity = None
+
+        text = self._page_text(page)
+        match = re.search(r"enter the (\d+)-character code", text, re.I)
+        length = int(match.group(1)) if match else None
+
+        allowed_hosts = self._allowed_hosts()
+        employer = self.job.company if self.job else None
+        try:
+            if hasattr(inbox, "wait_for_token"):
+                token = inbox.wait_for_token(baseline_uid, started_at, baseline_uidvalidity=uidvalidity,
+                                             length=length, employer=employer, allowed_hosts=allowed_hosts)
+            elif hasattr(inbox, "wait_for_code"):
+                code_val = inbox.wait_for_code(baseline_uid, started_at, length=length or 8)
+                token = VerificationToken(kind="code", value=code_val) if code_val else None
+            else:
+                token = None
+        except Exception:
+            return self._result("needs_human", "The verification mailbox could not identify one fresh code. Complete the employer form manually.")
+        if not token:
+            return self._result("needs_human", "No matching fresh email verification arrived in time. Complete the employer form manually.")
+
+        if token.kind == "link":
+            return self._complete_email_link_verification(page, token.value, confirmation_baseline)
+        return self._complete_email_code_verification(page, token.value, confirmation_baseline)
 
     def _submit(self, page: Page) -> ApplyResult:
         button = None
@@ -1242,21 +1373,41 @@ class FormEngine:
                     break
             if button is not None:
                 break
-        if button is None:
-            return self._result("needs_human", "An enabled application Submit button was not found.")
         baseline = self._confirmation_signals(page)
         verification_before = self._email_verification_required(page)
         inbox = None
-        baseline_uid = None
-        started_at = None
+        baseline_data = None
         inbox_unavailable = False
-        if self.adapter.name == "greenhouse" and self.settings.get("email_verification", {}).get("enabled"):
+        if bool(self.settings.get("email_verification", {}).get("enabled")):
             try:
                 inbox = EmailVerificationInbox(self.settings["email_verification"], self.profile.email)
-                baseline_uid, started_at = inbox.baseline()
+                baseline_data = inbox.baseline()
             except Exception:
                 inbox_unavailable = True
                 self._log("Automatic email verification is unavailable; continuing with one ordinary Submit")
+
+        if button is None:
+            if self._email_verification_required(page):
+                self._log("Email verification required before Submit button is available")
+                if inbox is not None:
+                    res = self._complete_email_verification(page, inbox, baseline_data, baseline)
+                    if res.status == "applied":
+                        return res
+                    for selector in self.adapter.submit_selectors:
+                        candidates = self.root.locator(selector)
+                        for index in range(candidates.count()):
+                            candidate = candidates.nth(index)
+                            if candidate.is_visible() and candidate.is_enabled():
+                                button = candidate
+                                break
+                        if button is not None:
+                            break
+                elif inbox_unavailable:
+                    return self._result("needs_human", "The employer requested email verification, but the configured mailbox or system credential vault was unavailable. Complete the employer form manually; submission is not confirmed.")
+                else:
+                    return self._result("needs_human", "The employer requires email verification before submission. Complete it on the form manually.")
+        if button is None:
+            return self._result("needs_human", "An enabled application Submit button was not found.")
         button.scroll_into_view_if_needed()
         if human_pacing():
             # Review the form briefly and move to the button before clicking.
@@ -1269,8 +1420,9 @@ class FormEngine:
         self._shot(page, "before_submit")
         # Record this durably before clicking. An interrupted or unconfirmed
         # request must never be automatically submitted a second time.
-        db.mark_submission_attempted(self.job.id)
-        self.submission_attempted = True
+        if not self.submission_attempted:
+            db.mark_submission_attempted(self.job.id)
+            self.submission_attempted = True
         self._log("Submitting application once")
         button.click(timeout=10000)
         deadline = time.monotonic() + float(self.settings.get("submission_timeout_sec", 35))
@@ -1281,13 +1433,18 @@ class FormEngine:
                     self._shot(page, "success")
                     return self._result("applied", "Application submitted. A new application confirmation was detected on the page.")
                 if not verification_before and self._email_verification_required(page):
-                    self.unanswered = list(dict.fromkeys([*self.unanswered, "Email verification code (required)"]))
+                    challenge = self._email_verification_challenge(page)
+                    unanswered_label = "Email verification link (required)" if challenge == "link" else "Email verification code (required)"
+                    self.unanswered = list(dict.fromkeys([*self.unanswered, unanswered_label]))
                     self._shot(page, "email_verification")
                     if inbox is not None:
-                        return self._complete_email_verification(page, inbox, baseline_uid, started_at, baseline)
+                        return self._complete_email_verification(page, inbox, baseline_data, baseline)
                     if inbox_unavailable:
                         return self._result("needs_human", "The employer requested an email code, but the configured mailbox or system credential vault was unavailable. Complete the employer form manually; submission is not confirmed.")
-                    return self._result("needs_human", "The employer sent an email verification code. Enter it on the employer form and resubmit; the application is not confirmed yet.")
+                    msg = ("The employer sent an email verification link. Open it to complete verification; the application is not confirmed yet."
+                           if challenge == "link" else
+                           "The employer sent an email verification code. Enter it on the employer form and resubmit; the application is not confirmed yet.")
+                    return self._result("needs_human", msg)
                 if self._captcha(page):
                     self._shot(page, "captcha")
                     return self._result("needs_human", "A CAPTCHA or security check appeared after Submit. Check the application manually before trying again.")

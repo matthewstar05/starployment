@@ -13,16 +13,6 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
-@pytest.fixture
-def app():
-    from PySide6.QtWidgets import QApplication
-
-    from jobhub.desktop.styles import apply_appearance
-
-    application = QApplication.instance() or QApplication([])
-    apply_appearance(application, "Light")
-    return application
-
 
 def _settle(app, ms: int = 0) -> None:
     from PySide6.QtTest import QTest

@@ -13,6 +13,45 @@ os.environ.setdefault("JOBHUB_HUMAN_PACING", "0")
 from jobhub import config, db
 
 
+@pytest.fixture(scope="session")
+def app():
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    from jobhub.desktop.theme import apply_appearance
+
+    application = QApplication.instance() or QApplication([])
+    apply_appearance(application, "Light")
+    yield application
+
+
+@pytest.fixture(autouse=True)
+def clean_qt_widgets():
+    yield
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from PySide6.QtWidgets import QApplication
+
+    application = QApplication.instance()
+    if application is None:
+        return
+    for widget in list(application.topLevelWidgets()):
+        try:
+            widget.close()
+            widget.deleteLater()
+        except Exception:
+            pass
+    for widget in list(application.allWidgets()):
+        try:
+            if widget.parent() is None:
+                widget.close()
+                widget.deleteLater()
+        except Exception:
+            pass
+    application.processEvents()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    application.processEvents()
+
+
+
 @pytest.fixture
 def store(tmp_path, monkeypatch):
     """An isolated, initialized database plus the private data folders."""

@@ -23,8 +23,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from ...fortune import fortune_rank
 from ...models import posted_epoch
-from ...priority import is_starred
+from ...priority import held_from_automation, is_starred
 from ..delegates import (
     ACTION_ROLE,
     POSTED_AT_ROLE,
@@ -51,6 +52,7 @@ from ..widgets import (
     PageHeader,
     SearchField,
     SegmentedControl,
+    ToggleSwitch,
     button,
     label,
     paint_backdrop,
@@ -196,6 +198,19 @@ class JobsView(QWidget):
         for text, value in self.FILTERS:
             self.filter.addItem(text, value)
         toolbar.addWidget(self.filter)
+
+        self.unpreparable_toggle = ToggleSwitch()
+        self.unpreparable_toggle.setChecked(True)
+        self.unpreparable_toggle.toggled.connect(self._filter_rows)
+        self.unpreparable_toggle.setToolTip("Show applications that cannot be immediately prepared with Starployment (external 'View' links). Turn off to hide them.")
+
+        toggle_box = QHBoxLayout()
+        toggle_box.setSpacing(6)
+        self.toggle_label = label("Can't prepare", "caption", wrap=False)
+        self.toggle_label.setToolTip(self.unpreparable_toggle.toolTip())
+        toggle_box.addWidget(self.toggle_label)
+        toggle_box.addWidget(self.unpreparable_toggle)
+        toolbar.addLayout(toggle_box)
         column.addLayout(toolbar)
 
         card = GlassPanel(radius=18)
@@ -204,6 +219,7 @@ class JobsView(QWidget):
         card_layout.setSpacing(4)
         self.table = GlassTable(0, 6)
         self.table.setHorizontalHeaderLabels(["ROLE", "POSTED", "SALARY", "MATCH", "STATUS", ""])
+        self.table.horizontalHeaderItem(self.ACTION).setToolTip("Toggle on/off applications that cannot be immediately prepared with Starployment")
         self.table.setAccessibleName("Jobs")
         self.table.setItemDelegateForColumn(self.ROLE, RoleDelegate(self.table))
         self.table.setItemDelegateForColumn(self.POSTED, PostedDelegate(self.table))
@@ -262,6 +278,11 @@ class JobsView(QWidget):
         self.filter.currentIndexChanged.connect(self._reset_query)
         self.posted.changed.connect(self._filter_rows)
         self._retryable: set[str] = set()
+        self._preparing_ids: set[str] = set()
+
+    def set_preparing(self, job_ids: set[str]) -> None:
+        self._preparing_ids = set(job_ids)
+        self._filter_rows()
 
     # ----------------------------------------------------------------- query
     @property
@@ -314,6 +335,9 @@ class JobsView(QWidget):
         self.set_sort(str(key))
 
     def _header_clicked(self, column: int) -> None:
+        if column == self.ACTION:
+            self.unpreparable_toggle.setChecked(not self.unpreparable_toggle.isChecked())
+            return
         key = self.COLUMN_SORTS.get(column)
         if key is None:
             # Keep the indicator on the active column when an unsortable header is clicked.
@@ -377,7 +401,14 @@ class JobsView(QWidget):
             role.setData(Qt.ItemDataRole.UserRole, job.id)
             role.setData(SEARCH_ROLE, f"{job.title} {job.company} {location}".casefold())
             role.setData(STAR_ROLE, starred)
-            role.setToolTip(f"{job.title}\n{job.company} · {location}" + ("\nStarred" if starred else ""))
+            rank = fortune_rank(job.company)
+            if starred == 'red':
+                star_tip = '\nFortune 500' + (f' (#{rank})' if rank else '') + ' · Starred (held for review)'
+            elif starred:
+                star_tip = (f'\nFortune 1000 (#{rank}) · Starred label' if rank else '\nStarred')
+            else:
+                star_tip = ''
+            role.setToolTip(f'{job.title}\n{job.company} · {location}' + star_tip)
             posted = QTableWidgetItem(" · ".join(x for x in posted_label(job.posted_at) if x))
             posted.setData(POSTED_AT_ROLE, job.posted_at)
             posted.setToolTip(("Posted " + local_time(job.posted_at) if job.posted_at else "Posting date not published")
@@ -390,22 +421,34 @@ class JobsView(QWidget):
             status.setData(STATUS_ROLE, job.status)
             status.setData(Qt.ItemDataRole.UserRole, job.status)
             can_apply = job.status == "new" or job.id in retryable_ids
-            if job.status == "prepared":
+            if job.id in self._preparing_ids or job.status == "preparing":
+                kind = "preparing"
+                action = QTableWidgetItem("Preparing…")
+                action.setData(ACTION_ROLE, "preparing")
+                action.setData(Qt.ItemDataRole.UserRole, "preparing")
+                action.setToolTip("Starployment is reading the employer's form and building your resume…")
+            elif job.status == "prepared":
                 kind = "review"
+                action = QTableWidgetItem("Review")
+                action.setData(ACTION_ROLE, "apply")
+                action.setData(Qt.ItemDataRole.UserRole, kind)
+                action.setToolTip("Review the prepared application")
             elif can_apply and job.status in {"new", "dry_run"}:
                 kind = "apply" if job.ats in ("greenhouse", "lever", "ashby") else "view"
+                action = QTableWidgetItem("Prepare" if kind == "apply" else "View")
+                action.setData(ACTION_ROLE, kind)
+                action.setData(Qt.ItemDataRole.UserRole, kind)
+                if kind == "view":
+                    site = ATS_NAMES.get(job.ats, "This employer's")
+                    action.setToolTip(f"{site} applications are filled on the employer's site. Open the posting to apply there.")
+                else:
+                    action.setToolTip("Prepare this application for your review")
             else:
                 kind = "retry" if can_apply else "view"
-            action = QTableWidgetItem({"apply": "Prepare", "review": "Review", "retry": "Retry", "view": "View"}[kind])
-            action.setData(ACTION_ROLE, "apply" if kind == "review" else kind)
-            action.setData(Qt.ItemDataRole.UserRole, kind)
-            tip = {"apply": "Prepare this application for your review", "review": "Review the prepared application",
-                   "retry": "Try this application again", "view": "Open the posting"}[kind]
-            if kind == "view" and job.status == "new":
-                # Only Greenhouse, Lever, and Ashby forms can be filled here.
-                site = ATS_NAMES.get(job.ats, "This employer's")
-                tip = f"{site} applications are filled on the employer's site. Open the posting to apply there."
-            action.setToolTip(tip)
+                action = QTableWidgetItem("Retry" if kind == "retry" else "View")
+                action.setData(ACTION_ROLE, kind)
+                action.setData(Qt.ItemDataRole.UserRole, kind)
+                action.setToolTip("Try this application again" if kind == "retry" else "Open the posting")
             for column, item in enumerate((role, posted, pay, match, status, action)):
                 self.table.setItem(row, column, item)
             if job.id == selected:
@@ -469,7 +512,14 @@ class JobsView(QWidget):
         if item is None or job is None:
             return
         kind = item.data(Qt.ItemDataRole.UserRole) or item.data(ACTION_ROLE)
+        if kind == "preparing":
+            return
         if kind == "apply":
+            self._preparing_ids.add(job.id)
+            item.setText("Preparing…")
+            item.setData(ACTION_ROLE, "preparing")
+            item.setData(Qt.ItemDataRole.UserRole, "preparing")
+            self.table.viewport().update()
             self.prepare_requested.emit(job.id)
         elif kind == "review":
             self.review_requested.emit(job.id)
@@ -499,7 +549,7 @@ class JobsView(QWidget):
         starred = is_starred(job, self.priority)
         if kind == "apply":
             menu.addAction("Prepare application", lambda: self.prepare_requested.emit(job.id))
-            if not starred:   # starred roles always get a prepared, reviewed application
+            if not held_from_automation(job, self.priority):   # starred roles always get a prepared, reviewed application
                 menu.addAction("Apply now, without review", lambda: self.apply_requested.emit(job.id))
         elif kind == "review":
             menu.addAction("Review prepared application", lambda: self.review_requested.emit(job.id))
@@ -529,16 +579,23 @@ class JobsView(QWidget):
         query = self.search.text().casefold().strip()
         selected = self.filter.currentData()
         cutoff = time.time() - self.posted_hours * 3600 if self.posted_hours else None
+        hide_unpreparable = not self.unpreparable_toggle.isChecked()
         for row in range(self.table.rowCount()):
             role = self.table.item(row, self.ROLE)
             status = self.table.item(row, self.STATUS)
             posted = self.table.item(row, self.POSTED)
+            action = self.table.item(row, self.ACTION)
             text = str(role.data(SEARCH_ROLE) or "") if role else ""
             value = status.data(STATUS_ROLE) if status else None
             stamp = posted_epoch(posted.data(POSTED_AT_ROLE)) if posted else None
             outside = cutoff is not None and (stamp is None or stamp < cutoff)
+            kind = action.data(Qt.ItemDataRole.UserRole) if action else None
+            is_unpreparable = (kind == "view")
             self.table.setRowHidden(
-                row, bool(query and query not in text) or (selected != "all" and value != selected) or outside
+                row, bool(query and query not in text)
+                or (selected != "all" and value != selected)
+                or outside
+                or (hide_unpreparable and is_unpreparable)
             )
         self._update_empty_state()
 

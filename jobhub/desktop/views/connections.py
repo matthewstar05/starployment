@@ -14,7 +14,7 @@ from ...agents import BACKENDS
 from ...email_tracker import PROVIDERS, provider_for
 from ..widgets import FormGroup, StatusDot, ToggleSwitch, button, label
 
-LUNA_CHOICES = (("none", "Off"), ("claude_cli", "Claude (Pro or Max plan)"), ("codex_cli", "ChatGPT (Plus or Pro plan)"),
+LUNA_CHOICES = (("none", "Off"), ("antigravity_cli", "Antigravity (agy)"), ("claude_cli", "Claude (Pro or Max plan)"), ("codex_cli", "ChatGPT (Plus or Pro plan)"),
                 ("anthropic_api", "Anthropic API key"), ("openai_api", "OpenAI API key"))
 GREENHOUSE_SENDER = "no-reply@us.greenhouse-mail.io"
 
@@ -96,9 +96,9 @@ class LunaConnection(QWidget):
         key_layout.setContentsMargins(0, 0, 0, 0)
         key_layout.addWidget(self.key, 1)
         key_layout.addWidget(self.save_key)
-        self.model = QLineEdit()
+        self.model = QComboBox()
         self.model.setAccessibleName("Model")
-        self.model.textChanged.connect(self.changed)
+        self.model.currentIndexChanged.connect(self.changed)
         self.draft_answers = ToggleSwitch()
         self.draft_answers.toggled.connect(self.changed)
         self.resume_select = ToggleSwitch()
@@ -110,7 +110,7 @@ class LunaConnection(QWidget):
         self.group.add_row("Account", self.backend)
         self.group.add_widget(self.status)
         self.key_row = self.group.add_row("API key", key_row, "Stored in your system credential vault.")
-        self.model_row = self.group.add_row("Model", self.model, "Optional. Leave blank for the default.")
+        self.model_row = self.group.add_row("Model", self.model, "Choose a model, or keep the default.")
         options = [self.group.add_row("Draft custom answers", self.draft_answers, "When preparing applications."),
                    self.group.add_row("Autofill prepared applications", self.autofill,
                                       "AI Autofill answers every question so each is ready to send. "
@@ -129,7 +129,31 @@ class LunaConnection(QWidget):
         spec = BACKENDS.get(backend)
         self.key_row.setVisible(backend in ("anthropic_api", "openai_api"))
         self.model_row.setVisible(backend != "none" and not self._compact)
-        self.model.setPlaceholderText(spec.default_model if spec and spec.default_model else "Default")
+
+        target = getattr(self, "_pending_model", None)
+        if target is None:
+            target = str(self.model.currentData() or "")
+        self._pending_model = None
+
+        self.model.blockSignals(True)
+        self.model.clear()
+        if spec:
+            default_label = f"Default ({spec.default_model})" if spec.default_model else "Default (auto)"
+            self.model.addItem(default_label, "")
+            models = getattr(spec, "models", ()) or ()
+            for model_id, label_text in models:
+                self.model.addItem(label_text, model_id)
+            if target:
+                idx = self.model.findData(target)
+                if idx >= 0:
+                    self.model.setCurrentIndex(idx)
+                else:
+                    self.model.addItem(f"Custom ({target})", target)
+                    self.model.setCurrentIndex(self.model.count() - 1)
+            else:
+                self.model.setCurrentIndex(0)
+        self.model.blockSignals(False)
+
         for toggle in (self.draft_answers, self.resume_select, self.remember, self.autofill):
             toggle.setEnabled(backend != "none")
         if backend == "none":
@@ -165,7 +189,7 @@ class LunaConnection(QWidget):
         self.backend.blockSignals(True)
         self.backend.setCurrentIndex(max(0, self.backend.findData(agent.get("backend", "none"))))
         self.backend.blockSignals(False)
-        self.model.setText(str(agent.get("model") or ""))
+        self._pending_model = str(agent.get("model") or "")
         luna = settings.get("luna") or {}
         self.draft_answers.setChecked(bool(luna.get("draft_answers", True)))
         self.remember.setChecked(bool(luna.get("remember_approved", True)))
@@ -174,7 +198,7 @@ class LunaConnection(QWidget):
         self._backend_changed()
 
     def values(self) -> dict:
-        return {"agent": {"backend": str(self.backend.currentData() or "none"), "model": self.model.text().strip()},
+        return {"agent": {"backend": str(self.backend.currentData() or "none"), "model": str(self.model.currentData() or "").strip()},
                 "luna": {"draft_answers": self.draft_answers.isChecked(), "remember_approved": self.remember.isChecked(),
                          "autofill_on_prepare": self.autofill.isChecked()},
                 "resume_builder": {"luna_select": self.resume_select.isChecked()}}
@@ -194,7 +218,7 @@ class EmailConnection(QWidget):
         self.group = FormGroup("Email", "Read-only. Moves applications to Assessment, Interview, Offer, or Rejected "
                                         "from replies; keeps only each message's sender, subject, and date." if compact else
                                "Starployment reads your inbox (read-only) to move applications to Assessment, "
-                               "Interview, Offer, or Rejected, and optionally to finish Greenhouse email codes. "
+                               "Interview, Offer, or Rejected, and optionally to complete email verification codes and links. "
                                "It keeps only each message's sender, subject, and date.")
         self.provider = QComboBox()
         for key, (title, *_rest) in PROVIDERS.items():
@@ -229,7 +253,7 @@ class EmailConnection(QWidget):
         self.codes = ToggleSwitch()
         self.codes.toggled.connect(self._codes_changed)
         self.sender = QLineEdit()
-        self.sender.setPlaceholderText(GREENHOUSE_SENDER)
+        self.sender.setPlaceholderText("Leave blank to auto-detect employer or ATS")
         self.sender.textChanged.connect(self.changed)
         self.forget = ToggleSwitch()
         self.forget.toggled.connect(self.changed)
@@ -241,9 +265,10 @@ class EmailConnection(QWidget):
         self.port_row = self.group.add_row("Port (TLS)", self.port)
         self.group.add_widget(self.status)
         self.group.add_row("Track replies", self.track, "Update Tracker stages from recruiting emails.")
-        codes_row = self.group.add_row("Finish Greenhouse email codes", self.codes,
-                                       "Reads only fresh codes from the sender below.")
-        self.sender_row = self.group.add_row("Trusted sender", self.sender)
+        codes_row = self.group.add_row("Finish email verification", self.codes,
+                                       "Completes verification codes and links from employer emails.")
+        self.sender_row = self.group.add_row("Trusted sender filter", self.sender,
+                                             "Optional. Leave blank to match employer domains automatically.")
         forget_row = self.group.add_row("Forget saved password", self.forget)
         self._compact = compact
         codes_row.setVisible(not compact)
@@ -268,8 +293,6 @@ class EmailConnection(QWidget):
 
     def _codes_changed(self, *_args) -> None:
         self.sender_row.setVisible(self.codes.isChecked() and not getattr(self, "_compact", False))
-        if self.codes.isChecked() and not self.sender.text().strip():
-            self.sender.setText(GREENHOUSE_SENDER)
         self.changed.emit()
 
     def set_values(self, settings: dict) -> None:

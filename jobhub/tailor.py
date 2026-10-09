@@ -11,7 +11,7 @@ import os
 import shutil
 from pathlib import Path
 
-from reportlab.lib.enums import TA_LEFT, TA_RIGHT
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import inch
@@ -58,11 +58,8 @@ def polish_bullets(bullets: list[str], job: Job, profile: Profile) -> list[str]:
 
 
 def tailored_headline(profile: Profile, job: Job) -> str:
-    base = profile.headline or ""
-    title = re.sub(r"\s*[-–|(].*$", "", job.title).strip()
-    if title and title.lower() not in base.lower():
-        return f"{title} Candidate | " + base if base else title
-    return base
+    """Use only the candidate's own headline, never the target job title."""
+    return profile.headline or ""
 
 
 def tailored_summary(profile: Profile, job: Job, limit: int = 2) -> str:
@@ -129,19 +126,35 @@ def _year(value: str) -> int:
     return int(years[-1]) if years else 0
 
 
+def _degree_rank(degree: str) -> int:
+    d = (degree or "").lower()
+    if re.search(r"\bph\.?d\b|doctor", d):
+        return 4
+    if re.search(r"\bm\.?s\.?\b|\bm\.?a\.?\b|master", d):
+        return 3
+    if re.search(r"\bb\.?s\.?\b|\bb\.?a\.?\b|bachelor", d):
+        return 2
+    if re.search(r"\bassociate\b|\ba\.?s\.?\b|\ba\.?a\.?\b", d):
+        return 1
+    return 0
+
+
 class _Item:
     """A ranked resume entry and the bullets currently selected for it."""
 
-    def __init__(self, kind: str, index: int, source, score: float, bullet_scores: list[float]):
+    def __init__(self, kind: str, index: int, source, score: float, bullet_scores: list[float],
+                 relevance: float, bullet_relevance: list[float]):
         self.kind, self.index, self.source, self.score = kind, index, source, score
         self.bullet_scores = bullet_scores
+        self.relevance, self.bullet_relevance = relevance, bullet_relevance
         order = sorted(range(len(source.bullets)), key=lambda i: (-bullet_scores[i], i))
         self.ranked_bullets = order
         self.keep: set[int] = set()
 
     @property
     def bullets(self) -> list[str]:
-        return [b for i, b in enumerate(self.source.bullets) if i in self.keep]  # original order
+        order = sorted(self.keep, key=lambda i: (-self.bullet_relevance[i], i))
+        return [self.source.bullets[i] for i in order]
 
 
 class ResumePlan:
@@ -150,19 +163,33 @@ class ResumePlan:
         settings = settings or {}
         builder = settings.get("resume_builder") or {}
         self.profile, self.job = profile, job
+        self.font_scale = 1.0
         self.weights = _job_weights(job)
         self.reason = "Selected by Luna" if selection else "Ranked by relevance to this role"
         self.headline = tailored_headline(profile, job)
         self.summary = tailored_summary(profile, job)
-        self.education = list(profile.education[:3])
+        newest_edu = max((_year(e.end) or _year(e.start) for e in profile.education), default=0)
+
+        def _edu_score(e):
+            rel = _score_text(' '.join([e.school, e.degree, e.field, *e.details]), self.weights)
+            rank_bonus = 0.25 * _degree_rank(e.degree)
+            yr = _year(e.end) or _year(e.start)
+            recency = max(0.0, 0.2 - 0.05 * max(0, newest_edu - yr)) if newest_edu and yr else 0.0
+            return rel + rank_bonus + recency
+
+        self.education = sorted(profile.education, key=lambda e: -_edu_score(e))[:3]
         self.max_skills = int(builder.get("max_skills", 28) or 28)
         self.experience = self._rank("experience", profile.experience, selection, 4)
         self.projects = self._rank("projects", profile.projects, selection, 3)
-        matched = [s for s in profile.skills if _tokens(s) & set(self.weights)]
-        rest = [s for s in profile.skills if s not in matched]
+        # Saved tools from selected entries are also evidence, even when the
+        # candidate did not repeat them in the library's general skills list.
+        saved_skills = list(dict.fromkeys(profile.skills + [
+            skill for item in self.experience + self.projects for skill in item.source.tech
+        ]))
+        ranked_skills = sorted(saved_skills, key=lambda s: -_score_text(s, self.weights))
         chosen = (selection or {}).get("skills") or []
-        chosen = [s for s in chosen if s in profile.skills]
-        ordered = list(dict.fromkeys(chosen + matched + rest))
+        chosen = [s for s in chosen if s in saved_skills]
+        ordered = sorted(dict.fromkeys(chosen + ranked_skills), key=lambda s: -_score_text(s, self.weights))
         self.skills = ordered[:self.max_skills]
         self.awards = sorted(profile.awards, key=lambda a: -_score_text(a, self.weights))[:4]
 
@@ -176,7 +203,7 @@ class ResumePlan:
             text = " ".join([getattr(entry, "title", "") or getattr(entry, "role", ""),
                              getattr(entry, "name", "") or getattr(entry, "company", ""),
                              " ".join(entry.tech), " ".join(entry.bullets)])
-            score = _score_text(text, self.weights)
+            relevance = score = _score_text(text, self.weights)
             if kind == "experience" and newest:
                 year = _year(entry.end)
                 score += 0.4 if year == 9999 else max(0.0, 0.3 - 0.1 * max(0, min(newest, 2100) - year))
@@ -186,16 +213,19 @@ class ResumePlan:
                 continue  # Luna left it out; pinned entries always stay
             if entry.pinned:
                 score += 1000.0
-            bullet_scores = [_score_text(b, self.weights) for b in entry.bullets]
+            bullet_relevance = [_score_text(b, self.weights) for b in entry.bullets]
+            bullet_scores = list(bullet_relevance)
             chosen_bullets = ((selection or {}).get("bullets") or {}).get(f"{kind}:{index}") or []
             for i in chosen_bullets:
                 if isinstance(i, int) and 0 <= i < len(bullet_scores):
                     bullet_scores[i] += 50.0
-            item = _Item(kind, index, entry, score, bullet_scores)
+            item = _Item(kind, index, entry, score, bullet_scores, relevance, bullet_relevance)
             item.keep = set(item.ranked_bullets[:bullets_each])
             items.append(item)
         items.sort(key=lambda item: (-item.score, item.index))
-        return items[:6 if kind == "experience" else 5]
+        # Pinning and Luna affect what survives, while the displayed order
+        # always reflects relevance to the posting.
+        return sorted(items[:6 if kind == "experience" else 5], key=lambda item: (-item.relevance, item.index))
 
     # -- shrinking ---------------------------------------------------------
     def shrink(self) -> bool:
@@ -254,33 +284,40 @@ class ResumePlan:
 
 
 # ------------------------------------------------------------------ rendering
-# Everything sits on one left edge (the frame has no padding), entry rows span the full
-# text width with dates flush right, and section titles carry a thin rule. Standard PDF
-# fonts keep the file small and readable by every applicant tracking system.
+# Body text shares one left edge, dates sit flush right, and section titles carry
+# a thin rule. Standard PDF fonts keep the text selectable and the file small.
 PAGE_MARGIN_X = 0.55 * inch
-PAGE_MARGIN_Y = 0.45 * inch
-INK, MUTED, RULE = "#111111", "#4D4D4D", "#9A9A9A"
+PAGE_MARGIN_Y = 0.5 * inch
+INK, MUTED, RULE = "#111111", "#111111", "#111111"
+MIN_FONT_SCALE = 10 / 11
 _MONTHS = {"january": "Jan", "february": "Feb", "march": "Mar", "april": "Apr", "may": "May", "june": "Jun",
            "july": "Jul", "august": "Aug", "september": "Sep", "sept": "Sep", "october": "Oct",
            "november": "Nov", "december": "Dec"}
 
 
+_SERIF_FAMILY = "Times-Roman"
+_SERIF_BOLD = "Times-Bold"
+_SERIF_ITALIC = "Times-Italic"
+_SERIF_BOLD_ITALIC = "Times-BoldItalic"
+
+
 def _styles(scale: float = 1.0) -> dict:
     def style(name: str, font: str, size: float, leading: float, color: str = INK, **extra) -> ParagraphStyle:
         return ParagraphStyle(name, fontName=font, fontSize=size * scale, leading=leading * scale,
-                              textColor=color, alignment=extra.pop("alignment", TA_LEFT), **extra)
+                               textColor=color, alignment=extra.pop("alignment", TA_LEFT),
+                               **{key: value * scale for key, value in extra.items()})
 
     return {
-        "name": style("name", "Helvetica-Bold", 19, 22),
-        "contact": style("contact", "Helvetica", 9, 11.5, MUTED, spaceBefore=2),
-        "head": style("head", "Helvetica", 9.4, 11.8, MUTED, spaceBefore=1.5),
-        "h2": style("h2", "Helvetica-Bold", 10, 12, spaceBefore=8),
-        "item": style("item", "Helvetica", 9.7, 12),
-        "right": style("right", "Helvetica", 9, 12, MUTED, alignment=TA_RIGHT),
-        "sub": style("sub", "Helvetica-Oblique", 9, 11.4, MUTED),
-        "subright": style("subright", "Helvetica-Oblique", 9, 11.4, MUTED, alignment=TA_RIGHT),
-        "bullet": style("bullet", "Helvetica", 9.3, 11.6, leftIndent=11, bulletIndent=2),
-        "body": style("body", "Helvetica", 9.3, 11.6),
+        "name": style("name", _SERIF_BOLD, 20, 24, alignment=TA_CENTER),
+        "contact": style("contact", _SERIF_FAMILY, 9.5, 12, spaceBefore=3, alignment=TA_CENTER),
+        "head": style("head", _SERIF_ITALIC, 9.5, 12, spaceBefore=2, alignment=TA_CENTER),
+        "h2": style("h2", _SERIF_BOLD, 11, 14, spaceBefore=9),
+        "item": style("item", _SERIF_BOLD, 10.5, 13),
+        "right": style("right", _SERIF_FAMILY, 9.5, 13, alignment=TA_RIGHT),
+        "sub": style("sub", _SERIF_ITALIC, 9.5, 12),
+        "subright": style("subright", _SERIF_ITALIC, 9.5, 12, alignment=TA_RIGHT),
+        "bullet": style("bullet", _SERIF_FAMILY, 10, 13, leftIndent=13, bulletIndent=1),
+        "body": style("body", _SERIF_FAMILY, 10, 13),
     }
 
 
@@ -304,22 +341,16 @@ def _story(plan: ResumePlan, scale: float = 1.0) -> list:
     S: list = []
     S.append(Paragraph(_esc(profile.full_name or "Resume"), styles["name"]))
     contact = _join(profile.email, profile.phone and _fmt_phone(profile.phone), profile.location,
-                    _short(profile.website), _short(profile.linkedin), _short(profile.github))
+                    _short(profile.website), _short(profile.linkedin), _short(profile.github), sep=" | ")
     if contact:
         S.append(Paragraph(_esc(contact), styles["contact"]))
     if plan.headline:
         S.append(Paragraph(_esc(plan.headline), styles["head"]))
 
-    # The date column is as wide as the widest date or place, so titles get the rest.
-    right_texts = [_dates(e.start, e.end) for e in plan.education] + [e.location for e in plan.education]
-    right_texts += [_dates(i.source.start, i.source.end) for i in plan.experience + plan.projects]
-    right_texts += [i.source.location for i in plan.experience]
-    widest = max((stringWidth(t, "Helvetica", 9 * scale) for t in right_texts if t), default=0)
-    right_width = min(2.3 * inch, max(0.9 * inch, widest + 8))
-
     def heading(text: str) -> None:
-        S.append(Paragraph(text.upper(), styles["h2"]))
-        S.append(HRFlowable(width="100%", thickness=0.6, color=RULE, spaceBefore=1.5, spaceAfter=3.5))
+        S.append(Paragraph(text, styles["h2"]))
+        S.append(HRFlowable(width="100%", thickness=0.5, color=RULE,
+                            spaceBefore=1 * scale, spaceAfter=3 * scale))
 
     def row(left: str, right: str, sub: bool = False) -> None:
         """One line of an entry: markup on the left, a date or place flush right."""
@@ -327,6 +358,9 @@ def _story(plan: ResumePlan, scale: float = 1.0) -> list:
         if not right:
             S.append(Paragraph(left, left_style))
             return
+        width = letter[0] - 2 * PAGE_MARGIN_X
+        right_width = min(width * 0.48, max(0.9 * inch,
+                          stringWidth(right, right_style.fontName, right_style.fontSize) + 10 * scale))
         table = Table([[Paragraph(left, left_style), Paragraph(_esc(right), right_style)]],
                       colWidths=["*", right_width], hAlign="LEFT")
         table.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
@@ -342,28 +376,39 @@ def _story(plan: ResumePlan, scale: float = 1.0) -> list:
         S.append(Spacer(1, 3.5 * scale))
 
     def tech(values: list[str]) -> str:
-        return _esc(", ".join(values[:6]))
-
-    def role_line(title: str, extra: str) -> str:
-        """The second line of an entry: the role in ink, supporting detail muted."""
-        return _join(f"<font color='{INK}'>{_esc(title)}</font>" if title else "", extra)
-
-    if plan.summary:
-        heading("Summary")
-        S.append(Paragraph(_esc(plan.summary), styles["body"]))
+        ordered = sorted(values, key=lambda value: -_score_text(value, plan.weights))
+        return _esc(", ".join(ordered[:6]))
 
     if plan.education:
         heading("Education")
         for n, e in enumerate(plan.education):
             if n:
                 gap()
-            degree = e.degree + (f" in {e.field}" if e.field and e.field.lower() not in e.degree.lower() else "")
-            school = e.school or degree
-            row(f"<b>{_esc(school)}</b>", e.location)
-            detail = role_line(degree if e.school else "", _esc(f"GPA {e.gpa}") if e.gpa else "")
-            if detail or _dates(e.start, e.end):
-                row(detail, _dates(e.start, e.end), sub=True)
-            bullets(e.details[:2])
+            raw_field = (e.field or "").strip()
+            clean_field = raw_field.split("|")[0].strip() if "|" in raw_field else raw_field
+            if clean_field and clean_field.lower() not in (e.degree or "").lower():
+                deg = f"{e.degree} in {clean_field}" if e.degree else clean_field
+            else:
+                deg = e.degree or clean_field
+            date_str = _when(e.end) or _when(e.start)
+            r1_left = f"<b>{_esc(e.school)}</b>" if e.school else ""
+            if e.location:
+                r1_right = e.location
+                r2_right = date_str
+                r2_left = _esc(deg) + (f" · GPA {e.gpa}" if e.gpa else "")
+            else:
+                r1_right = date_str
+                r2_right = f"GPA: {e.gpa}" if e.gpa else ""
+                r2_left = _esc(deg)
+            row(r1_left, r1_right)
+            if r2_left or r2_right:
+                row(r2_left, r2_right, sub=True)
+            details = sorted(e.details, key=lambda text: -_score_text(text, plan.weights))
+            bullets(details[:2])
+
+    if plan.summary and not (plan.experience or plan.projects):
+        heading("Summary")
+        S.append(Paragraph(_esc(plan.summary), styles["body"]))
 
     def emit(section: str, items: list[_Item], first, second) -> None:
         if not items:
@@ -380,13 +425,13 @@ def _story(plan: ResumePlan, scale: float = 1.0) -> list:
                 row(left, right, sub=True)
             bullets(item.bullets)
 
-    # Experience reads like education: employer and place, then role and dates.
-    emit("Experience", plan.experience,
-         lambda x: (f"<b>{_esc(x.company or x.title)}</b>", x.location),
-         lambda x: (role_line(x.title if x.company else "", tech(x.tech)), _dates(x.start, x.end)))
     emit("Projects", plan.projects,
-         lambda x: (_join(f"<b>{_esc(x.name)}</b>", _esc(x.role)), _dates(x.start, x.end)),
-         lambda x: (_join(tech(x.tech), _esc(_short(x.link))), ""))
+         lambda x: (_join(f"<b>{_esc(x.name)}</b>", _esc(x.role)), _short(x.link) or _dates(x.start, x.end)),
+         lambda x: (tech(x.tech), _dates(x.start, x.end) if x.link else ""))
+    emit("Experience", plan.experience,
+         lambda x: (_join(_join(f"<b>{_esc(x.title)}</b>" if x.title else "", _esc(x.company), sep=", "),
+                          _esc(x.location), sep=" - "), _dates(x.start, x.end)),
+         lambda x: (tech(x.tech), ""))
     if plan.skills:
         heading("Skills")
         S.append(Paragraph(_esc(", ".join(plan.skills)), styles["body"]))
@@ -411,7 +456,7 @@ def _render(plan: ResumePlan, target, fit: bool = False) -> int:
     """Write the PDF and return its page count. ``fit`` scales the whole page down
     if the content is still too long, so the result is always exactly one page."""
     doc = _document(plan, target)
-    story = _story(plan)
+    story = _story(plan, plan.font_scale)
     if fit:
         story = [KeepInFrame(doc.width, doc.height, story, mode="shrink")]
     doc.build(story)
@@ -422,16 +467,24 @@ def plan_resume(profile: Profile, job: Job, settings: dict | None = None,
                 selection: dict | None = None) -> ResumePlan:
     """Rank the resume library for ``job`` and trim it to one page.
 
-    Generated resumes are always one page: the least relevant material goes first, then
-    optional extras (awards, coursework, a long summary). ``build_resume`` scales any
-    remainder onto the page, so nothing is cut mid-sentence."""
+    Try 11-point body text, then resize down to 10 points before removing low-value
+    content. The final fallback scales protected content without cutting sentences."""
     from io import BytesIO
     plan = ResumePlan(profile, job, settings, selection)
+    if _render(plan, BytesIO()) <= 1:
+        return plan
+    plan.font_scale = MIN_FONT_SCALE
     for _ in range(400):
         if _render(plan, BytesIO()) <= 1:
             break
         if not plan.shrink() and not plan.compact():
             break
+    # Use the largest readable size that fits the selected material.
+    for scale in (1.0, 0.975, 0.95, 0.925):
+        plan.font_scale = scale
+        if _render(plan, BytesIO()) <= 1:
+            return plan
+    plan.font_scale = MIN_FONT_SCALE
     return plan
 
 
@@ -607,7 +660,7 @@ def cover_letter_pdf(profile: Profile, job: Job, settings: dict | None = None) -
     folder.mkdir(parents=True, exist_ok=True)
     name = re.sub(r"[^A-Za-z0-9]+", "_", f"{profile.full_name or 'Candidate'}_Cover_Letter_{job.company}").strip("_")
     path = folder / f"{name}.pdf"
-    style = ParagraphStyle("letter", fontName="Helvetica", fontSize=11, leading=15, alignment=TA_LEFT, spaceAfter=10)
+    style = ParagraphStyle("letter", fontName=_SERIF_FAMILY, fontSize=11, leading=15, alignment=TA_LEFT, spaceAfter=10)
     doc = SimpleDocTemplate(str(path), pagesize=letter, leftMargin=inch, rightMargin=inch,
                             topMargin=inch, bottomMargin=inch, title=f"Cover letter: {job.company}")
     doc.build([Paragraph(_esc(part).replace("\n", "<br/>"), style) for part in text.split("\n\n") if part.strip()])

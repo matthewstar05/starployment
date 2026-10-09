@@ -212,7 +212,7 @@ That warning is harmless.
 | Variable | Effect |
 | --- | --- |
 | `JOBHUB_DATA_DIR` | Data root (DB, resumes, PDFs, screenshots, browser profile). Rejects home, filesystem root, symlinks, and unrecognized populated directories. |
-| `JOBHUB_LLM_BACKEND` | `none` / `auto` / `anthropic` / `claude_cli` / `codex_cli`. The core workflow needs no LLM. |
+| `JOBHUB_LLM_BACKEND` | `none` / `auto` / `anthropic` / `antigravity_cli` / `claude_cli` / `codex_cli`. The core workflow needs no LLM. |
 | `JOBHUB_CODEX_MODEL`, `JOBHUB_CLAUDE_CLI_MODEL`, `JOBHUB_ANTHROPIC_MODEL` | Model overrides for the optional LLM backends. |
 | `JOBHUB_HEADLESS` | `0` shows Chromium during attempts (same as Settings → Show the browser while sending). |
 | `JOBHUB_PORT` | Legacy web server port (8765). |
@@ -258,7 +258,7 @@ every 15 s) and renders via window.set_data.
 | `jobhub/apply/engine.py`, `adapters.py` | Browser form filling per ATS, confirmation detection, screenshots. |
 | `jobhub/answers.py` | Maps rendered form questions to saved candidate answers without guessing. |
 | `jobhub/profile.py` | Resume parsing (pdftotext/pypdf, optional LLM). |
-| `jobhub/tailor.py` | One-page resume builder (`plan_resume`, `build_resume`: rank the library, `shrink` then `compact` until one page, and a final `KeepInFrame` scale so generated resumes are always exactly one page; one zero-padding frame so every line shares the left margin, dates flush right), role types (`classify_role`), resume files (`choose_resume_file`), `resume_choice`. |
+| `jobhub/tailor.py` | One-page resume builder (`plan_resume`, `build_resume`: rank saved content, resize body text from 11 to 10 points, then `shrink` and `compact`; final `KeepInFrame` scaling protects the one-page guarantee). Helvetica typography, centered name/contact, Education first, saved Summary if present, Projects above Experience, then Skills and Awards; thin section rules and dates flush right. Entries, bullets, education details, tools, and skills display by job relevance; pins and Luna selections protect inclusion without overriding display order. The target job title is never added as a headline. Also role types (`classify_role`), resume files (`choose_resume_file`), `resume_choice`. |
 | `jobhub/prepare.py` | Read Greenhouse/Lever/Ashby form definitions, answer from saved facts, Luna fill, `prepare_batch`, `approve_and_queue`, `send_draft`. |
 | `jobhub/agents.py` | Connections for Luna: Claude CLI, Codex CLI, Anthropic/OpenAI keys; CLI discovery beyond a GUI PATH, status, sign-in, tool-free `complete`. |
 | `jobhub/luna.py` | Draft answers (`draftable`, `draft_answers`), resume selection, optional email second opinion; all output validated. |
@@ -363,7 +363,7 @@ motion and minimal chrome. Concretely:
   Anthropic Sans for interface text and Anthropic Serif for page, sheet, and
   hero titles, the sidebar's app name, and its page names (`widgets.display_font`). `desktop/fonts.py` registers them at runtime from an
   installed `/Applications/Claude.app`; they are licensed to Anthropic, so never
-  copy, bundle, commit, or embed them (resume PDFs use standard Helvetica).
+  copy, bundle, commit, or embed them (resume PDFs use standard Times fonts).
   Without the Claude app, or with Font → System, the system UI font
   (`.AppleSystemUIFont` on macOS) is used. Always get fonts from
   `styles.app_font` / `widgets.ui_font` at paint time, never a hard-coded family.

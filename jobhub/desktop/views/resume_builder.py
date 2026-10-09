@@ -283,7 +283,7 @@ class ResumeBuilder(QWidget):
     import_requested = Signal(str)
     preview_requested = Signal(str)
 
-    SECTIONS = (("Experience", "experience"), ("Projects", "projects"), ("Education", "education"),
+    SECTIONS = (("Education", "education"), ("Experience", "experience"), ("Projects", "projects"),
                 ("Skills", "skills"), ("Awards", "awards"))
 
     def __init__(self, parent: QWidget | None = None):
@@ -335,7 +335,7 @@ class ResumeBuilder(QWidget):
         awards_group.add_widget(self.awards)
         awards_layout.addWidget(awards_group)
         awards_layout.addStretch(1)
-        for page in (self.experience, self.projects, self.education):
+        for page in (self.education, self.experience, self.projects):
             self.pages.addWidget(page)
         for page in (skills_page, awards_page):
             scroll = QScrollArea()

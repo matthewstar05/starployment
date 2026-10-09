@@ -132,7 +132,10 @@ text cannot make them act on your computer.
 (the button links to your provider's page), and press **Test**. With **Track replies** on, Starployment reads recent
 mail read-only after each scan, recognizes assessments, interview invitations, offers, rejections, and
 confirmations, and advances the matching application. It stores only each message's sender, subject, and date, and
-a stage only moves forward unless you change it yourself. The same mailbox can finish Greenhouse email codes.
+a stage only moves forward unless you change it yourself. With **Finish email verification** on, Starployment automatically
+retrieves verification codes (including segmented and leading-zero codes) or secure verification links from incoming
+messages, completes the verification step in your session without leaking tokens, and records the application as applied
+only after employer confirmation.
 
 ## Tracker
 

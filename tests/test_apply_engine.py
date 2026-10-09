@@ -767,3 +767,179 @@ def test_a_state_question_in_a_location_search_picks_the_state_itself():
     unknown_country = SimpleNamespace(profile=Profile())
     assert FormEngine._region_option(unknown_country, options, "California") == "California, United States"
     assert FormEngine._region_option(us, options, "Ontario") is None
+
+
+def test_opt_in_verification_link_flow_through_employer_confirmation(fixture_form, monkeypatch, tmp_path):
+    confirm_file = tmp_path / "confirm.html"
+    confirm_file.write_text(
+        "<html><body><h1>Thank you for your application</h1><p>Your application was successfully submitted.</p></body></html>"
+    )
+
+    class FakeInbox:
+        def __init__(self, settings, recipient):
+            assert recipient == "ada@example.test"
+
+        def baseline(self):
+            return 20, "before-submit"
+
+        def wait_for_token(self, uid, started, **kwargs):
+            return engine_module.VerificationToken(
+                kind="link",
+                value=f"{confirm_file.as_uri()}?token=secret_verify_token_12345",
+                sender="no-reply@greenhouse.io",
+                subject="Confirm your application"
+            )
+
+    monkeypatch.setattr(engine_module, "EmailVerificationInbox", FakeInbox)
+    create, _, attempted = fixture_form
+    notice = ("<p>A verification link was sent to ada@example.test. Check your email to confirm your application.</p>")
+    engine, context, page = create(
+        fields="<label for='name'>Full Name</label><input id='name' name='name'>",
+        submit=f"document.body.insertAdjacentHTML('beforeend', `{notice}`);"
+    )
+    engine.adapter.name = "greenhouse"
+    engine.settings["email_verification"] = {"enabled": True}
+    result = engine._run_page(context, page, engine.adapter.apply_url)
+    assert result.status == "applied"
+    assert result.submission_attempted
+    assert attempted == [engine.job.id]
+    assert "Email verification (required)" not in result.unanswered
+    assert any("Employer confirmation after email verification" in line for line in result.log)
+    # Token must be redacted from logs
+    assert all("secret_verify_token_12345" not in line for line in result.log)
+
+
+def test_verification_link_untrusted_host_rejected(fixture_form, monkeypatch):
+    class FakeInbox:
+        def __init__(self, settings, recipient):
+            pass
+
+        def baseline(self):
+            return 20, "before-submit"
+
+        def wait_for_token(self, uid, started, **kwargs):
+            return engine_module.VerificationToken(
+                kind="link",
+                value="https://untrusted-phishing-host.test/verify?token=evil123",
+                sender="attacker@example.test",
+                subject="Verify your email"
+            )
+
+    monkeypatch.setattr(engine_module, "EmailVerificationInbox", FakeInbox)
+    create, _, attempted = fixture_form
+    notice = "<p>A verification link was sent to your email address. Click the link to complete your application.</p>"
+    engine, context, page = create(
+        fields="<label for='name'>Full Name</label><input id='name' name='name'>",
+        submit=f"document.body.insertAdjacentHTML('beforeend', `{notice}`);"
+    )
+    engine.adapter.name = "greenhouse"
+    engine.settings["email_verification"] = {"enabled": True}
+    result = engine._run_page(context, page, engine.adapter.apply_url)
+    assert result.status == "needs_human"
+    assert "untrusted domain" in result.message.lower()
+    assert result.submission_attempted
+    assert "evil123" not in result.message
+    assert all("evil123" not in line for line in result.log)
+
+
+def test_segmented_code_with_leading_zeros(fixture_form, monkeypatch):
+    class FakeInbox:
+        def __init__(self, settings, recipient):
+            pass
+
+        def baseline(self):
+            return 20, "before-submit"
+
+        def wait_for_token(self, uid, started, **kwargs):
+            return engine_module.VerificationToken(
+                kind="code",
+                value="012345",
+                sender="no-reply@jobs.ashbyhq.com",
+                subject="Verification Code"
+            )
+
+    monkeypatch.setattr(engine_module, "EmailVerificationInbox", FakeInbox)
+    create, _, attempted = fixture_form
+    fields = "".join(f"<input maxlength='1' aria-label='Digit {i+1}'>" for i in range(6))
+    otp = ("<p>Enter the 6-character code sent to your email.</p>"
+           "<form id='otp' onsubmit='event.preventDefault();window.codeSubmissions=(window.codeSubmissions||0)+1;"
+           "window.codeEntered=[...document.querySelectorAll(&quot;#otp input&quot;)].map(e=>e.value).join(&quot;&quot;);"
+           "document.body.textContent=&quot;We have received your application. Thank you!&quot;'>"
+           f"{fields}<button type='submit'>Verify</button></form>")
+    engine, context, page = create(
+        fields="<label for='name'>Name</label><input id='name' name='name'>",
+        submit=f"document.body.insertAdjacentHTML('beforeend', `{otp}`);"
+    )
+    engine.adapter.name = "ashby"
+    engine.settings["email_verification"] = {"enabled": True}
+    result = engine._run_page(context, page, engine.adapter.apply_url)
+    assert result.status == "applied"
+    assert result.submission_attempted
+    assert page.evaluate("window.codeEntered") == "012345"
+    assert all("012345" not in line for line in result.log)
+
+
+def test_pre_submit_email_verification_unlocks_submission(fixture_form, monkeypatch):
+    class FakeInbox:
+        def __init__(self, settings, recipient):
+            pass
+
+        def baseline(self):
+            return 20, "before-submit"
+
+        def wait_for_token(self, uid, started, **kwargs):
+            return engine_module.VerificationToken(
+                kind="code",
+                value="987654",
+                sender="no-reply@greenhouse.io",
+                subject="Your verification code"
+            )
+
+    monkeypatch.setattr(engine_module, "EmailVerificationInbox", FakeInbox)
+    create, _, attempted = fixture_form
+    pre_form = (
+        "<label for='name'>Name</label><input id='name' name='name'>"
+        "<div id='pre_verify'>"
+        "  <p>Please enter the 6-character code sent to ada@example.test to unlock submission.</p>"
+        "  <input name='verification_code' id='verification_code'>"
+        "  <button id='verify_btn' type='button' onclick='"
+        "    if(document.getElementById(&quot;verification_code&quot;).value===&quot;987654&quot;) {"
+        "      document.getElementById(&quot;pre_verify&quot;).style.display=&quot;none&quot;;"
+        "      document.getElementById(&quot;real_submit&quot;).style.display=&quot;inline-block&quot;;"
+        "    }'>Verify</button>"
+        "</div>"
+        "<button id='real_submit' type='submit' style='display:none;' "
+        "  onclick='event.preventDefault();document.body.textContent=&quot;Thank you for applying. Application received.&quot;;'>"
+        "  Submit application</button>"
+    )
+    engine, context, page = create(fields=pre_form)
+    engine.adapter.name = "greenhouse"
+    engine.adapter.submit_selectors = ["#real_submit"]
+    engine.settings["email_verification"] = {"enabled": True}
+    result = engine._run_page(context, page, engine.adapter.apply_url)
+    assert result.status == "applied"
+    assert result.submission_attempted
+    assert attempted == [engine.job.id]
+    assert all("987654" not in line for line in result.log)
+
+
+def test_practice_mode_stops_before_verification_or_submit(fixture_form, monkeypatch):
+    class ExplodingInbox:
+        def __init__(self, settings, recipient):
+            raise AssertionError("Inbox should not be contacted during dry run")
+
+    monkeypatch.setattr(engine_module, "EmailVerificationInbox", ExplodingInbox)
+    create, _, attempted = fixture_form
+    engine, context, page = create(
+        fields="<label for='name'>Name</label><input id='name' name='name'>"
+               "<p>Verification code was sent to your email.</p><input name='verification_code'>"
+    )
+    engine.adapter.name = "greenhouse"
+    engine.dry_run = True
+    engine.settings["email_verification"] = {"enabled": True}
+    result = engine._run_page(context, page, engine.adapter.apply_url)
+    assert result.status == "dry_run"
+    assert not result.submission_attempted
+    assert attempted == []
+    assert "Dry run" in result.message
+

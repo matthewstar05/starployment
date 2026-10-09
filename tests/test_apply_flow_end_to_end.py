@@ -148,3 +148,4 @@ def test_prepare_review_approve_send_track_and_reset(store, make_pdf, monkeypatc
     finally:
         controller.stop()
         window.close()
+        window.deleteLater()

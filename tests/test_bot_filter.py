@@ -6,7 +6,6 @@ received real keystrokes, after some time on the page.
 """
 from __future__ import annotations
 
-import pytest
 
 from jobhub import config
 from jobhub.apply import engine as engine_module

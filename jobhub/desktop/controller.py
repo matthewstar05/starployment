@@ -78,6 +78,7 @@ class DesktopController(QObject):
         self._assist = ThreadPoolExecutor(max_workers=2, thread_name_prefix="starployment-assist")
         self._prep_stop = threading.Event()
         self._preparing = False
+        self._preparing_jobs: set[str] = set()
         self._sending: set[int] = set()          # queued or in flight
         self._send_queue: deque[int] = deque()
         self._send_active: dict[int, str] = {}   # draft id -> employer, while its browser runs
@@ -558,8 +559,12 @@ class DesktopController(QObject):
             if prepared:
                 self.window.show_applications("review")
         elif kind == "prepare_one":
+            self._preparing_jobs.discard(str(context))
+            self.window.jobs.set_preparing(self._preparing_jobs)
             self._status("Application prepared · review it in Applications", tone="success")
             self.window.show_draft_for_job(str(context))
+            self.refresh(include_account=True)
+            return
         elif kind == "luna":
             count = int(result or 0)
             self._status(f"AI Autofill answered {count} question{'s' if count != 1 else ''}. "
@@ -610,6 +615,14 @@ class DesktopController(QObject):
     def _assist_failed(self, kind: str, context: object, error: str) -> None:
         if kind == "plan":
             self._preparing = False
+        if kind == "prepare_one":
+            self._preparing_jobs.discard(str(context))
+            self.window.jobs.set_preparing(self._preparing_jobs)
+            label = "Preparing the application"
+            self._status(f"{label} failed: {error}", 15_000, "error")
+            db.add_event(f"Desktop {kind} failed: {error}", "error")
+            self.refresh(include_account=True)
+            return
         if kind in ("agent_test", "mail_test") and context is not None:
             context.set_test_result(False, error)
             return
@@ -678,6 +691,13 @@ class DesktopController(QObject):
             self._status("This posting uses a form Starployment cannot fill. Open the posting to apply yourself.",
                          tone="warning")
             return
+        self._preparing_jobs.add(job_id)
+        self.window.jobs.set_preparing(self._preparing_jobs)
+        try:
+            db.upsert_draft(job_id, status="preparing")
+        except Exception:
+            pass
+        self.refresh()
         self._status(f"Preparing {job.company} · {job.title}…", 0, "busy")
 
         def run() -> int:

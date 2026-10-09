@@ -48,6 +48,9 @@ def is_priority(company: str, priority: Iterable[str]) -> bool:
     return False
 
 
+from .fortune import is_fortune_500, is_fortune_1000
+
+
 def _starred_value(record: Any) -> Any:
     value = record.get("starred") if isinstance(record, dict) else getattr(record, "starred", None)
     return None if value is None else bool(value)
@@ -57,17 +60,44 @@ def _company(record: Any) -> str:
     return str((record.get("company") if isinstance(record, dict) else getattr(record, "company", "")) or "")
 
 
-def is_starred(record: Any, priority: Iterable[str]) -> bool:
-    """The star the candidate sees: their own choice, else the priority list."""
-    value = _starred_value(record)
-    return value if value is not None else is_priority(_company(record), priority)
+def is_starred(record: Any, priority: Iterable[str]) -> str | bool:
+    """The star the candidate sees: red for F500, amber for user star / priority / F1000, False otherwise."""
+    val = _starred_value(record)
+    if val is False:
+        return False
+    company = _company(record)
+    if is_fortune_500(company):
+        return "red"
+    if val is True:
+        return "amber"
+    if is_priority(company, priority):
+        return "amber"
+    if is_fortune_1000(company):
+        return "amber"
+    return False
 
 
 def held_from_bulk_send(record: Any, priority: Iterable[str]) -> bool:
     """Starred applications wait for their own Approve & send, never a batch send."""
-    return is_starred(record, priority)
+    val = _starred_value(record)
+    if val is False:
+        return False
+    if val is True:
+        return True
+    company = _company(record)
+    if is_priority(company, priority):
+        return True
+    if is_fortune_500(company):
+        return True
+    return False
 
 
 def held_from_automation(record: Any, priority: Iterable[str]) -> bool:
     """Unattended runs never apply to a priority company or a starred job."""
-    return is_priority(_company(record), priority) or is_starred(record, priority)
+    val = _starred_value(record)
+    if val is False:
+        return is_priority(_company(record), priority)
+    if val is True:
+        return True
+    company = _company(record)
+    return is_priority(company, priority) or is_fortune_500(company)

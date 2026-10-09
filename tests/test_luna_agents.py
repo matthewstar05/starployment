@@ -129,10 +129,13 @@ def test_unconnected_luna_explains_how_to_connect():
     assert agents.status("none").ready is False
 
 
-def test_status_reports_install_and_login_steps(monkeypatch):
+def test_status_reports_install_and_login_steps(monkeypatch, tmp_path):
     monkeypatch.setattr(agents, "find_cli", lambda name: None)
     assert agents.status("claude_cli").action == "install"
-    monkeypatch.setattr(agents, "find_cli", lambda name: "/opt/claude")
+    status_agy = agents.status("antigravity_cli")
+    assert status_agy.action == "install" and status_agy.ready is False
+
+    monkeypatch.setattr(agents, "find_cli", lambda name: f"/opt/{name}")
     monkeypatch.setattr(agents.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, '{"loggedIn": false}', ""))
     assert agents.status("claude_cli").action == "login"
     monkeypatch.setattr(agents.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, '{"loggedIn": true}', ""))
@@ -142,3 +145,52 @@ def test_status_reports_install_and_login_steps(monkeypatch):
     os.environ.pop("OPENAI_API_KEY", None)
     monkeypatch.setattr(agents, "_api_key", lambda backend: "")
     assert agents.status("openai_api").action == "key"
+
+    # Antigravity CLI status detection based on oauth_creds.json existence
+    monkeypatch.setattr(agents.Path, "home", classmethod(lambda cls: tmp_path))
+    status_not_logged_in = agents.status("antigravity_cli")
+    assert status_not_logged_in.action == "login" and status_not_logged_in.ready is False
+
+    creds_file = tmp_path / ".gemini" / "oauth_creds.json"
+    creds_file.parent.mkdir(parents=True, exist_ok=True)
+    creds_file.write_text("{}")
+    status_logged_in = agents.status("antigravity_cli")
+    assert status_logged_in.action == "test" and status_logged_in.ready is True
+
+
+def test_antigravity_cli_runner_and_complete(tmp_path, monkeypatch):
+    scratch_dir = tmp_path / "scratch"
+    monkeypatch.setattr(agents.config, "AGENT_SCRATCH", scratch_dir)
+    monkeypatch.setattr(agents, "find_cli", lambda name: f"/opt/{name}")
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(command, 0, json.dumps({"status": "SUCCESS", "response": "reply text"}), "")
+
+    monkeypatch.setattr(agents.subprocess, "run", fake_run)
+
+    prompt = "generate answer"
+    model = "gemini-3.8-flash-high"
+    settings = {"agent": {"backend": "antigravity_cli", "model": model}}
+    res = agents.complete(prompt, settings)
+
+    assert res == "reply text"
+    assert len(calls) == 1
+    cmd, kwargs = calls[0]
+    assert cmd == ["/opt/agy", "-p", prompt, "--output-format", "json", "--model", model]
+    assert kwargs["cwd"].startswith(str(scratch_dir))
+    assert not any(scratch_dir.iterdir())
+
+    # Error response: raises AgentError with error message
+    monkeypatch.setattr(
+        agents.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, 0, json.dumps({"status": "ERROR", "error": "some error"}), ""
+        ),
+    )
+    with pytest.raises(agents.AgentError, match="some error"):
+        agents.complete(prompt, settings)
+    assert not any(scratch_dir.iterdir())
+

@@ -2,6 +2,7 @@
 
 A candidate can connect whichever account they already pay for:
 
+* ``antigravity_cli`` - Google Antigravity via the local CLI binary (``agy``)
 * ``claude_cli``  - a Claude Pro or Max plan, through the Claude Code app (``claude``)
 * ``codex_cli``   - a ChatGPT Plus or Pro plan, through the Codex app (``codex``)
 * ``anthropic_api`` / ``openai_api`` - an API key saved in the system credential vault
@@ -39,26 +40,82 @@ class Backend:
     install_command: str = ""
     login_args: tuple[str, ...] = ()
     default_model: str = ""
+    models: tuple[tuple[str, str], ...] = ()
 
 
 BACKENDS: dict[str, Backend] = {
+    "antigravity_cli": Backend(
+        "antigravity_cli", "Antigravity", "Antigravity CLI (agy)", cli="agy",
+        default_model="gemini-3.8-flash-high",
+        models=(
+            ("gemini-3.8-flash-high", "Gemini 3.8 Flash (High)"),
+            ("gemini-3.8-flash-medium", "Gemini 3.8 Flash (Medium)"),
+            ("gemini-3.8-flash-low", "Gemini 3.8 Flash (Low)"),
+            ("gemini-3.7-flash-high", "Gemini 3.7 Flash (High)"),
+            ("gemini-3.7-flash-medium", "Gemini 3.7 Flash (Medium)"),
+            ("gemini-3.7-flash-low", "Gemini 3.7 Flash (Low)"),
+            ("gemini-3.1-pro-high", "Gemini 3.1 Pro (High)"),
+            ("gemini-3.1-pro-low", "Gemini 3.1 Pro (Low)"),
+            ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+            ("claude-opus-4-6-thinking", "Claude Opus 4.6 (Thinking)"),
+            ("gpt-oss-120b-medium", "GPT OSS 120B (Medium)"),
+        ),
+    ),
     "claude_cli": Backend(
         "claude_cli", "Claude", "Claude Pro or Max subscription", cli="claude",
         install_url="https://claude.com/claude-code",
         install_command="npm install -g @anthropic-ai/claude-code",
         login_args=("auth", "login"), default_model="sonnet",
+        models=(
+            ("sonnet", "Claude Sonnet (Default)"),
+            ("opus", "Claude Opus"),
+            ("haiku", "Claude Haiku"),
+            ("claude-3-7-sonnet", "Claude 3.7 Sonnet"),
+            ("claude-3-5-sonnet", "Claude 3.5 Sonnet"),
+            ("claude-3-5-haiku", "Claude 3.5 Haiku"),
+        ),
     ),
     "codex_cli": Backend(
         "codex_cli", "ChatGPT", "ChatGPT Plus or Pro subscription", cli="codex",
         install_url="https://developers.openai.com/codex/cli",
         install_command="npm install -g @openai/codex",
         login_args=("login",), default_model="",
+        models=(
+            ("gpt-5.5", "GPT-5.5"),
+            ("gpt-5.4", "GPT-5.4"),
+            ("gpt-4o", "GPT-4o"),
+            ("gpt-4o-mini", "GPT-4o mini"),
+            ("o3", "o3"),
+            ("o3-mini", "o3-mini"),
+            ("o1", "o1"),
+        ),
     ),
-    "anthropic_api": Backend("anthropic_api", "Anthropic API key", "Pay-as-you-go API key",
-                             install_url="https://console.anthropic.com/settings/keys",
-                             default_model="claude-sonnet-5-5"),
-    "openai_api": Backend("openai_api", "OpenAI API key", "Pay-as-you-go API key",
-                          install_url="https://platform.openai.com/api-keys", default_model="gpt-5.5"),
+    "anthropic_api": Backend(
+        "anthropic_api", "Anthropic API key", "Pay-as-you-go API key",
+        install_url="https://console.anthropic.com/settings/keys",
+        default_model="claude-sonnet-5-5",
+        models=(
+            ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+            ("claude-3-7-sonnet-latest", "Claude 3.7 Sonnet Latest"),
+            ("claude-3-5-sonnet-latest", "Claude 3.5 Sonnet Latest"),
+            ("claude-3-5-haiku-latest", "Claude 3.5 Haiku Latest"),
+            ("claude-3-opus-latest", "Claude 3 Opus Latest"),
+        ),
+    ),
+    "openai_api": Backend(
+        "openai_api", "OpenAI API key", "Pay-as-you-go API key",
+        install_url="https://platform.openai.com/api-keys", default_model="gpt-5.5",
+        models=(
+            ("gpt-5.5", "GPT-5.5"),
+            ("gpt-5", "GPT-5"),
+            ("gpt-4.5-preview", "GPT-4.5 Preview"),
+            ("gpt-4o", "GPT-4o"),
+            ("gpt-4o-mini", "GPT-4o mini"),
+            ("o3", "o3"),
+            ("o3-mini", "o3-mini"),
+            ("o1", "o1"),
+        ),
+    ),
 }
 
 
@@ -184,7 +241,9 @@ def status(backend: str) -> Status:
         return Status(False, f"Install {spec.name} first",
                       f"Luna uses the {spec.name} app with your {spec.plan}. Install it, then sign in.", "install")
     try:
-        if backend == "claude_cli":
+        if backend == "antigravity_cli":
+            logged_in = (Path.home() / ".gemini" / "oauth_creds.json").is_file()
+        elif backend == "claude_cli":
             result = subprocess.run([binary, "auth", "status"], capture_output=True, text=True, timeout=8,
                                     env=_env_for(binary), stdin=subprocess.DEVNULL)
             try:
@@ -256,6 +315,8 @@ def complete(prompt: str, settings: dict, *, timeout: int = 120) -> str:
             return _claude_cli(prompt, model, timeout)
         if backend == "codex_cli":
             return _codex_cli(prompt, model, timeout)
+        if backend == "antigravity_cli":
+            return _antigravity_cli(prompt, model, timeout)
         if backend == "anthropic_api":
             return _anthropic_api(prompt, model, timeout)
         if backend == "openai_api":
@@ -315,6 +376,34 @@ def _codex_cli(prompt: str, model: str, timeout: int) -> str:
         if not output.is_file():
             raise AgentError("Codex returned no reply")
         return output.read_text(encoding="utf-8", errors="replace")
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _antigravity_cli(prompt: str, model: str, timeout: int) -> str:
+    binary = find_cli("agy")
+    if not binary:
+        raise AgentError("Antigravity CLI (agy) is not installed")
+    scratch = _scratch()
+    try:
+        command = [binary, "-p", prompt, "--output-format", "json"]
+        if model:
+            command += ["--model", model]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout,
+                                env=_env_for(binary), cwd=str(scratch))
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError as error:
+            if result.returncode:
+                detail = (result.stderr or result.stdout).strip().splitlines()[-1:] or [""]
+                raise AgentError(f"Antigravity stopped (exit {result.returncode}). {detail[0][:200]}")
+            raise AgentError("Antigravity returned an unreadable reply") from error
+        if data.get("status") == "ERROR":
+            raise AgentError(str(data.get("error") or "Antigravity reported an error"))
+        if result.returncode:
+            detail = (result.stderr or result.stdout).strip().splitlines()[-1:] or [""]
+            raise AgentError(f"Antigravity stopped (exit {result.returncode}). {detail[0][:200]}")
+        return str(data.get("response") or "")
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
 

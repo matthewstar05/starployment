@@ -21,6 +21,7 @@ def test_settings_view_emits_schema_compatible_appearance():
         assert emitted[-1]["appearance"] == appearance
         validate_settings(merge_settings(DEFAULT_SETTINGS, emitted[-1]))
     view.close()
+    view.deleteLater()
 
 
 def test_mailbox_password_is_transient_in_settings_view():
@@ -44,6 +45,7 @@ def test_mailbox_password_is_transient_in_settings_view():
     settings = validate_settings(merge_settings(DEFAULT_SETTINGS, patch))
     assert "password" not in settings["email_verification"]
     view.close()
+    view.deleteLater()
 
 
 def test_controller_saves_mailbox_secret_only_to_vault(tmp_path, monkeypatch):
@@ -83,5 +85,40 @@ def test_controller_saves_mailbox_secret_only_to_vault(tmp_path, monkeypatch):
     assert "local-test-secret" not in (tmp_path / "test.db").read_bytes().decode("latin1")
     controller.stop()
     window.close()
+    window.deleteLater()
     db.close()
     scheduler.STATE.stop = False
+
+
+def test_luna_connection_model_dropdown_for_all_providers():
+    from PySide6.QtWidgets import QApplication
+    from jobhub.agents import BACKENDS
+    from jobhub.desktop.views.connections import LunaConnection
+
+    app = QApplication.instance() or QApplication([])
+    conn = LunaConnection()
+
+    for backend, spec in BACKENDS.items():
+        # Verify default option and spec.models population
+        conn.set_values({"agent": {"backend": backend, "model": ""}})
+        assert conn.model.count() == 1 + len(spec.models)
+        assert conn.model.itemData(0) == ""
+        for i, (model_id, _label) in enumerate(spec.models, start=1):
+            assert conn.model.itemData(i) == model_id
+
+        # Verify setting a specific model from spec.models
+        if spec.models:
+            chosen_model = spec.models[0][0]
+            conn.set_values({"agent": {"backend": backend, "model": chosen_model}})
+            assert conn.model.currentData() == chosen_model
+            assert conn.values()["agent"]["model"] == chosen_model
+
+        # Verify setting a custom model not in spec.models
+        custom_model = "my-custom-model-9000"
+        conn.set_values({"agent": {"backend": backend, "model": custom_model}})
+        assert conn.model.currentData() == custom_model
+        assert conn.values()["agent"]["model"] == custom_model
+
+    conn.close()
+    conn.deleteLater()
+

@@ -47,7 +47,7 @@ def test_most_relevant_material_is_kept_and_wording_is_verbatim(store):
     text = " ".join(text_of(out).split())
     assert "Built a C++ order-matching engine handling 2M orders per second" in text
     assert "Latency Arbitrage Simulator" in text
-    assert "C++" in text.split("SKILLS")[-1][:200]
+    assert "C++" in text.split("Skills")[-1][:200]
 
 
 def test_pinned_entries_stay_and_hidden_entries_never_print(store):
@@ -108,7 +108,7 @@ def _placed_text(path):
         if text.strip() and font:
             x = cm[0] * tm[4] + cm[4]
             scale = cm[0] * tm[0]
-            name = str(font.get("/BaseFont", "/Helvetica")).lstrip("/")
+            name = str(font.get("/BaseFont", "/Times-Roman")).lstrip("/")
             runs.append((x, x + stringWidth(text.strip(), name, size) * scale, text.strip()))
 
     PdfReader(str(path)).pages[0].extract_text(visitor_text=visit)
@@ -123,13 +123,89 @@ def test_resume_lines_share_one_left_margin_and_dates_sit_flush_right(store):
     out = build_resume(profile, TRADING, store / "resume.pdf")
     runs = _placed_text(out)
     margin, right_margin = PAGE_MARGIN_X, 8.5 * 72 - PAGE_MARGIN_X
-    lefts = {round(x, 1) for x, _, _ in runs if x < 300}
-    # Names, titles, headings, and body text start on the margin; bullets and their text
-    # are the only indented lines. Nothing pokes out past the margin.
+    lefts = {round(x, 1) for x, _, text in runs if x < margin + 20 and text != profile.full_name}
+    # Section and body text share a margin; bullet markers and their text are
+    # indented. The name and contact line are centered separately.
     assert min(lefts) >= margin - 0.2
     assert len({round(x) for x in lefts}) <= 3, lefts
     dates = [(x, right) for x, right, text in runs if "–" in text or text in {"Example City, CA"}]
     assert dates and all(abs(right - right_margin) < 1.0 for _, right in dates), dates
+
+
+def test_template_section_order_centered_header_and_relevant_employment(store):
+    from jobhub.tailor import PAGE_MARGIN_X
+
+    profile = big_profile()
+    out = build_resume(profile, TRADING, store / "template.pdf")
+    text = text_of(out)
+    assert text.index("Education") < text.index("Projects") < text.index("Experience") < text.index("Skills")
+    assert text.index("Ledger Labs") < text.index("Employer")
+    name = next((x, right) for x, right, value in _placed_text(out) if value == profile.full_name)
+    assert abs(sum(name) / 2 - 8.5 * 72 / 2) < 1
+    assert name[0] > PAGE_MARGIN_X
+
+
+def test_relevance_controls_display_order_even_for_pinned_or_luna_selected_content(store):
+    job = Job(source="fixture", company="Example Co", title="Database Analyst", url="https://example.test/sql",
+              description="SQL database schemas and data pipelines")
+    profile = Profile(first_name="Casey", last_name="Example", email="casey@example.test",
+        education=[Education(school="Example Art School", degree="M.F.A.", field="Painting", end="2027"),
+                   Education(school="Example Technical School", degree="B.S.", field="Computer Science", end="2020",
+                             details=["Campus volunteer", "SQL database coursework"])],
+        projects=[Project(name="Art Portfolio", tech=["HTML"], bullets=["Published a portfolio of paintings."], pinned=True),
+                   Project(name="Campus Database", tech=["SQL"], bullets=["Organized project meetings.",
+                         "Designed SQL database schemas."])],
+        experience=[Experience(company="Outreach Club", title="Volunteer", end="Present", pinned=True,
+                               bullets=["Coordinated community events."]),
+                    Experience(company="Archive Lab", title="Database Assistant", end="2020",
+                               bullets=["Organized project meetings.", "Built SQL database pipelines."])],
+        skills=["Public speaking", "SQL"])
+    original = profile.model_dump()
+    plan = plan_resume(profile, job, selection={"skills": ["Public speaking"]})
+    assert plan.education[0].school == "Example Technical School"
+    assert plan.projects[0].source.name == "Campus Database"
+    assert plan.experience[0].source.company == "Archive Lab"
+    assert plan.projects[0].bullets[0] == "Designed SQL database schemas."
+    assert plan.experience[0].bullets[0] == "Built SQL database pipelines."
+    assert plan.skills[0] == "SQL"
+    out = build_resume(profile, job, store / "relevance.pdf", selection={"skills": ["Public speaking"]})
+    text = " ".join(text_of(out).split())
+    assert text.index("Example Technical School") < text.index("Example Art School")
+    assert text.index("SQL database coursework") < text.index("Campus volunteer")
+    assert text.index("Campus Database") < text.index("Art Portfolio")
+    assert text.index("Archive Lab") < text.index("Outreach Club")
+    assert len(PdfReader(out).pages) == 1
+    fonts = {str(font.get_object()["/BaseFont"]) for font in PdfReader(out).pages[0]["/Resources"]["/Font"].values()}
+    assert {"/Times-Roman", "/Times-Bold"} <= fonts
+    assert profile.model_dump() == original
+
+
+def test_resize_preserves_content_that_fits_at_ten_points(store):
+    from jobhub.tailor import MIN_FONT_SCALE, ResumePlan, _render
+    from io import BytesIO
+
+    # Find a real wrapping threshold between the two supported body sizes.
+    profile = big_profile()
+    profile.experience = profile.experience[-1:]
+    profile.projects = profile.projects[-1:]
+    profile.skills = ["C++", "Python", "SQL"]
+    profile.awards = []
+    for length in range(5, 100):
+        profile.experience[0].bullets = ["Built reliable trading services with C++ and SQL. " * length]
+        initial = ResumePlan(profile, TRADING)
+        if _render(initial, BytesIO()) <= 1:
+            continue
+        initial.font_scale = MIN_FONT_SCALE
+        if _render(initial, BytesIO()) <= 1:
+            break
+    else:
+        raise AssertionError("No resize threshold found")
+    plan = plan_resume(profile, TRADING)
+    assert MIN_FONT_SCALE <= plan.font_scale < 1
+    assert plan.experience[0].bullets == profile.experience[0].bullets
+    assert len(plan.projects) == 1
+    out = build_resume(profile, TRADING, store / "resized.pdf")
+    assert len(PdfReader(out).pages) == 1
 
 
 def test_generated_resume_is_one_page_even_when_nothing_can_be_dropped(store):

@@ -47,3 +47,4 @@ def test_theme_crossfade_runs_every_change_and_leaves_no_overlay(monkeypatch):
         assert len(_overlays(window)) == before
     finally:
         window.close()
+        window.deleteLater()

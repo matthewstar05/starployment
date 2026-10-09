@@ -10,9 +10,10 @@ from jobhub.apply import email_verification as verification
 
 
 class FakeMailbox:
-    def __init__(self, messages):
+    def __init__(self, messages, uidvalidity=None):
         self.messages = messages
         self.commands = []
+        self.uidvalidity = uidvalidity
 
     def login(self, username, password):
         assert username == "ada@example.test"
@@ -22,6 +23,11 @@ class FakeMailbox:
     def select(self, name, readonly=False):
         assert (name, readonly) == ("INBOX", True)
         return "OK", [b"ok"]
+
+    def response(self, code):
+        if code == "UIDVALIDITY" and self.uidvalidity is not None:
+            return "UIDVALIDITY", [str(self.uidvalidity).encode()]
+        return code, [None]
 
     def uid(self, command, *args):
         self.commands.append((command, args))
@@ -45,13 +51,16 @@ class FakeMailbox:
 
 def email(*, sender="codes@greenhouse.io", recipient="ada@example.test",
           subject="Your Greenhouse verification code", body="Your verification code is ABCD1234",
-          sent_at=None):
+          html_body=None, sent_at=None):
     message = EmailMessage()
     message["From"] = sender
     message["To"] = recipient
     message["Subject"] = subject
     message["Date"] = format_datetime(sent_at or datetime.now(timezone.utc))
-    message.set_content(body)
+    if html_body:
+        message.set_content(html_body, subtype="html")
+    else:
+        message.set_content(body)
     return message.as_bytes()
 
 
@@ -71,11 +80,18 @@ def inbox(monkeypatch):
 
 def test_pre_submit_uid_baseline_and_read_only_fetch(monkeypatch, inbox):
     messages = {41: email(), 42: email(body="Your verification code is ZXCV9876")}
-    fake = FakeMailbox(messages)
+    fake = FakeMailbox(messages, uidvalidity=999)
     monkeypatch.setattr(verification.imaplib, "IMAP4_SSL", lambda *args, **kwargs: fake)
-    baseline, started = inbox.baseline()
+    baseline_result = inbox.baseline()
+    assert baseline_result.max_uid == 42
+    assert baseline_result.uidvalidity == 999
+    # Test 2-tuple unpacking backward-compatibility
+    baseline, started = baseline_result
     assert baseline == 42
     assert started.tzinfo == timezone.utc
+    # Test 3-tuple unpacking
+    validity, max_uid, started_at = baseline_result
+    assert validity == 999 and max_uid == 42
     messages[43] = email(body="Your verification code is TEST4321")
     assert inbox.wait_for_code(baseline, started, timeout_sec=0) == "TEST4321"
     assert ("SEARCH", (None, "UID", "43:*")) in fake.commands
@@ -169,3 +185,122 @@ def test_settings_never_include_mailbox_password():
     assert "password" not in settings["email_verification"]
     with pytest.raises(ValueError):
         config.validate_settings(config.merge_settings(settings, {"email_verification": {"password": "secret"}}))
+
+
+def test_code_with_leading_zeros_and_custom_length(monkeypatch, inbox):
+    messages = {11: email(body="Your one-time security code is 012345")}
+    monkeypatch.setattr(verification.imaplib, "IMAP4_SSL", lambda *args, **kwargs: FakeMailbox(messages))
+    token = inbox.wait_for_token(10, datetime.now(timezone.utc), length=6, timeout_sec=0)
+    assert token is not None
+    assert token.kind == "code"
+    assert token.value == "012345"
+    assert inbox.wait_for_code(10, datetime.now(timezone.utc), length=6, timeout_sec=0) == "012345"
+
+
+def test_link_extraction_from_html_href_and_plain_text(monkeypatch, inbox):
+    html = ('<p>Welcome to Acme!</p>'
+            '<p><a href="https://boards.greenhouse.io/confirm_email?token=sec123">Confirm your application</a></p>')
+    plain = 'Confirm here: https://jobs.ashbyhq.com/verify/token987 for your application.'
+
+    # Test HTML href link
+    fake_html = FakeMailbox({11: email(html_body=html, subject="Confirm your application")})
+    monkeypatch.setattr(verification.imaplib, "IMAP4_SSL", lambda *args, **kwargs: fake_html)
+    link = inbox.wait_for_link(10, datetime.now(timezone.utc), timeout_sec=0)
+    assert link == "https://boards.greenhouse.io/confirm_email?token=sec123"
+
+    # Test plain text link
+    fake_plain = FakeMailbox({12: email(body=plain, subject="Confirm application token")})
+    monkeypatch.setattr(verification.imaplib, "IMAP4_SSL", lambda *args, **kwargs: fake_plain)
+    token = inbox.wait_for_token(10, datetime.now(timezone.utc), timeout_sec=0)
+    assert token is not None
+    assert token.kind == "link"
+    assert token.value == "https://jobs.ashbyhq.com/verify/token987"
+
+
+def test_link_rejection_for_untrusted_hosts_and_unsubscribe_privacy_links(monkeypatch, inbox):
+    body = (
+        'Thank you for applying.\n'
+        'Unsubscribe: https://boards.greenhouse.io/unsubscribe?token=123\n'
+        'Privacy Policy: https://boards.greenhouse.io/privacy\n'
+        'Help: https://boards.greenhouse.io/help\n'
+        'Social: https://linkedin.com/verify/acme\n'
+        'Untrusted host: https://phishing.example.com/confirm?token=123\n'
+    )
+    fake = FakeMailbox({11: email(body=body, subject="Application confirmation")})
+    monkeypatch.setattr(verification.imaplib, "IMAP4_SSL", lambda *args, **kwargs: fake)
+    # With allowed_hosts specified, phishing.example.com and linkedin are excluded,
+    # and unsubscribe/privacy/help are excluded by keywords.
+    assert inbox.wait_for_link(10, datetime.now(timezone.utc), allowed_hosts=["greenhouse.io"], timeout_sec=0) is None
+
+
+def test_uidvalidity_change_handling(monkeypatch, inbox):
+    fake = FakeMailbox({11: email()}, uidvalidity=500)
+    monkeypatch.setattr(verification.imaplib, "IMAP4_SSL", lambda *args, **kwargs: fake)
+    # If baseline UIDVALIDITY was 100, but mailbox returns 500, RuntimeError must be raised.
+    with pytest.raises(RuntimeError, match="UIDVALIDITY changed"):
+        inbox.wait_for_token(10, datetime.now(timezone.utc), baseline_uidvalidity=100, timeout_sec=0)
+
+
+def test_employer_context_disambiguation(monkeypatch, inbox):
+    now = datetime.now(timezone.utc)
+    # Two messages from greenhouse: one for Acme Corp, one for Beta Inc
+    messages = {
+        11: email(subject="Your Acme Corp verification code", body="Your code is 11112222"),
+        12: email(subject="Your Beta Inc verification code", body="Your code is 33334444"),
+    }
+    monkeypatch.setattr(verification.imaplib, "IMAP4_SSL", lambda *args, **kwargs: FakeMailbox(messages))
+    # Without employer context, multiple fresh codes conflict and raise error
+    with pytest.raises(RuntimeError, match="Multiple fresh"):
+        inbox.wait_for_token(10, now, timeout_sec=0)
+
+    # Disambiguating by employer 'Acme Corp'
+    token_acme = inbox.wait_for_token(10, now, employer="Acme Corp", timeout_sec=0)
+    assert token_acme is not None and token_acme.value == "11112222"
+
+    # Disambiguating by employer 'Beta Inc'
+    token_beta = inbox.wait_for_token(10, now, employer="Beta Inc", timeout_sec=0)
+    assert token_beta is not None and token_beta.value == "33334444"
+
+
+def test_token_redaction_helper():
+    assert verification.redact_token("") == ""
+    assert verification.redact_token("12", "code") == "**"
+    assert verification.redact_token("1234", "code") == "1**4"
+    assert verification.redact_token("012345", "code") == "01**45"
+    assert verification.redact_token("ABCD1234", "code") == "AB****34"
+
+    # Link redaction
+    link = "https://boards.greenhouse.io/confirm_email?token=secret123456&user=ada"
+    redacted = verification.redact_token(link, "link")
+    assert "secret123456" not in redacted
+    assert "user=ada" not in redacted
+    assert redacted == "https://boards.greenhouse.io/confirm_email"
+
+    long_path = "https://jobs.ashbyhq.com/verify/12345678-abcd-1234-ef00-1234567890ab"
+    redacted_path = verification.redact_token(long_path, "link")
+    assert "12345678-abcd" not in redacted_path
+    assert redacted_path == "https://jobs.ashbyhq.com/verify/[redacted]"
+
+
+def test_empty_sender_auto_discovery(monkeypatch):
+    class Vault:
+        def get_password(self, service, username):
+            return "app-password"
+
+    monkeypatch.setattr(verification, "_keyring", lambda: Vault())
+    now = datetime.now(timezone.utc)
+    settings = {
+        "imap_host": "imap.example.test",
+        "imap_port": 993,
+        "imap_username": "ada@example.test",
+        "sender_address": "",
+    }
+    auto_inbox = verification.EmailVerificationInbox(settings, "ada@example.test")
+    messages = {
+        51: email(sender="no-reply@jobs.lever.co", recipient="ada@example.test",
+                  body="Your Lever verification code is LEVER777"),
+    }
+    monkeypatch.setattr(verification.imaplib, "IMAP4_SSL", lambda *args, **kwargs: FakeMailbox(messages))
+    token = auto_inbox.wait_for_token(50, now, timeout_sec=0)
+    assert token is not None and token.value == "LEVER777"
+
