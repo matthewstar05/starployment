@@ -114,6 +114,57 @@ def test_education_sorting_places_ms_above_bs_regardless_of_job_keywords():
     assert plan.education[1].degree == "B.S."
 
 
+def test_education_sorting_user_profile_master_of_science_above_bachelor():
+    profile = sample_profile()
+    profile.education = [
+        Education(school="Cal Poly", degree="Bachelor of Science in Computer Science", field="", end="June 2026"),
+        Education(school="Cal Poly", degree="Master of Science in Quantitative Economics", field="", end="May 2027"),
+    ]
+    # Job heavily targeting Computer Science and Bachelor keywords
+    target_job = job("Software Engineer",
+                     "Seeking Bachelor of Science in Computer Science. Bachelor degree in CS or software engineering.")
+    plan = ResumePlan(profile, target_job)
+
+    assert len(plan.education) == 2
+    assert plan.education[0].degree == "Master of Science in Quantitative Economics"
+    assert plan.education[1].degree == "Bachelor of Science in Computer Science"
+
+
+def test_education_sorting_master_always_above_bachelor_even_if_older_or_missing_date():
+    profile = sample_profile()
+    # M.S. has earlier completion or no date; B.S. has recent date
+    profile.education = [
+        Education(school="School A", degree="Bachelor of Science", field="Physics", end="2026"),
+        Education(school="School B", degree="Master of Science", field="Data Science", end="2020"),
+    ]
+    plan = ResumePlan(profile, job("Scientist", "Physics bachelor preferred"))
+    assert plan.education[0].degree == "Master of Science"
+    assert plan.education[1].degree == "Bachelor of Science"
+
+    # Variations with abbreviations, spaces, and degree naming
+    profile.education = [
+        Education(school="School A", degree="B. S. in Math", field="", end="2025"),
+        Education(school="School B", degree="M. S. in Statistics", field="", end="2025"),
+    ]
+    plan = ResumePlan(profile, job("Analyst", "Math degree"))
+    assert plan.education[0].degree == "M. S. in Statistics"
+    assert plan.education[1].degree == "B. S. in Math"
+
+
+def test_education_shrink_retains_master_over_bachelor():
+    profile = sample_profile()
+    profile.education = [
+        Education(school="Cal Poly", degree="Bachelor of Science in Computer Science", field="", end="June 2026"),
+        Education(school="Cal Poly", degree="Master of Science in Quantitative Economics", field="", end="May 2027"),
+    ]
+    plan = ResumePlan(profile, job("SWE", "Python"))
+    # When space reduction drops an education entry, it drops the bachelor and keeps the master
+    assert len(plan.education) == 2
+    plan.education.pop()
+    assert len(plan.education) == 1
+    assert plan.education[0].degree == "Master of Science in Quantitative Economics"
+
+
 def test_education_two_row_formatting_and_gpa_layout():
     profile = sample_profile()
     profile.education = [

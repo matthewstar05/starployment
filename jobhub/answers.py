@@ -65,9 +65,9 @@ def _edu(profile: Profile):
 def _degree_rank(d: str) -> int:
     d = (d or "").lower()
     if re.search(r"ph\.?d|doctor", d): return 4
-    if re.search(r"\bm\.?s\.?\b|\bm\.?a\.?\b|master|mba", d): return 3
-    if re.search(r"\bb\.?s\.?\b|\bb\.?a\.?\b|bachelor", d): return 2
-    if re.search(r"associate", d): return 1
+    if re.search(r"\bm\.?\s*s\.?\b|\bm\.?\s*a\.?\b|master|mba|\bm\.?\s*eng\.?\b", d): return 3
+    if re.search(r"\bb\.?\s*s\.?\b|\bb\.?\s*a\.?\b|bachelor|\bb\.?\s*eng\.?\b", d): return 2
+    if re.search(r"associate|\ba\.?\s*s\.?\b|\ba\.?\s*a\.?\b", d): return 1
     return 0
 
 

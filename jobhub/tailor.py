@@ -130,11 +130,11 @@ def _degree_rank(degree: str) -> int:
     d = (degree or "").lower()
     if re.search(r"\bph\.?d\b|doctor", d):
         return 4
-    if re.search(r"\bm\.?s\.?\b|\bm\.?a\.?\b|master", d):
+    if re.search(r"\bm\.?\s*s\.?\b|\bm\.?\s*a\.?\b|master|mba|\bm\.?\s*eng\.?\b", d):
         return 3
-    if re.search(r"\bb\.?s\.?\b|\bb\.?a\.?\b|bachelor", d):
+    if re.search(r"\bb\.?\s*s\.?\b|\bb\.?\s*a\.?\b|bachelor|\bb\.?\s*eng\.?\b", d):
         return 2
-    if re.search(r"\bassociate\b|\ba\.?s\.?\b|\ba\.?a\.?\b", d):
+    if re.search(r"\bassociate\b|\ba\.?\s*s\.?\b|\ba\.?\s*a\.?\b", d):
         return 1
     return 0
 
@@ -171,13 +171,18 @@ class ResumePlan:
         newest_edu = max((_year(e.end) or _year(e.start) for e in profile.education), default=0)
 
         def _edu_score(e):
-            rel = _score_text(' '.join([e.school, e.degree, e.field, *e.details]), self.weights)
-            rank_bonus = 0.25 * _degree_rank(e.degree)
+            text = ' '.join([e.school, e.degree, e.field, *e.details])
+            rel = _score_text(text, self.weights)
             yr = _year(e.end) or _year(e.start)
             recency = max(0.0, 0.2 - 0.05 * max(0, newest_edu - yr)) if newest_edu and yr else 0.0
-            return rel + rank_bonus + recency
+            return rel + recency
 
-        self.education = sorted(profile.education, key=lambda e: -_edu_score(e))[:3]
+        def _edu_sort_key(e):
+            rank = _degree_rank(f"{e.degree} {e.field}")
+            yr = _year(e.end) or _year(e.start)
+            return (-rank, -yr, -_edu_score(e))
+
+        self.education = sorted(profile.education, key=_edu_sort_key)[:3]
         self.max_skills = int(builder.get("max_skills", 28) or 28)
         self.experience = self._rank("experience", profile.experience, selection, 4)
         self.projects = self._rank("projects", profile.projects, selection, 3)
