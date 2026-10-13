@@ -95,6 +95,9 @@ def test_confirmed_answers_and_exact_overrides(candidate, job):
 def test_demographics_never_guess_a_negative(candidate):
     assert rule_answer(Q("Veteran status", "select", ["Yes", "No"]), candidate, {}, None) is None
     assert rule_answer(Q("Disability", "select", ["Yes", "No", "I do not wish to answer"]), candidate, {}, None).value == "I do not wish to answer"
+    racial = Q("Which racial categories best describe you? Select all that apply.", "select",
+               ["Asian", "White", "I don't wish to answer"], True)
+    assert rule_answer(racial, candidate, {}, None).value == "I don't wish to answer"
 
 
 def test_select_matching_rejects_partial_and_ambiguous_answers():
@@ -179,3 +182,31 @@ def test_eligibility_can_use_explicit_opt_out_without_assuming_facts(candidate):
         assert rule_answer(Q(label, "select", ["Yes", "No"], required=True), candidate, {}, None) is None
     confirmed = {"answers": {"work_authorized_us": "Yes", "confirmed_fields": ["work_authorized_us"]}}
     assert rule_answer(Q(labels[0], "select", options), candidate, confirmed, None).value == "Yes"
+
+
+def test_education_details_keep_coursework_concentration_and_activities():
+    profile = heuristic_profile("""Ada Lovelace
+ada@example.test
+EDUCATION
+Example University  Boston, MA
+Master of Science in Economics | Graduate School  July 2026 - May 2027
+▪  GPA: 3.8 / 4.0 | Relevant Coursework: Econometrics, Machine Learning,
+  Causal Inference
+Bachelor of Science in Computer Science | School of Computing  August 2022 - June 2026
+Concentration: Machine Learning | Minor: Economics
+▪  Relevant Coursework: Algorithms, Databases
+▪  Activities/Societies: Chess Club, Robotics
+EXPERIENCE
+Example Club  Boston, MA | October 2024 - Present
+Member
+▪ Maintained the member directory.
+Community Service: Food Bank, Beach Cleanup
+""")
+    masters, bachelors = profile.education
+    assert masters.gpa == "3.8 / 4.0"
+    assert masters.location == "Boston, MA"
+    assert masters.details == ["Relevant Coursework: Econometrics, Machine Learning, Causal Inference"]
+    assert bachelors.details == ["Concentration: Machine Learning | Minor: Economics",
+                                 "Relevant Coursework: Algorithms, Databases",
+                                 "Activities/Societies: Chess Club, Robotics"]
+    assert profile.awards == ["Community Service: Food Bank, Beach Cleanup"]

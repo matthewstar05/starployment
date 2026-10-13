@@ -309,3 +309,55 @@ def compact_money(amount: float | None) -> str:
     if not amount:
         return "—"
     return f"${amount / 1000:,.0f}k" if amount >= 1000 else f"${amount:,.0f}"
+
+
+# ---------------- application priority and stage emails ----------------
+# Priority order on the Applications page: what is moving forward first, what
+# needs you next, then sent applications waiting on the employer, then closed ones.
+PRIORITY_STAGES = {"offer": 0, "interview": 1, "assessment": 2}
+
+
+def display_status(record: dict) -> str:
+    """A sent application's hiring stage once it moved past Applied, else its status."""
+    stage = str(record.get("stage") or "")
+    if record.get("kind") != "draft" and record.get("status") == "applied" and stage and stage != "applied":
+        return stage
+    return str(record.get("status") or "unknown")
+
+
+def priority_rank(record: dict) -> int:
+    status, stage = str(record.get("status") or ""), str(record.get("stage") or "")
+    if record.get("kind") != "draft" and status == "applied":
+        if stage in PRIORITY_STAGES:
+            return PRIORITY_STAGES[stage]
+        return {"withdrawn": 7, "rejected": 8}.get(stage, 6)   # waiting on the employer, then closed
+    if record.get("kind") == "draft":
+        return 5 if status in ("approved", "sending") else 3   # to review before approved-and-waiting
+    return 4   # an attempt that needs your review
+
+
+def email_link(record: dict, mailbox: dict | None) -> str:
+    """A link that opens the email behind an application's current stage, or "" when none is known.
+
+    Gmail accounts open Gmail on the web (that exact message by its Message-ID,
+    else a search for its sender and subject). Other mailboxes open Apple Mail by
+    Message-ID.
+    """
+    from urllib.parse import quote
+    message_id = str(record.get("stage_mail_message_id") or "").strip().strip("<>")
+    sender, subject = str(record.get("stage_mail_sender") or ""), str(record.get("stage_mail_subject") or "")
+    if not (message_id or subject):
+        return ""
+    mailbox = mailbox or {}
+    username = str(mailbox.get("imap_username") or "").strip()
+    gmail = "gmail" in str(mailbox.get("imap_host") or "").casefold() or \
+        username.casefold().endswith(("@gmail.com", "@googlemail.com"))
+    if gmail:
+        account = quote(username, safe="@.") if username else "0"
+        if message_id:
+            query = f"rfc822msgid:{message_id}"
+        else:
+            address = re.search(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+", sender)
+            query = (f"from:{address.group(0)} " if address else "") + f'subject:"{subject}"'
+        return f"https://mail.google.com/mail/u/{account}/#search/{quote(query, safe='')}"
+    return f"message://{quote('<' + message_id + '>', safe='')}" if message_id else ""

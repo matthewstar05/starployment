@@ -109,7 +109,7 @@ class AddPostingSheet(QDialog):
 
         text = text.strip()
         if not text:
-            self.hint.setText("Supported: job-boards.greenhouse.io, jobs.lever.co, jobs.ashbyhq.com")
+            self.hint.setText("Supported: Greenhouse, Lever, Ashby, Workable, and Rippling job links")
             self.add.setEnabled(False)
             return
         try:
@@ -137,6 +137,7 @@ ATS_NAMES = {"workday": "Workday", "linkedin": "LinkedIn", "indeed": "Indeed", "
 class JobsView(QWidget):
     apply_requested = Signal(str)
     prepare_requested = Signal(str)
+    bulk_prepare_requested = Signal()
     review_requested = Signal(str)
     status_requested = Signal(str, str)
     open_requested = Signal(str)
@@ -180,10 +181,14 @@ class JobsView(QWidget):
             self.sort.add_option(text, key)
         self.sort.changed.connect(self._sort_chosen)
         add = button("Add posting", "secondary", icon="plus")
-        add.setToolTip("Import a Greenhouse, Lever, or Ashby link (⌘N)")
+        add.setToolTip("Import a Greenhouse, Lever, Ashby, Workable, or Rippling link (⌘N)")
         add.clicked.connect(self._import_dialog)
+        self.bulk_prepare = button("Prepare bulk", icon="layers")
+        self.bulk_prepare.setToolTip("Choose how many new applications to prepare for review")
+        self.bulk_prepare.clicked.connect(self.bulk_prepare_requested)
         self.header.add_action(self.posted)
         self.header.add_action(self.sort)
+        self.header.add_action(self.bulk_prepare)
         self.header.add_action(add)
         column.addWidget(self.header)
 
@@ -198,6 +203,10 @@ class JobsView(QWidget):
         for text, value in self.FILTERS:
             self.filter.addItem(text, value)
         toolbar.addWidget(self.filter)
+        column.addLayout(toolbar)
+
+        options = QHBoxLayout()
+        options.setSpacing(12)
 
         self.unpreparable_toggle = ToggleSwitch()
         self.unpreparable_toggle.setChecked(True)
@@ -210,8 +219,19 @@ class JobsView(QWidget):
         self.toggle_label.setToolTip(self.unpreparable_toggle.toolTip())
         toggle_box.addWidget(self.toggle_label)
         toggle_box.addWidget(self.unpreparable_toggle)
-        toolbar.addLayout(toggle_box)
-        column.addLayout(toolbar)
+        options.addLayout(toggle_box)
+        options.addStretch(1)
+        self.exclude_starred_toggle = ToggleSwitch()
+        self.exclude_starred_toggle.setAccessibleName("Exclude starred jobs")
+        self.exclude_starred_toggle.setToolTip("Hide every starred role, including automatic company stars.")
+        self.exclude_starred_toggle.toggled.connect(self._filter_rows)
+        self.exclude_starred_toggle.toggled.connect(self._reset_query)
+        star_box = QHBoxLayout()
+        star_box.setSpacing(6)
+        star_box.addWidget(label("Exclude starred", "caption", wrap=False))
+        star_box.addWidget(self.exclude_starred_toggle)
+        options.addLayout(star_box)
+        column.addLayout(options)
 
         card = GlassPanel(radius=18)
         card_layout = QVBoxLayout(card)
@@ -296,6 +316,10 @@ class JobsView(QWidget):
     @property
     def posted_hours(self) -> int:
         return int(self.posted.value() or 0)
+
+    @property
+    def exclude_starred(self) -> bool:
+        return self.exclude_starred_toggle.isChecked()
 
     def set_filter(self, status: str) -> None:
         index = self.filter.findData(status)
@@ -434,13 +458,17 @@ class JobsView(QWidget):
                 action.setData(Qt.ItemDataRole.UserRole, kind)
                 action.setToolTip("Review the prepared application")
             elif can_apply and job.status in {"new", "dry_run"}:
-                kind = "apply" if job.ats in ("greenhouse", "lever", "ashby") else "view"
+                kind = "apply" if job.ats in ("greenhouse", "lever", "ashby", "workable", "rippling",
+                                              "workday") else "view"
                 action = QTableWidgetItem("Prepare" if kind == "apply" else "View")
                 action.setData(ACTION_ROLE, kind)
                 action.setData(Qt.ItemDataRole.UserRole, kind)
                 if kind == "view":
                     site = ATS_NAMES.get(job.ats, "This employer's")
                     action.setToolTip(f"{site} applications are filled on the employer's site. Open the posting to apply there.")
+                elif job.ats == "workday":
+                    action.setToolTip("Prepare this Workday application. You finish it in a browser window after "
+                                      "signing in; Starployment fills each page.")
                 else:
                     action.setToolTip("Prepare this application for your review")
             else:
@@ -464,6 +492,8 @@ class JobsView(QWidget):
         if not visible:
             if self.query:
                 self.empty.set_text("No results", f"Nothing matches “{self.query}”. Try a shorter search.")
+            elif self.exclude_starred:
+                self.empty.set_text("No unstarred jobs", "No unstarred roles match these filters. Turn off Exclude starred to see starred roles.")
             elif self.posted_hours:
                 self.empty.set_text("Nothing posted yet", f"No roles here were posted {POSTED_PHRASES.get(self.posted_hours, 'recently')}. "
                                     "Refresh jobs, or widen the Posted range.")
@@ -596,6 +626,7 @@ class JobsView(QWidget):
                 or (selected != "all" and value != selected)
                 or outside
                 or (hide_unpreparable and is_unpreparable)
+                or (self.exclude_starred and bool(role.data(STAR_ROLE) if role else False))
             )
         self._update_empty_state()
 

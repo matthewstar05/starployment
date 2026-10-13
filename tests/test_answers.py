@@ -209,3 +209,93 @@ def test_office_attendance_and_specific_city_are_not_inferred_from_relocation():
                          "radio", ["Yes", "No"]), profile, settings, None) is None
     assert rule_answer(Q("Would you relocate to New York?", "radio", ["Yes", "No"]),
                        profile, settings, None) is None
+
+
+def test_unknown_candidate_facts_and_legal_consent_require_saved_answers():
+    profile = Profile()
+    labels = [
+        "Applicant Privacy Statement", "Agreement to Arbitrate",
+        "I certify that all information submitted is truthful and complete",
+        "Are you over the age of 18?", "Are you at least 18 years old?",
+        "Are you a citizen or permanent resident of Cuba, Iran, North Korea, Syria, or Sudan?",
+        "Have you ever lived in the DPRK?",
+        "Are you currently bound by any non-compete, non-solicitation, or restrictive covenant agreement?",
+        "Have you worked at DoorDash before?", "Have you applied to this company in the past?",
+        "Have you ever been discharged or forced to resign from employment?",
+    ]
+    for label in labels:
+        question = Q(label, "radio", ["Yes", "No"])
+        assert rule_answer(question, profile, {}, None) is None
+        saved = {"answers": {"field_answers": {label: "No"}}}
+        assert rule_answer(question, profile, saved, None).value == "No"
+
+
+def test_graduation_timing_and_degree_status():
+    profile = Profile(education=[
+        Education(school="Example University", degree="M.S.", field="Computer Science",
+                  start="August 2025", end="May 2027")
+    ])
+    q_year = Q("Year you expect to complete your current degree", "select", ["2026", "2027", "2028"])
+    ans_year = rule_answer(q_year, profile, {}, None)
+    assert ans_year is not None and ans_year.value == "2027"
+
+    q_month = Q("Month you expect to complete your current degree", "select", ["April", "May", "June"])
+    ans_month = rule_answer(q_month, profile, {}, None)
+    assert ans_month is not None and ans_month.value == "May"
+
+    q_affil = Q("What is your current affiliation with your University?", "select",
+                ["Completing Bachelors Degree", "Completing Masters Degree", "Completing PhD"])
+    ans_affil = rule_answer(q_affil, profile, {}, None)
+    assert ans_affil is not None and ans_affil.value == "Completing Masters Degree"
+
+    q_highest = Q("Highest level of education", "select",
+                  ["High School", "College Degree", "Master's Degree", "Doctorate"])
+    ans_highest = rule_answer(q_highest, profile, {}, None)
+    assert ans_highest is not None and ans_highest.value == "Master's Degree"
+
+
+def test_notice_period_and_referral_source():
+    profile = Profile()
+    q_notice = Q("Notice period", "select", ["Immediate", "2 weeks", "1 month", "2 months"])
+    ans_notice = rule_answer(q_notice, profile, {}, None)
+    assert ans_notice is None
+
+    q_source = Q("How did you hear about this opportunity?", "select",
+                 ["LinkedIn", "Handshake", "Campus Event", "Other"])
+    ans_source = rule_answer(q_source, profile, {}, None)
+    assert ans_source is None
+
+
+def test_state_and_country_dropdown_matching():
+    profile = Profile(city="Thousand Oaks", state="CA", country="United States")
+    q_state = Q("State", "select", ["California", "New York", "Texas"])
+    ans_state = rule_answer(q_state, profile, {}, None)
+    assert ans_state is not None and ans_state.value == "California"
+
+    q_country = Q("Country", "select", ["United States", "Canada", "United Kingdom"])
+    ans_country = rule_answer(q_country, profile, {}, None)
+    assert ans_country is not None and ans_country.value == "United States"
+
+
+
+def test_saved_headline_summary_and_localized_contact_fields_are_extractive():
+    profile = Profile(first_name="Ada", last_name="Example", headline="Data engineer", summary="Built Python services")
+    assert rule_answer(Q("Headline", "text"), profile, {}, None).value == profile.headline
+    assert rule_answer(Q("Summary", "textarea"), profile, {}, None).value == profile.summary
+    assert rule_answer(Q("Prénom", "text", name="firstname"), profile, {}, None).value == "Ada"
+    assert rule_answer(Q("Nom de famille", "text", name="lastname"), profile, {}, None).value == "Example"
+    assert rule_answer(Q("Summary", "textarea"), Profile(), {}, None) is None
+def test_choose_not_to_disclose_is_an_answer_not_a_placeholder():
+    from jobhub.answers import pick_option
+    assert pick_option(["Choose...", "Male", "Female", "Choose not to disclose"], "decline") == "Choose not to disclose"
+
+
+def test_phone_country_code_requires_matching_saved_number_and_country():
+    from jobhub.answers import Q, rule_answer, pick_option
+    from jobhub.models import Profile
+    q = Q("Phone country code", "combobox", ["+1 CA - Canada", "+1 US - United States"])
+    candidate = Profile(phone="415-555-0134", country="United States")
+    assert rule_answer(q, candidate, {}, None).value == "+1 US - United States"
+    assert pick_option(q.options, "+1 US") == "+1 US - United States"
+    candidate.phone = "+44 20 7946 0958"
+    assert rule_answer(q, candidate, {}, None) is None

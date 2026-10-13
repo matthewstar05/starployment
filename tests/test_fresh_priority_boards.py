@@ -305,7 +305,7 @@ def test_scan_reads_discovered_boards_and_learns_new_ones(store, monkeypatch):
     monkeypatch.setattr(scheduler, "SOURCES", {"greenhouse": fake_greenhouse})
     report = scheduler.scan_once()
     assert report["status"] == "ok"
-    assert calls == [{"greenhouse": ["seen"]}]
+    assert calls == [{"greenhouse": ["seen"], "workday": []}]
     assert db.boards_for_scan("lever", set(), 5) == ["elsewhere"]
     assert db.boards_for_scan("greenhouse", set(), 5) == ["configured", "seen"]  # read boards rotate to the back
     assert any("discovered 2 more company board" in line for line in report["log"])

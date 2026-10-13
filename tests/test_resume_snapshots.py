@@ -60,7 +60,7 @@ def test_apply_uploads_and_records_snapshot_of_original_resume_fallback(monkeypa
     db.upsert_jobs([job])
     uploads = []
 
-    def fake_apply(job, profile, settings, resume_path, dry_run=None):
+    def fake_apply(job, profile, settings, resume_path, dry_run=None, assist=False):
         path = Path(resume_path)
         uploads.append((path, path.read_bytes()))
         return ApplyResult(status="dry_run", message="Local fixture filled")

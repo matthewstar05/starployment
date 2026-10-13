@@ -26,7 +26,8 @@ def test_location_word_boundaries_and_remote_country_restriction():
     _, local = score_job(job(remote=True, location='Remote, United States'), Profile(), settings)
     _, foreign = score_job(job(remote=True, location='Remote, Australia'), Profile(), settings)
     assert local['location'] == 10
-    assert foreign['location'] == 2
+    assert foreign['location'] == 0
+    assert foreign['auto_apply_eligible'] is False
     assert foreign['auto_apply_eligible'] is False
 
 

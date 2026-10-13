@@ -109,10 +109,20 @@ them to make a feature easier.
    runs when the candidate clicks it, and during preparation when
    `settings.luna.autofill_on_prepare` is on (the default; Settings →
    Connections → "Autofill prepared applications").
-   The submit boundary (rule 3) has one narrow, user-initiated exception:
+   The submit boundary (rule 3) has two narrow, user-initiated exceptions.
    `prepare.reopen_rejected` → `db.mark_not_received` clears an unconfirmed
-   attempt only when the employer explicitly refused it (spam-filter message),
-   so it can be prepared and sent again.
+   attempt only when the employer explicitly refused it (`prepare.refused`: a
+   spam-filter message, or a form that asked for corrections after Submit such
+   as Ashby's "Missing entry for required field"), so it can be fixed and sent
+   again; a corrections refusal keeps the draft's answers and flags the named
+   fields. **Finish in browser** (`prepare.draft_for_attempt` →
+   `db.reopen_for_browser` → `send_draft(assist=True)`) reopens an unconfirmed
+   attempt on its own record, never a second one, in a visible window
+   (`FormEngine(assist=True)`): Starployment fills what it can, records the
+   submit boundary, and never clicks Submit; the candidate solves the CAPTCHA
+   or code and submits, and only a new employer confirmation marks it applied.
+   The same button on a prepared draft lets the candidate finish questions
+   Starployment could not answer.
 2. **"Applied" means confirmed.** A submission counts only with a new employer
    confirmation signal *and* a durable local record. `db.finish_application`
    refuses `applied` without `submission_attempted`. A form fill or Submit click
@@ -142,8 +152,12 @@ them to make a feature easier.
    for the packaged app.
 8. **Tests never contact employers.** They use temporary databases and local
    browser fixtures. Keep it that way; mock the network.
-9. **Secrets stay in the OS vault.** The IMAP app password goes through
-   `keyring` (`jobhub/apply/email_verification.py`), never into SQLite or logs.
+9. **Secrets stay out of SQLite and logs.** The IMAP app password goes through
+   `email_verification._keyring()`, never into SQLite or logs. With the
+   `keychain_protection` setting on (Settings → Security) that is the OS vault;
+   off, the default, it is the owner-only `secrets.json` in the data folder, so
+   a rebuilt (ad-hoc signed) app never stops on a Keychain prompt. Secrets
+   saved in Keychain earlier are copied to the file on first read.
    The Settings view sends it as a transient `_imap_password` patch key that the
    controller strips before saving (`DesktopController._store_mail_secret`).
    Agent API keys use `agents.save_api_key` (keyring service
@@ -161,11 +175,19 @@ them to make a feature easier.
    `db.add_manual_application`: `method='manual'`, never a browser submission.
    It closes the draft and blocks any later attempt for the same posting.
 11. **The inbox is read-only and minimal.** `email_tracker` opens INBOX
-   read-only, keeps only sender, subject, date, and the inferred stage
+   read-only, keeps only sender, subject, date, Message-ID (so the candidate
+   can open that email from Applications), and the inferred stage
    (`mail_events`), and only advances a stage
    (`db.set_application_stage(..., "email")`); it never reopens an offer or a
    closed application or undoes a manual choice. Uncertain matches are left
-   for the candidate.
+   for the candidate. The one write is opt-in **Archive rejections**
+   (`email_tracking.archive_rejections`, off by default; Settings →
+   Connections → Email): after a check, `Mailbox.archive` takes a rejection
+   out of the Inbox only when it names one tracked application whose stage is
+   Rejected, after re-checking its Message-ID. Gmail adds the label
+   `Starployment/Rejected` and removes `\Inbox`; other servers `MOVE` it to
+   their own `\Archive` folder or skip it. Never delete, flag `\Deleted`, or
+   expunge.
 12. **Agents run tool-free.** `agents.complete` runs the Claude CLI with
    `--tools ""` and the Codex CLI with shell, exec, apps, browser, computer
    use, and web search disabled, `--ignore-user-config`, a read-only sandbox,
@@ -179,6 +201,35 @@ them to make a feature easier.
    refuses them before the browser starts, and "Send ready"
    (`prepare.bulk_send_candidates`) leaves starred drafts for their own
    Approve & send. Do not add another unattended send path that skips this.
+14. **Workday sends only with the candidate's say-so, through their own vault.**
+   Every Workday application sits behind an account on the employer's tenant
+   (`adapters.Adapter.assist_only`). Two settings, both off by default, change
+   what Starployment may do (Settings → Workday):
+   `settings.workday.create_accounts` ("Manage Workday sign-ins") lets
+   `apply/workday.py` create the employer's account with the candidate's
+   email and a `vault.generate_password()` password (saved in the vault
+   *before* Workday sees it), tick Workday's account-terms box, sign in with a
+   saved password, and save the password the candidate types when signing in
+   themselves. `settings.workday.send` ("Send Workday applications") lets
+   Approve & send, Send ready, and automatic runs send Workday
+   (`prepare.sends_unattended`; `apply_to_job`, `send_draft`,
+   `bulk_send_candidates`, and `auto_apply_batch` all check it). Unattended,
+   `WorkdayEngine` presses Save and Continue only when every required field
+   on the step has an answer from `answers.rule_answer`, presses Submit on
+   the review page, and stops with `needs_human` on any open required
+   question, error, CAPTCHA, or security check (never solved). Finish in
+   browser still never presses Save and Continue or Submit (`FORBIDDEN_RE`
+   guards `_press`; account and navigation buttons go through
+   `_click_control` by automation id). Practice runs create no account and
+   save no page. The submit boundary is recorded before the form is touched,
+   and only Workday's own confirmation marks it applied.
+   **The vault** (`jobhub/vault.py`): passwords go through
+   `email_verification._keyring()` (rule 9) under service "Starployment
+   Workday accounts"; `accounts.json` (owner-only) holds only employer, email,
+   dates, and status. Passwords never enter SQLite or logs. The desktop shows or copies one only after `vault.authenticate`
+   (LocalAuthentication: Touch ID or the Mac's password; refused off macOS),
+   hides it after 30 seconds, and clears a copied one from the clipboard
+   after a minute.
 
 ---
 
@@ -252,10 +303,12 @@ every 15 s) and renders via window.set_data.
 | `jobhub/models.py` | Pydantic `Job`, `Profile`, `ApplyResult`; canonical URLs and job IDs; `posted_epoch` (posting dates to UTC seconds) and `board_of` (the public board behind a posting URL). |
 | `jobhub/db.py` | SQLite schema, dedup view (`DEDUPED_JOBS`), jobs (`posted_ts` for posting-window filters and `JOB_ORDERS` sorting; `starred`), applications (`hidden`), runs, events, settings (and the one-time `_upgrade_settings` catalog upgrade), profile, discovered `boards`. |
 | `jobhub/priority.py` | Priority-company matching (`normalize_company`, `is_priority`), the effective star (`is_starred`), and the holds for bulk sends and automation. Pure functions. |
-| `jobhub/sources/` | One module per source; `import_job.py` validates and imports a single posting URL. `base.fetch_boards` reads configured boards plus the scan's discovered boards (quietly, reporting `board_results`). Greenhouse reads the light listing and fetches descriptions only for undescribed matches. |
+| `jobhub/sources/` | One module per source; `import_job.py` validates and imports a single posting URL. `base.fetch_boards` reads configured boards plus the scan's discovered boards (quietly, reporting `board_results`). Greenhouse reads the light listing and fetches descriptions only for undescribed matches. `workday.py` reads public Workday boards (`tenant.wdN/site`, Workday's job-search JSON), US postings only when the board offers that filter, descriptions for matching titles only; discovered Workday boards are read `DISCOVERED_WORKDAY_PER_SCAN` at a time. |
 | `jobhub/scoring.py` | Deterministic, explainable 0–100 match score and auto-apply eligibility. Settings that affect it are listed in `controller.SCORING_KEYS`. |
 | `jobhub/scheduler.py` | `scan_once` (with a rotating slice of discovered boards, `DISCOVERED_BOARDS_PER_SCAN`), `rescore`, `apply_one`, `auto_apply_batch`, shared `STATE`. |
 | `jobhub/apply/engine.py`, `adapters.py` | Browser form filling per ATS, confirmation detection, screenshots. |
+| `jobhub/apply/workday.py` | `WorkdayEngine`: Workday's sign-in-gated wizard by `data-automation-id`: account creation and sign-in from the vault, step filling, and (with `workday.send`) Save and Continue and Submit (rule 14). |
+| `jobhub/vault.py` | Workday sign-ins: generated passwords in the local secret store, `accounts.json` metadata, Touch ID (`authenticate`) before the UI shows one (rule 14). |
 | `jobhub/answers.py` | Maps rendered form questions to saved candidate answers without guessing. |
 | `jobhub/profile.py` | Resume parsing (pdftotext/pypdf, optional LLM). |
 | `jobhub/tailor.py` | One-page resume builder (`plan_resume`, `build_resume`: rank saved content, resize body text from 11 to 10 points, then `shrink` and `compact`; final `KeepInFrame` scaling protects the one-page guarantee). Helvetica typography, centered name/contact, Education first, saved Summary if present, Projects above Experience, then Skills and Awards; thin section rules and dates flush right. Entries, bullets, education details, tools, and skills display by job relevance; pins and Luna selections protect inclusion without overriding display order. The target job title is never added as a headline. Also role types (`classify_role`), resume files (`choose_resume_file`), `resume_choice`. |
@@ -309,7 +362,7 @@ Tests prove behavior; screenshots prove design. After any visual change:
 | `desktop/__main__.py` | Entry point and flags: `--no-scheduler`, `--setup`, `--smoke-test PNG`, `--browser-check`, `--dependency-check`. |
 | `desktop/controller.py` | `DesktopController`: signal wiring, worker thread, refresh loop, toasts, save handlers. The only place the UI talks to `db`/`scheduler`. |
 | `desktop/ui.py` | `JobHubWindow` shell: floating sidebar, page stack, toasts, keyboard shortcuts, macOS menu bar, theme crossfade, `set_data`, `set_scan_state`. Re-exports the views. |
-| `desktop/views/` | One module per sidebar page: `dashboard.py` (+ `ApplyHero`, `ApplyPlanSheet`), `jobs.py` (+ `AddPostingSheet`; Posted column, Posted window and Sort menus, header-click sorting run in SQL), `applications.py` (drafts and attempts; `DraftDetail`, `QuestionRow`; Starred filter, Sort menu, right-click star / mark as sent / remove), `tracker.py` (spreadsheet, `AddApplicationSheet`), `profile.py` (Details, Resume builder, Resume files, Answers), `settings.py`. Shared panels: `resume_builder.py`, `connections.py` (Luna and Email, also used by the wizard). |
+| `desktop/views/` | One module per sidebar page: `dashboard.py` (+ `ApplyHero`, `ApplyPlanSheet`), `jobs.py` (+ `AddPostingSheet`; Posted column, Posted window and Sort menus, header-click sorting run in SQL), `applications.py` (drafts and attempts; `DraftDetail`, `QuestionRow`; Starred filter, Sort menu with Priority (`format.priority_rank`: offers, interviews, assessments first, rejections last), Hide rejections, double-click or Open email for a stage's email (`format.email_link`), right-click star / mark as sent / remove), `tracker.py` (spreadsheet, `AddApplicationSheet`; Sort menu with Priority, which sorts the Stage column by `format.priority_rank`, and Hide rejections), `profile.py` (Details, Resume builder, Resume files, Answers), `settings.py`, `passwords.py` (saved Workday sign-ins, opened from Settings → Workday). Shared panels: `resume_builder.py`, `connections.py` (Luna and Email, also used by the wizard). |
 | `desktop/editors.py` | No-syntax editors: `TagEditor` (chips), `KeyValueEditor` (label/value rows), `BulletEditor`, `FlowLayout`, `yes_no_control`. They set `formExpand` so `FormGroup` rows give them full width. |
 | `desktop/wizard.py` | `SetupWizard`: step indicator, resume drop zone, grouped forms, answer bank. |
 | `desktop/widgets.py` | The design system: backdrop, glass, controls, motion, layout helpers. |
@@ -457,6 +510,15 @@ Buttons: `button(text, role, icon=..., trailing=...)` where role is `primary`
   and skip rebuilding (`JobsView.set_jobs`, `ApplicationsView.set_applications`,
   dashboard sections). When data does change, preserve the user's selection,
   scroll position, and unsaved input.
+- Refresh runs on the Qt thread, so it must stay cheap on a large library
+  (17k+ jobs). `DesktopController._job_data` reuses the job page, counts, and
+  stats until `db.jobs_version()` changes (a trigger-maintained counter bumped
+  by any write to `jobs`) or five minutes pass. `upsert_jobs` and
+  `update_scores` skip rows that would not change, so an unchanged scan keeps
+  that cache valid. Queries over all jobs rank ids in `DEDUPED_JOBS` and read
+  `idx_jobs_listing`; never sort or scan whole rows (descriptions sit before
+  `score`/`status` in each record). Scoring memoizes description signals per
+  job (`scoring._description_signals`) and location results.
 - Profile and Settings use `DirtyTracker`; `set_data` skips a dirty page so a
   refresh never overwrites typing. Application notes autosave 900ms after typing
   stops and survive refreshes.
@@ -656,6 +718,19 @@ contrast) and look at the screenshots.
   next pass; employment start month/year lists come from the saved
   availability, "U.S. person" from a confirmed citizen-or-permanent-resident
   yes, and "current or most recent employer" from the resume's latest role.
+- Ashby saves every answer to its server as it is entered (`ApiSetFormValue`)
+  and validates those saves at Submit, so a pressed yes/no button can still
+  be "Missing entry for required field" (Roadrunner, 2026-10-06). The engine
+  watches those saves (`_watch_ashby_saves`); before Submit it re-enters any
+  answer whose save failed, or a yes/no button that never saved, and stops
+  without submitting if a save is still refused (`_resave_ashby`). Clicking a
+  pressed Ashby yes/no button clears it, so a re-entry clicks twice. Practice
+  runs skip the check: `form_audit.py` aborts those mutations.
+- Greenhouse email codes arrive from `no-reply@us.greenhouse-mail.io` as
+  "Copy and paste this code into the security code field on your
+  application:" with the code on its own line; `_code_from_message` reads that
+  label form and ignores plain words after "code". Settings → Connections →
+  Finish email verification reads it with the inbox checker's mailbox.
 - Ashby renders "select all that apply" as `fieldset.ashby-application-form-input-checkbox-group`
   and dates as a react-datepicker text input. The engine labels each box
   "<question> - <option>" (matching `prepare.expand_answer`) and types dates

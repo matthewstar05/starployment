@@ -50,7 +50,7 @@ _BOARD_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
 
 def board_of(url: str) -> tuple[str, str] | None:
-    """The public Greenhouse, Lever, or Ashby board a posting URL belongs to.
+    """The public Greenhouse, Lever, Ashby, or Workday board a posting URL belongs to.
 
     Used to discover more company boards from postings found elsewhere. Only
     exact hosted job-board hosts count; the slug is lower-cased.
@@ -73,6 +73,16 @@ def board_of(url: str) -> tuple[str, str] | None:
         ats, slug = "lever", path[0]
     elif host == "jobs.ashbyhq.com" and len(path) >= 2:
         ats, slug = "ashby", path[0]
+    elif host.endswith(".myworkdayjobs.com") and host.count(".") == 3:
+        # https://citi.wd5.myworkdayjobs.com/en-US/2/job/... → "citi.wd5/2"
+        tenant, wd = host.split(".")[:2]
+        site = path[1] if path[:1] and re.fullmatch(r"[a-z]{2}-[A-Za-z]{2}", path[0]) and len(path) > 1 else \
+            (path[0] if path else "")
+        board = f"{tenant}.{wd}/{site}".lower()
+        if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}\.wd\d{1,3}/[a-z0-9][a-z0-9_.-]{0,99}", board) and \
+                site.casefold() not in ("job", "wday"):
+            return "workday", board
+        return None
     if not ats or not _BOARD_SLUG.match(slug) or slug.lower() in ("embed", "jobs"):
         return None
     return ats, slug.lower()
@@ -103,6 +113,10 @@ def job_fingerprint(job: "Job") -> str:
             return f"lever:{path[0].lower()}:{path[1]}"
         if host == "jobs.ashbyhq.com" and len(path) >= 2:
             return f"ashby:{path[0].lower()}:{path[1]}"
+        if host == "apply.workable.com" and len(path) >= 3 and path[1] == "j":
+            return f"workable:{path[0].lower()}:{path[2].upper()}"
+        if host == "ats.rippling.com" and len(path) >= 3 and path[1] == "jobs":
+            return f"rippling:{path[0].lower()}:{path[2].lower()}"
     raw_id = job.raw.get({"greenhouse": "gh_id", "lever": "lever_id", "ashby": "ashby_id"}.get(job.ats, ""))
     if raw_id and job.raw.get("slug"):
         return f"{job.ats}:{job.raw['slug'].lower()}:{raw_id}"

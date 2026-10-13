@@ -131,11 +131,18 @@ def missing_answer(question: dict) -> bool:
     if not question.get("required"):
         return False
     if question.get("kind") == "file":
+        if question.get("source") == "you" and question.get("answer"):
+            return False   # the candidate chose a file for it
         return question.get("source") != "file" and not re.search(r"resume|\bcv\b|cover", str(question.get("label")), re.I)
     value = question.get("answer")
     if question.get("kind") == "checkbox" and not question.get("options") and value is False:
         return True
     return value is None or value == "" or value == []
+
+
+def needs_attention(question: dict) -> bool:
+    """Missing, or answered but refused by the employer's form on the last try (``rejected``)."""
+    return missing_answer(question) or bool(question.get("rejected"))
 
 
 def form_date(value: Any) -> tuple["date", bool] | None:
@@ -409,7 +416,8 @@ def pick_option(options: list[str], intent: str | None) -> str | None:
     """Match a known answer without guessing a school, location or yes/no option."""
     if not isinstance(intent, str) or not intent.strip():
         return None
-    opts = [o for o in options if o and not re.match(r"^\s*(select|choose|--|please select)", o, re.I)]
+    opts = [o for o in options if o and (DECLINE_RE.search(o) or
+            not re.match(r"^\s*(select|choose|--|please select)", o, re.I))]
     wanted = _normalized(intent)
     exact = [o for o in opts if _normalized(o) == wanted]
     if len(exact) == 1:
@@ -429,6 +437,10 @@ def pick_option(options: list[str], intent: str | None) -> str | None:
         countries = [o for o in opts if re.fullmatch(r"united states(?: of america)?\s*\+1", _normalized(o))]
         if len(countries) == 1:
             return countries[0]
+    if wanted == "+1 us":
+        codes = [o for o in opts if re.fullmatch(r"\+1 us(?:\s*-\s*united states)?", _normalized(o))]
+        if len(codes) == 1:
+            return codes[0]
     if wanted == "decline":
         matches = [o for o in opts if DECLINE_RE.search(o)]
     elif wanted in {"yes", "no"}:
@@ -488,11 +500,11 @@ def _education_answer(q: Q, entry) -> Answer | None:
     matches = []
     for option in q.options:
         normalized = _normalized(option)
-        option_status = ("in progress" if re.search(r"in progress|pursuing|expected|currently enrolled", normalized)
+        option_status = ("in progress" if re.search(r"in progress|pursuing|expected|currently enrolled|completing", normalized)
                          else "completed" if re.search(r"completed|earned|awarded|attained", normalized) else "unknown")
         if option_status != "unknown" and option_status != status:
             continue
-        base = re.sub(r"\s*[([]?(in progress|pursuing|expected|currently enrolled|completed|earned|awarded|attained)[)\]]?", "", normalized).strip()
+        base = re.sub(r"\s*[([]?(in progress|pursuing|expected|currently enrolled|completing|completed|earned|awarded|attained)[)\]]?", "", normalized).strip()
         # Domain-specific aliases, never token overlap with arbitrary option text.
         if re.fullmatch(r"(?:bachelor'?s?|master'?s?|associate'?s?|doctorate|ph\.?d\.?|mba)(?: degree)?", base) and _degree_rank(base) == rank:
             matches.append(option)
@@ -572,7 +584,7 @@ def rule_answer(q: Q, profile: Profile, settings: dict, job: Job | None) -> Answ
     # its preceding yes/no or eligibility answer remains unknown.
     if matches(r"^if\s+(?:so|yes|applicable)\b|^in the event that\b"):
         return None
-    if matches(r"gender|\bsex\b|race|ethnic|hispanic|latino|veteran|military|disabilit|handicap|sexual orientation|transgender|lgbt|pronoun"):
+    if matches(r"gender|\bsex\b|race|racial|ethnic|hispanic|latino|veteran|military|disabilit|handicap|sexual orientation|transgender|lgbt|pronoun"):
         if matches(r"pronoun") and "pronouns" in confirmed:
             return known("pronouns")
         if q.kind == "combobox" and not q.options:
@@ -628,11 +640,20 @@ def rule_answer(q: Q, profile: Profile, settings: dict, job: Job | None) -> Answ
     if matches(r"employment type|full[- ]time|part[- ]time|contract") and q.options:
         return known("employment_type")
 
+    if q.kind in {"text", "textarea"} and matches(r"^(?:professional )?headline$"):
+        return value(profile.headline)
+    if q.kind in {"text", "textarea"} and matches(r"^(?:professional )?summary$"):
+        return value(profile.summary)
+    if q.kind in {"text", "textarea"} and matches(r"^cover letter$") and job is not None:
+        if (answers.get("cover_letter_mode", "auto") == "auto" and
+                (profile.summary or profile.headline or profile.skills or _evidence(profile))):
+            return Answer(cover_letter(profile, job, settings), "resume")
+        return None
     if matches(r"first.*(?:and|&)?.*last.*name"):
         return value(profile.full_name)
-    if matches(r"\bfirst\s*name|given name"):
+    if matches(r"\bfirst\s*name|given name|^prénom$") or q.name in {"firstname", "first_name"}:
         return value(profile.first_name)
-    if matches(r"\blast\s*name|family name|surname"):
+    if matches(r"\blast\s*name|family name|surname|^nom de famille$") or q.name in {"lastname", "last_name"}:
         return value(profile.last_name)
     if matches(r"preferred name|nickname"):
         return known("preferred_name")
@@ -643,6 +664,13 @@ def rule_answer(q: Q, profile: Profile, settings: dict, job: Job | None) -> Answ
         return value(profile.full_name)
     if matches(r"e-?mail"):
         return value(profile.email)
+    if matches(r"^phone country code$"):
+        digits = re.sub(r"\D", "", profile.phone)
+        us_country = profile.country.casefold() in {"united states", "united states of america", "usa", "us"}
+        if us_country and ((len(digits) == 10 and not profile.phone.strip().startswith("+")) or
+                           (len(digits) == 11 and digits.startswith("1"))):
+            return value("+1 US")
+        return None
     if matches(r"phone|mobile|telephone"):
         return value(profile.phone)
     if "linkedin" in label:
@@ -668,12 +696,21 @@ def rule_answer(q: Q, profile: Profile, settings: dict, job: Job | None) -> Answ
             parts.append(profile.country)
         return value(", ".join(parts))
     if matches(r"\bcountry\b"):
+        if q.options and profile.country:
+            for opt in q.options:
+                if opt.strip().casefold() in {profile.country.casefold(), "united states", "united states of america", "usa", "u.s.a."} and profile.country.casefold() in {"united states", "usa", "u.s.", "united states of america"}:
+                    return Answer(opt, "profile")
         return value(profile.country)
     if matches(r"\bstate\b|province|\bregion\b"):
         state = profile.state or profile.region
         if (q.kind in {"select", "combobox", "radio"} and
                 profile.country.casefold().strip() in {"united states", "united states of america", "us", "usa"}):
-            state = US_STATES.get(state.upper(), state)
+            full_name = US_STATES.get(state.upper(), state)
+            if q.options:
+                for opt in q.options:
+                    if opt.strip().casefold() in {state.casefold(), full_name.casefold()}:
+                        return Answer(opt, "profile")
+            state = full_name
         return value(state)
     if matches(r"\bcity\b") and not matches(r"state|country"):
         return value(profile.city)
@@ -719,8 +756,16 @@ def rule_answer(q: Q, profile: Profile, settings: dict, job: Job | None) -> Answ
         if not completed:
             return None
         return _education_answer(q, sorted(completed, key=lambda item: -_degree_rank(item.degree))[0])
+    if matches(r"current affiliation with your university|university affiliation|affiliation with (?:your )?university"):
+        if e and _degree_status(e) == "in progress":
+            return _education_answer(q, e)
+        return None
     if matches(r"\bminor\b"):
         return None
+    if matches(r"(?:year|month).*(?:complete|expect|finish).*(?:degree|education)|(?:complete|expect|finish).*(?:degree|education).*(?:year|month)"):
+        if matches(r"month"):
+            return value(_end_parts(e)[0] if e else "")
+        return value(_end_parts(e)[1] if e else "")
     if matches(r"\bdegree\b|education level|highest level"):
         return _education_answer(q, e)
     if matches(r"discipline|major|field of study|area of study|concentration"):

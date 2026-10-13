@@ -192,7 +192,7 @@ def test_send_pool_runs_several_at_once_but_one_per_employer(controller, monkeyp
     lock, active, peak, seen_together = threading.Lock(), set(), [0], []
     release = threading.Event()
 
-    def fake_send(draft_id, parallel=1):
+    def fake_send(draft_id, parallel=1, assist=False):
         assert parallel == 3
         company = db.get_draft(draft_id)["company"]
         with lock:
@@ -227,7 +227,7 @@ def test_busy_sends_wait_their_turn_instead_of_failing(controller, monkeypatch):
     db.upsert_jobs([job])
     draft_id = db.upsert_draft(job.id, status="approved")
     replies = [{"status": "busy", "draft_id": draft_id}, {"status": "applied", "draft_id": draft_id}]
-    monkeypatch.setattr(prepare, "send_draft", lambda draft_id, parallel=1: replies.pop(0))
+    monkeypatch.setattr(prepare, "send_draft", lambda draft_id, parallel=1, assist=False: replies.pop(0))
     monkeypatch.setattr("jobhub.desktop.controller.QTimer.singleShot", lambda ms, fn: fn())
     controller._queue_send([draft_id])
     deadline = time.time() + 5

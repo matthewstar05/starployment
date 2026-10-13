@@ -150,6 +150,7 @@ def test_only_native_keyring_backend_is_accepted(monkeypatch):
             raise AssertionError("must not save to plaintext backend")
 
     monkeypatch.setitem(__import__("sys").modules, "keyring", Vault())
+    monkeypatch.setattr(verification, "keychain_protection", lambda: True)
     with pytest.raises(RuntimeError, match="operating system credential vault"):
         verification.store_password("ada@example.test", "app-password")
 
@@ -304,3 +305,46 @@ def test_empty_sender_auto_discovery(monkeypatch):
     token = auto_inbox.wait_for_token(50, now, timeout_sec=0)
     assert token is not None and token.value == "LEVER777"
 
+
+
+def test_secrets_file_is_owner_only_and_copies_old_keychain_secrets(monkeypatch, tmp_path):
+    from jobhub import config
+
+    class Keychain:
+        def __init__(self):
+            self.items = {(verification.SERVICE, "ada@example.test"): "old-password"}
+
+        def get_password(self, service, username):
+            return self.items.get((service, username))
+
+        def set_password(self, service, username, password):
+            self.items[(service, username)] = password
+
+        def delete_password(self, service, username):
+            del self.items[(service, username)]
+
+    keychain = Keychain()
+    monkeypatch.setattr(config, "DATA", tmp_path)
+    monkeypatch.setattr(verification, "_system_vault", lambda: keychain)
+    monkeypatch.setattr(verification, "keychain_protection", lambda: False)
+    assert verification.has_password("ada@example.test")
+    secrets = tmp_path / "secrets.json"
+    assert secrets.stat().st_mode & 0o777 == 0o600
+    del keychain.items[(verification.SERVICE, "ada@example.test")]
+    assert verification.has_password("ada@example.test")   # read from the file now
+
+    verification.store_password("ada@example.test", "new-password")
+    assert keychain.items == {}
+    verification._FileVault().move_to_system_vault()
+    assert keychain.items == {(verification.SERVICE, "ada@example.test"): "new-password"}
+    assert not secrets.exists()
+
+
+def test_greenhouse_wording_with_the_code_on_its_own_line_is_read():
+    message = EmailMessage()
+    message["Subject"] = "Security code for your application to Example Co"
+    message.set_content("Copy and paste this code into the security code field on your application:\r\n\r\n"
+                        " 7kQm2xWb \r\n\r\n After you enter the code, resubmit your application.\r\n"
+                        "© 2026 Greenhouse · 18 West 18th Street, 11th Floor, New York, NY 10011")
+    assert verification._code_from_message(message, 8) == "7kQm2xWb"
+    assert verification._code_from_message(message, None) == "7kQm2xWb"

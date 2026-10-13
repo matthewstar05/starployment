@@ -43,10 +43,11 @@ def run(tmp_path, pacing: bool, monkeypatch, make_pdf):
         (tmp_path / name.lower()).mkdir(exist_ok=True)
     monkeypatch.setattr(config, "HEADLESS", True)
     monkeypatch.setenv("JOBHUB_HUMAN_PACING", "1" if pacing else "0")
-    monkeypatch.setattr(engine_module, "MIN_PAGE_SECONDS", 3)
+    monkeypatch.setattr(engine_module, "MIN_PAGE_SECONDS", 0.5)
+    monkeypatch.setattr(engine_module.random.Random, "randint", lambda self, a, b: 50)
     monkeypatch.setattr(engine_module.db, "mark_submission_attempted", lambda job_id: None)
     form = tmp_path / "form.html"
-    form.write_text(FORM % 2500)
+    form.write_text(FORM % 400)
     resume = make_pdf(tmp_path / "resume.pdf", ["Ada Example"])
     profile = Profile(first_name="Ada", last_name="Example", email="ada@example.test", city="Springfield",
                       resume_path=str(resume))

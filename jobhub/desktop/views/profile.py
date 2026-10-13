@@ -49,7 +49,7 @@ TEXT_ANSWERS = (
     ("preferred_name", "Preferred name", "Only if different from your first name", ()),
     ("pronouns", "Pronouns", "Optional", ("she/her", "he/him", "they/them")),
 )
-TABS = (("Details", "details"), ("Resume builder", "builder"), ("Resume files", "files"), ("Answers", "answers"))
+TABS = (("Details", "details"), ("Resume builder", "builder"), ("Resume bank", "files"), ("Answers", "answers"))
 SUBTITLE = "The facts and material Starployment uses to apply for you."
 
 

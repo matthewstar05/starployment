@@ -292,7 +292,7 @@ class ApplicationDelegate(QStyledItemDelegate):
         record = index.data(RECORD_ROLE) or {}
         company = str(record.get("company") or "Employer")
         title = str(record.get("title") or "Role")
-        status = str(record.get("status") or "unknown")
+        status = str(record.get("_display_status") or record.get("status") or "unknown")
         detail = str(index.data(SUBTITLE_ROLE) or "")
         when = str(index.data(SEARCH_ROLE) or "")
         rect = QRectF(option.rect).adjusted(4, 2, -4, -2)

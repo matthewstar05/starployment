@@ -128,7 +128,35 @@ def greenhouse_readiness_from_payload(payload: dict, profile: Profile, settings:
 
 def preflight_job(job: Job, profile: Profile | None, settings: dict) -> Readiness:
     """Fetch only a validated Greenhouse API URL; fail open on transport errors."""
-    if job.ats != "greenhouse" or profile is None:
+    if profile is None:
+        return Readiness("unknown")
+    if job.ats in ("lever", "ashby", "workable", "rippling"):
+        try:
+            from . import prepare
+            reader = {"lever": prepare.lever_questions, "ashby": prepare.ashby_questions,
+                      "workable": prepare.workable_questions, "rippling": prepare.rippling_questions}[job.ats]
+            questions = reader(job)
+            if not questions:
+                return Readiness("unknown")
+            prepare.answer_questions(questions, profile, settings, job)
+            missing = []
+            ambiguous = False
+            for question in questions:
+                if not question.get("required"):
+                    continue
+                label = question["label"]
+                if re.match(r"^\s*(?:if\b|when you (?:answered|selected)\b)", label, re.I):
+                    ambiguous = True
+                    continue
+                if question["kind"] == "file" and re.search(r"resume|\bcv\b", label, re.I):
+                    if not Path(profile.resume_path).is_file():
+                        missing.append(label)
+                elif prepare.missing(question):
+                    missing.append(label)
+            return Readiness("missing_facts", tuple(missing)) if missing else Readiness("unknown" if ambiguous else "ready")
+        except Exception:
+            return Readiness("unknown")
+    if job.ats != "greenhouse":
         return Readiness("unknown")
     try:
         parsed = parse_job_url(job.apply_url)

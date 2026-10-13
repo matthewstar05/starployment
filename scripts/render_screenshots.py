@@ -37,7 +37,7 @@ COMPANIES = [
     ("Example", "Data Engineer", "Remote", 128_000, 150_000, 77),
     ("Vantage", "Security Engineer", "Washington, DC", 150_000, 190_000, 35),
 ]
-PAGES = ("dashboard", "jobs", "applications", "tracker", "profile", "builder", "settings", "apply", "setup")
+PAGES = ("dashboard", "jobs", "applications", "tracker", "profile", "resume-bank", "builder", "settings", "apply", "setup")
 # README image names written by --docs.
 DOC_NAMES = {
     "dashboard-light.png": "starployment-overview-light.png",
@@ -96,8 +96,20 @@ def seed(db, config) -> None:
         experience=experience, projects=projects, awards=["Dean's List, six quarters", "ICPC regional finalist"],
         custom_facts={"Home city": "San Luis Obispo, CA", "Languages spoken": "English, Spanish"},
     ))
+    # Synthetic bank rows let the Resume Bank page show its real switch, main
+    # resume, and remove controls without reading any candidate files.
+    main_resume = config.RESUME_LIBRARY / "Alex_Rivera_Main.pdf"
+    profile = db.get_profile()
+    profile.resume_path = str(main_resume)
+    db.save_profile(profile)
+    db.add_resume_file(str(main_resume), "Alex Rivera Main", "general")
+    db.add_resume_file(str(config.RESUME_LIBRARY / "Alex_Rivera_Software.pdf"), "SWE", "auto")
+    data_resume_id = db.add_resume_file(str(config.RESUME_LIBRARY / "Alex_Rivera_Data.pdf"), "Data Science", "auto")
+    db.add_resume_file(str(config.RESUME_LIBRARY / "Alex_Rivera_Financial.pdf"), "Financial Analyst", "auto")
+    db.update_resume_file(data_resume_id, enabled=False)
     db.set_settings({
         "setup_complete": True, "auto_apply": True, "dry_run": False, "appearance": "System",
+        "resume_strategy": "library",
         "target_titles": ["Software Engineer", "Data Engineer", "Quantitative Developer"],
         "preferred_locations": ["San Francisco, CA", "New York, NY", "Remote"],
         # A fictional priority employer, so its prepared application shows the star.
@@ -226,7 +238,7 @@ def main() -> int:
     os.environ["QT_SCALE_FACTOR"] = str(args.scale)
     os.environ["JOBHUB_REDUCED_MOTION"] = "1"
 
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QPushButton
 
     from jobhub import config, db
     from jobhub.desktop.controller import DesktopController
@@ -259,7 +271,7 @@ def main() -> int:
         window.resize(width, height)
         window.show()
         shots = (("dashboard", 0), ("jobs", 1), ("applications", 2), ("tracker", 3), ("profile", 4),
-                 ("builder", 4), ("settings", 5))
+                 ("resume-bank", 4), ("builder", 4), ("settings", 5))
         for page, index in shots:
             if page not in pages:
                 continue
@@ -270,6 +282,8 @@ def main() -> int:
                 window.apps.list.setCurrentRow(0)
             if page == "profile":
                 window.profile.show_tab("details")
+            if page == "resume-bank":
+                window.profile.show_tab("files")
             if page == "builder":
                 window.profile.show_tab("builder")
             for _ in range(5):
@@ -277,6 +291,20 @@ def main() -> int:
             path = output / f"{page}-{appearance.lower()}.png"
             window.grab().save(str(path))
             written.append(path)
+            if page == "resume-bank":
+                more = next((widget for widget in window.profile.files.findChildren(QPushButton)
+                             if widget.toolTip() == "More" and widget.menu()
+                             and any(action.text() == "Set as main resume" for action in widget.menu().actions())), None)
+                if more:
+                    menu = more.menu()
+                    menu.adjustSize()
+                    menu.show()
+                    for _ in range(3):
+                        app.processEvents()
+                    menu_path = output / f"resume-bank-menu-{appearance.lower()}.png"
+                    menu.grab().save(str(menu_path))
+                    written.append(menu_path)
+                    menu.close()
         if "apply" in pages:
             from jobhub.desktop.views.dashboard import ApplyPlanSheet
             sheet = ApplyPlanSheet(db.get_settings(), 412, window, counts=db.fresh_counts())

@@ -28,6 +28,7 @@ def _overlays(window):
 def test_theme_crossfade_runs_every_change_and_leaves_no_overlay(monkeypatch):
     # Animated path: the fallback (non-native-glass) crossfade used on Windows and Linux.
     monkeypatch.setenv("JOBHUB_REDUCED_MOTION", "0")
+    monkeypatch.setattr(Motion, "SLOW", 40)
     app = QApplication.instance() or QApplication([])
     window = JobHubWindow()
     window.show()
@@ -36,13 +37,13 @@ def test_theme_crossfade_runs_every_change_and_leaves_no_overlay(monkeypatch):
     try:
         before = len(_overlays(window))
         window.crossfade(lambda: calls.append("first"))
-        _pump(app, Motion.SLOW / 1000 + 0.3)  # let it finish: the overlay deletes itself
+        _pump(app, Motion.SLOW / 1000 + 0.05)  # let it finish: the overlay deletes itself
         # Regression: the finished fade's animation was deleted with its overlay, and the
         # next switch called stop() on it, raised, and never applied the theme.
         window.crossfade(lambda: calls.append("second"))
         # A switch during a running fade must replace it, not stack a frozen frame.
         window.crossfade(lambda: calls.append("third"))
-        _pump(app, Motion.SLOW / 1000 + 0.3)
+        _pump(app, Motion.SLOW / 1000 + 0.05)
         assert calls == ["first", "second", "third"]
         assert len(_overlays(window)) == before
     finally:

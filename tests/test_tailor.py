@@ -221,3 +221,23 @@ def test_education_clean_field_pipe_splitting_and_summary_condition():
     edu_row2 = next(t for t in tables if any("B.S. in Computer Science" in getattr(cell, "text", "") for cell in t._cellvalues[0]))
     assert edu_row2._cellvalues[0][0].text == "B.S. in Computer Science"
     assert edu_row2._cellvalues[0][1].text == "GPA: 4.0"
+
+
+def test_every_education_detail_prints_and_is_trimmed_last():
+    profile = sample_profile()
+    profile.education[0].details = ["Relevant Coursework: Databases, Statistics",
+                                    "Concentration: Data Systems | Minor: Economics",
+                                    "Activities/Societies: Chess Club"]
+    plan = ResumePlan(profile, job("Data Engineer", "SQL databases"))
+    texts = [getattr(elem, "text", "") for elem in _story(plan)]
+    assert "<b>Relevant Coursework:</b> Databases, Statistics" in texts
+    assert "<b>Concentration:</b> Data Systems | Minor: Economics" in texts
+    assert "<b>Activities/Societies:</b> Chess Club" in texts
+
+    # Summary goes before any detail; then details go one at a time, least relevant first.
+    assert plan.compact() and plan.education[0].details and len(plan.education[0].details) == 3
+    while plan.summary:
+        assert plan.compact()
+    assert plan.compact()
+    assert len(plan.education[0].details) == 2
+    assert "Relevant Coursework: Databases, Statistics" in plan.education[0].details

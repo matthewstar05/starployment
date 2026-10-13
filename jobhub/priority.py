@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from functools import lru_cache
 from typing import Any
 
 _SUFFIXES = {"inc", "llc", "ltd", "corp", "corporation", "co", "company", "plc", "gmbh", "lp", "llp"}
@@ -21,7 +22,12 @@ _SUFFIXES = {"inc", "llc", "ltd", "corp", "corporation", "co", "company", "plc",
 
 def normalize_company(name: str) -> str:
     """Lower-case words without punctuation or legal suffixes; initials join ("D. E. Shaw" -> "de shaw")."""
-    words = re.findall(r"[a-z0-9]+", str(name or "").casefold().replace("&", " "))
+    return _normalize(str(name or ""))
+
+
+@lru_cache(maxsize=16384)
+def _normalize(name: str) -> str:
+    words = re.findall(r"[a-z0-9]+", name.casefold().replace("&", " "))
     joined: list[str] = []
     for word in words:
         if len(word) == 1 and word.isalpha() and joined and len(joined[-1]) <= 3 and joined[-1].isalpha():

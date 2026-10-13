@@ -20,6 +20,7 @@ def _ats_from_url(url: str) -> str:
     if "linkedin.com" in h: return "linkedin"
     if "smartrecruiters.com" in h: return "smartrecruiters"
     if "workable.com" in h: return "workable"
+    if h == "ats.rippling.com": return "rippling"
     if "icims.com" in h: return "icims"
     return "unknown"
 
@@ -37,9 +38,13 @@ def _fetch(url: str, settings: dict, kind: str) -> list[Job]:
                 continue
             u = re.sub(r"[?&]utm_source=Simplify.*$", "", j["url"])
             locs = j.get("locations") or []
+            loc_str = "; ".join(locs)[:200]
+            from ..locations import is_location_acceptable
+            if not is_location_acceptable(loc_str):
+                continue
             out.append(Job(
                 source=f"simplify:{kind}", ats=_ats_from_url(u), company=j.get("company_name", ""),
-                title=title, location="; ".join(locs)[:200], remote=any("remote" in l.lower() for l in locs),
+                title=title, location=loc_str, remote=any("remote" in l.lower() for l in locs),
                 url=u, apply_url=u, description="", posted_at=iso(j.get("date_posted")),
                 raw={"sponsorship": j.get("sponsorship"), "terms": j.get("terms"), "degrees": j.get("degrees"),
                      "simplify_id": j.get("id"), "company_url": j.get("company_url")},

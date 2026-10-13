@@ -254,8 +254,6 @@ class ResumePlan:
                     candidates.append((norm + 0.25, "item", section, item, -1))
         if len(self.skills) > 12:
             candidates.append((0.55, "skills", [], None, -1))
-        if len(self.education) > 1:
-            candidates.append((0.9, "education", [], None, -1))
         if not candidates:
             return False
         _, kind, section, item, bullet = min(candidates, key=lambda c: c[0])
@@ -263,10 +261,8 @@ class ResumePlan:
             item.keep.discard(bullet)
         elif kind == "item":
             section.remove(item)
-        elif kind == "skills":
-            del self.skills[-4:]
         else:
-            self.education.pop()
+            del self.skills[-4:]
         return True
 
     def compact(self) -> bool:
@@ -274,16 +270,20 @@ class ResumePlan:
         if self.awards:
             self.awards.pop()
             return True
-        for education in self.education:
-            if education.details:
-                self.education = [e.model_copy(update={"details": []}) for e in self.education]
-                return True
         if len(self.skills) > 8:
             del self.skills[-4:]
             return True
         if self.summary:
             sentences = re.split(r"(?<=[.!?])\s+", self.summary)
             self.summary = sentences[0] if len(sentences) > 1 else ""
+            return True
+        # Coursework, concentration, and activities are kept until nothing else is left.
+        details = [(_score_text(text, self.weights), n, i) for n, e in enumerate(self.education)
+                   for i, text in enumerate(e.details)]
+        if details:
+            _, n, i = min(details)
+            e = self.education[n]
+            self.education[n] = e.model_copy(update={"details": e.details[:i] + e.details[i + 1:]})
             return True
         return False
 
@@ -408,8 +408,11 @@ def _story(plan: ResumePlan, scale: float = 1.0) -> list:
             row(r1_left, r1_right)
             if r2_left or r2_right:
                 row(r2_left, r2_right, sub=True)
-            details = sorted(e.details, key=lambda text: -_score_text(text, plan.weights))
-            bullets(details[:2])
+            for text in sorted(e.details, key=lambda text: -_score_text(text, plan.weights)):
+                label, sep, rest = text.partition(":")
+                markup = (f"<b>{_esc(label)}:</b>{_esc(rest)}" if sep and rest.strip() and len(label) <= 40
+                          else _esc(text))
+                S.append(Paragraph(markup, styles["bullet"], bulletText="•"))
 
     if plan.summary and not (plan.experience or plan.projects):
         heading("Summary")
@@ -506,30 +509,52 @@ def build_resume(profile: Profile, job: Job, out_path: Path, use_llm: bool = Fal
 
 # ------------------------------------------------------------------ role-specific resume files
 RESUME_CATEGORIES: tuple[tuple[str, str], ...] = (
+    ("auto", "Automatic"),
     ("software", "Software engineering"),
     ("data", "Data science & analytics"),
+    ("finance", "Financial analysis"),
     ("ml", "Machine learning & AI"),
-    ("quant", "Fintech & quant"),
+    ("quant", "Quant & trading"),
     ("product", "Product & program"),
     ("general", "General"),
 )
 _CATEGORY_TERMS = {
-    "software": (r"software|developer|backend|back-end|frontend|front-end|full[- ]?stack|platform|infrastructure|"
+    "software": (r"software|\bswe\b|developer|backend|back-end|frontend|front-end|full[- ]?stack|platform|infrastructure|"
                  r"\bsre\b|reliability|mobile|ios|android|systems engineer|devops|security engineer|embedded", 3.0),
-    "data": (r"data scien|data analy|analytics|analyst|statistic|experimentation|a/b|business intelligence|"
+    "data": (r"data scien|\bds\b|data analy|analytics|analyst|statistic|experimentation|a/b|business intelligence|"
              r"\bbi\b|data engineer|insights", 3.0),
     "ml": (r"machine learning|\bml\b|\bai\b|artificial intelligence|deep learning|\bllm|nlp|computer vision|"
            r"research (?:scientist|engineer)|applied scientist|perception", 3.2),
-    "quant": (r"quant|trading|trader|fintech|payments|finance|financial|risk|hedge|market maker|market making|"
+    "quant": (r"quant|trading|trader|fintech|payments|risk|hedge|market maker|market making|"
               r"capital markets|banking|crypto|portfolio|securities|derivatives", 3.1),
+    "finance": (r"financ(?:e|ial)|\bfp\s*&?\s*a\b|accounting|valuation|budget|forecast|investment analy|"
+                r"equity research|credit analy|cash flow", 3.1),
     "product": (r"product manager|\bpm\b|program manager|product owner|technical program", 3.4),
 }
+
+_TITLE_CATEGORIES = (
+    ("product", r"product manager|program manager|product owner|\bpm\b"),
+    ("ml", _CATEGORY_TERMS["ml"][0]),
+    ("data", r"data scien|data analy|data engineer|analytics|\bds\b|business intelligence|statistic"),
+    ("quant", r"quant|\btrader\b|market mak"),
+    ("finance", r"financ(?:e|ial) (?:analy|associate|manager)|\bfp\s*&?\s*a\b|investment analy|equity research|credit analy"),
+    ("software", _CATEGORY_TERMS["software"][0]),
+    ("finance", r"financ(?:e|ial)|\bfp\s*&?\s*a\b|account(?:ant|ing)|investment analy|equity research|credit analy"),
+)
 
 
 def classify_role(job: Job) -> str:
     """The resume role type that best fits a posting; ``general`` when unclear."""
-    title = (job.title or "").lower()
-    body = (job.description or "")[:6000].lower()
+    return _classify_role_text(job.title, job.description)
+
+
+def _classify_role_text(title: str, body: str = "") -> str:
+    title = (title or "").casefold().replace("_", " ")
+    body = (body or "")[:6000].casefold()
+    # The actual role takes precedence over an employer's industry or shared skills.
+    for key, pattern in _TITLE_CATEGORIES:
+        if re.search(pattern, title):
+            return key
     best, best_score = "general", 0.0
     for key, (pattern, weight) in _CATEGORY_TERMS.items():
         score = weight * len(re.findall(pattern, title)) + 0.25 * min(8, len(re.findall(pattern, body)))
@@ -542,17 +567,85 @@ def category_label(key: str) -> str:
     return dict(RESUME_CATEGORIES).get(key, key.replace("_", " ").title())
 
 
+_TEXT_CACHE: dict[tuple[str, float], str] = {}
+
+
+def _cached_extract_text(path: str | Path) -> str:
+    """Extract text from a resume PDF with in-memory caching by path and mtime."""
+    try:
+        if not Path(path).is_file():
+            return ""
+        key = (str(path), os.path.getmtime(path))
+        if key in _TEXT_CACHE:
+            return _TEXT_CACHE[key]
+        from .profile import extract_text
+
+        text = extract_text(path)
+        _TEXT_CACHE[key] = text
+        return text
+    except Exception:
+        return ""
+
+
+def resume_file_category(record: dict) -> str:
+    """Infer a bank PDF's intended role locally, unless the candidate chose one."""
+    category = str(record.get("category") or "auto")
+    if category not in {"auto", "general"} and category in dict(RESUME_CATEGORIES):
+        return category
+    path = str(record.get("path") or "")
+    # A renamed bank entry is the candidate's clearest statement of its purpose.
+    for name in (str(record.get("label") or ""), Path(path).stem):
+        detected = _classify_role_text(name.replace("-", " "))
+        if detected != "general":
+            return detected
+    text = _cached_extract_text(path)
+    # A professional headline is more useful than an isolated keyword deep in a PDF.
+    heading = _classify_role_text(" ".join(text.splitlines()[:5]))
+    return heading if heading != "general" else _classify_role_text("", text)
+
+
 def choose_resume_file(job: Job, files: list[dict], fallback: str = "") -> tuple[str, str]:
-    """Pick the uploaded resume whose role type matches ``job``; else the default, else ``fallback``."""
-    usable = [f for f in files if Path(str(f.get("path") or "")).is_file()]
+    """Pick the most relevant uploaded resume file for ``job`` from the resume bank."""
+    usable = [f for f in files if f.get("enabled", 1) and not f.get("removed", 0) and Path(str(f.get("path") or "")).is_file()]
+    if not usable:
+        if any(db._same_path(str(f.get("path") or ""), fallback) for f in files):
+            return "", "No enabled resumes in Resume bank"
+        return fallback, "Main resume"
+    if len(usable) == 1:
+        return str(usable[0]["path"]), f"{usable[0].get('label') or 'Resume'} · default resume"
+
+    weights = _job_weights(job)
     category = classify_role(job)
+    title_tokens = set(_words(job.title or ""))
+
+    best_record = None
+    best_score = (-1, -1.0, -1)
+    best_relevance = 0.0
+
     for record in usable:
-        if record.get("category") == category:
-            return str(record["path"]), f"{record.get('label') or 'Resume'} · matched {category_label(category).lower()}"
-    default = next((f for f in usable if f.get("is_default")), usable[0] if usable else None)
-    if default:
-        return str(default["path"]), f"{default.get('label') or 'Resume'} · default resume"
-    return fallback, "Main resume"
+        text = _cached_extract_text(str(record.get("path") or ""))
+        text_score = _score_text(text, weights) if text else 0.0
+
+        role_match = int(category != "general" and resume_file_category(record) == category)
+
+        label_tokens = set(_words(str(record.get("label") or "")))
+        label_bonus = 1.5 * len(label_tokens & title_tokens)
+        relevance = text_score + label_bonus
+        total_score = (role_match, relevance, int(bool(record.get("is_default"))))
+
+        if total_score > best_score:
+            best_score = total_score
+            best_relevance = role_match + relevance
+            best_record = record
+
+    best = best_record or usable[0]
+    if best_relevance > 0.0:
+        job_title = job.title or "role"
+        note = f"{best.get('label') or 'Resume'} · matched {job_title} from resume bank"
+    else:
+        note = f"{best.get('label') or 'Resume'} · default resume"
+
+    return str(best["path"]), note
 
 
 def _fmt_phone(p: str) -> str:
@@ -569,8 +662,8 @@ def resume_choice(profile: Profile, job: Job, settings: dict, out_dir: Path | No
                   selection: dict | None = None) -> tuple[str, str]:
     """Return ``(path, description)`` for the resume to upload for this job."""
     strategy = settings.get("resume_strategy", "tailored")
-    if strategy == "library":
-        path, note = choose_resume_file(job, db.list_resume_files(), profile.resume_path)
+    if strategy in ("library", "bank"):
+        path, note = choose_resume_file(job, db.list_resume_files(include_removed=True), profile.resume_path)
         return path, note
     rich = len(profile.projects) + len(profile.experience) >= 2 and profile.education
     if strategy == "tailored" and rich:

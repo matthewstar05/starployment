@@ -108,12 +108,14 @@ def test_greenhouse_lever_and_ashby_forms_are_read(monkeypatch):
                         "options": [{"text": "Yes"}, {"text": "No"}]},
                        {"type": "textarea", "text": "Tell us about a project", "required": False}]}
     page = ('<input name="name"><input type="hidden" value="' + json.dumps(card).replace('"', "&quot;")
-            + '" name="cards[abc][baseTemplate]"><input name="urls[LinkedIn]">')
+            + '" name="cards[abc][baseTemplate]"><input name="urls[LinkedIn]"><input name="urls[Twitter]">'
+            + '<input name="urls[Other]">')
     monkeypatch.setattr(prepare, "client", lambda **kw: Client(Response(text=page)))
     job = Job(source="l", ats="lever", company="A", title="T",
               url="https://jobs.lever.co/a/0e5c4b0a-1234-4cde-8f00-123456789abc")
     labels = [q["label"] for q in prepare.lever_questions(job)]
     assert "Are you a U.S. citizen?" in labels and "Tell us about a project" in labels and "LinkedIn URL" in labels
+    assert "Twitter URL" in labels and "Other website" in labels and "GitHub URL" not in labels
 
     ashby = {"data": {"jobPosting": {"applicationForm": {"sections": [{"fieldEntries": [
         {"isRequired": True, "field": {"type": "String", "title": "Why Example?", "path": "a"}},
@@ -126,6 +128,34 @@ def test_greenhouse_lever_and_ashby_forms_are_read(monkeypatch):
     questions = prepare.ashby_questions(job)
     assert [(q["kind"], q["options"]) for q in questions] == [("text", []), ("radio", ["Yes", "No"]),
                                                                ("select", ["One", "Two"])]
+
+    workable = [
+        {"name": "Personal information", "fields": [
+            {"id": "firstname", "label": "First name", "required": True, "type": "text"},
+            {"id": "email", "label": "Email", "required": True, "type": "email"}]},
+        {"name": "Profile", "fields": [
+            {"id": "resume", "label": "Resume", "required": True, "type": "file"}]},
+        {"name": "Details", "fields": [
+            {"id": "QA_1", "label": "Cover letter", "required": False, "type": "paragraph"},
+            {"id": "QA_2", "label": "Authorized?", "required": True, "type": "boolean"},
+            {"id": "QA_3", "label": "Pick option", "required": True, "type": "multiple", "singleOption": True,
+             "options": [{"value": "OptA"}, {"value": "OptB"}]}]}
+    ]
+    monkeypatch.setattr(prepare, "client", lambda **kw: Client(Response(workable)))
+    w_job = Job(source="w", ats="workable", company="W", title="T",
+                url="https://apply.workable.com/example/j/12345ABCDE/apply/")
+    w_questions, method = prepare.discover_questions(w_job)
+    assert method == "workable_form"
+    assert [(q["label"], q["kind"]) for q in w_questions] == [
+        ("First name", "text"), ("Email", "text"), ("Resume", "file"),
+        ("Cover letter", "textarea"), ("Authorized?", "radio"), ("Pick option", "select")
+    ]
+    assert w_questions[4]["options"] == ["Yes", "No"]
+    assert w_questions[5]["options"] == ["OptA", "OptB"]
+    from jobhub.apply.adapters import adapter_for
+    adapter = adapter_for(w_job)
+    assert adapter is not None and adapter.name == "workable"
+    assert adapter.apply_url.endswith("/apply/")
 
 
 def test_prepare_batch_drafts_top_matches_one_per_company_with_luna(candidate, monkeypatch):
@@ -232,7 +262,7 @@ def test_reset_unfinished_clears_drafts_and_unsent_attempts_but_keeps_submission
     db.finish_application(sent_id, "applied", [], [], [], submission_attempted=True)
     resumes = [d["resume_path"] for d in db.list_drafts()]
     report = db.reset_unfinished()
-    assert report == {"drafts": 2, "attempts": 1}
+    assert report == {"drafts": 2, "attempts": 1, "kept": 0}
     assert db.list_drafts() == []
     assert all(not __import__("pathlib").Path(path).exists() for path in resumes)
     assert db.get_application(sent_id)["status"] == "applied"
@@ -380,6 +410,33 @@ def test_ai_autofill_answers_every_open_question_with_labeled_assumptions(candid
 
 
 
+def test_autofill_never_sends_racial_category_questions_to_the_agent():
+    from jobhub import luna
+    question = {"id": "q1", "label": "Which racial categories best describe you? Select all that apply.",
+                "kind": "select", "options": ["Asian", "White", "I don't wish to answer"], "required": True}
+    assert not luna.draftable(question)
+    assert luna.DEMOGRAPHIC_RE.search(question["label"])
+
+
+def test_a_failed_autofill_is_reported_and_cleared_by_a_later_one(candidate, monkeypatch):
+    jobs(1)
+    monkeypatch.setattr(prepare, "discover_questions", fake_discovery)
+    db.set_settings({"agent": {"backend": "claude_cli", "model": ""}})
+
+    def quota(prompt, settings, timeout=0):
+        raise RuntimeError("Individual quota reached.")
+
+    monkeypatch.setattr("jobhub.luna.complete", quota)
+    report = prepare.prepare_batch(1, 0)
+    assert report["prepared"] == 1 and report["fill_failed"] == 1
+    draft = db.list_drafts()[0]
+    assert "quota" in draft["error"]
+    monkeypatch.setattr("jobhub.luna.complete", lambda prompt, settings, timeout=0: json.dumps({"answers": [
+        {"id": "q4", "answer": "I build Python services."}]}))
+    assert prepare.autofill(draft["id"]) == 1
+    assert db.get_draft(draft["id"])["error"] == ""
+
+
 def test_prepared_applications_are_autofilled_ready_by_default(candidate, monkeypatch):
     jobs(2)
     monkeypatch.setattr(prepare, "discover_questions", fake_discovery)
@@ -416,3 +473,172 @@ def test_spam_rejected_attempt_can_be_prepared_again_but_others_cannot(candidate
     prepare.prepare_job(db.get_job(rows[0].id), db.get_profile(), db.get_settings())
     assert db.draft_for_job(rows[0].id)["status"] == "ready"
     assert db.reserve_application(rows[0].id)            # sending is allowed again
+
+
+def test_reset_unfinished_keeps_and_counts_unconfirmed_submissions(candidate, monkeypatch):
+    rows = jobs(1)
+    app_id = db.reserve_application(rows[0].id)
+    db.start_application(app_id, rows[0].id)
+    db.mark_submission_attempted(rows[0].id)
+    db.finish_application(app_id, "needs_human", [], [], [], submission_attempted=True)
+    assert db.reset_unfinished()["kept"] == 1
+    assert db.get_application(app_id)["status"] == "needs_human"
+    db.hide_application(app_id)
+    assert db.reset_unfinished()["kept"] == 0
+
+
+def _stop_with(monkeypatch, details, captured=None):
+    def fake_apply(job_id, **kwargs):
+        if captured is not None:
+            captured.update(kwargs)
+        db.start_application(kwargs["application_id"], job_id)
+        result = ApplyResult(status="needs_human", message="Required or invalid fields need attention", questions=details)
+        db.finish_application(kwargs["application_id"], "needs_human", [], [], [], result.message,
+                              questions=result.questions)
+        return {"status": "needs_human", "submission_attempted": False, **result.model_dump()}
+    monkeypatch.setattr(scheduler, "apply_one", fake_apply)
+
+
+def test_an_answer_the_form_refused_comes_back_editable_and_autofillable(candidate, monkeypatch):
+    jobs(1)
+    monkeypatch.setattr(prepare, "discover_questions", lambda job: ([
+        prepare._question(1, "Your organization", "text", [], True)], "greenhouse_form"))
+    prepare.prepare_batch(1, 0, use_luna=False)
+    draft = db.list_drafts()[0]
+    qid = draft["questions"][0]["id"]
+    prepare.approve_and_queue(draft["id"], {qid: "Example Lab"})
+    # The answer was filled, but the form marked the field invalid: nothing is blank.
+    _stop_with(monkeypatch, [{"label": "Your organization", "kind": "text", "required": True, "invalid": True}])
+    prepare.send_draft(draft["id"])
+    after = db.get_draft(draft["id"])
+    question = next(q for q in after["questions"] if q["id"] == qid)
+    assert after["status"] == "needs_answers"            # not a dead-end "error" with nothing to edit
+    assert question["rejected"] and question["answer"] == "Example Lab" and "didn't accept" in question["note"]
+    seen = []
+    monkeypatch.setattr("jobhub.luna.autofill_answers",
+                        lambda job, profile, settings, qs: seen.extend(q["id"] for q in qs) or
+                        {qid: {"answer": "Example Lab Inc.", "note": ""}})
+    assert prepare.autofill(draft["id"]) == 1 and seen == [qid]
+    question = next(q for q in db.get_draft(draft["id"])["questions"] if q["id"] == qid)
+    assert question["answer"] == "Example Lab Inc." and not question.get("rejected")
+
+
+def test_keeping_a_refused_answer_and_approving_clears_the_flag(candidate, monkeypatch):
+    jobs(1)
+    monkeypatch.setattr(prepare, "discover_questions", lambda job: ([
+        prepare._question(1, "Your organization", "text", [], True)], "greenhouse_form"))
+    prepare.prepare_batch(1, 0, use_luna=False)
+    draft = db.list_drafts()[0]
+    qid = draft["questions"][0]["id"]
+    prepare.approve_and_queue(draft["id"], {qid: "Example Lab"})
+    _stop_with(monkeypatch, [{"label": "Your organization", "kind": "text", "required": True}])  # never registered
+    prepare.send_draft(draft["id"])
+    assert db.get_draft(draft["id"])["status"] == "needs_answers"
+    approved = prepare.approve_and_queue(draft["id"])
+    assert approved["status"] == "approved" and not approved["questions"][0].get("rejected")
+
+
+def test_a_file_the_candidate_chooses_is_sent_for_its_upload(candidate, monkeypatch, store):
+    jobs(1)
+    monkeypatch.setattr(prepare, "discover_questions", lambda job: ([
+        prepare._question(1, "Transcript", "file", [], True)], "greenhouse_form"))
+    prepare.prepare_batch(1, 0, use_luna=False)
+    draft = db.list_drafts()[0]
+    qid = draft["questions"][0]["id"]
+    assert draft["status"] == "needs_answers"
+    with pytest.raises(ValueError):
+        prepare.approve_and_queue(draft["id"])
+    transcript = store / "transcript.pdf"
+    transcript.write_bytes(b"%PDF-1.4")
+    assert prepare.approve_and_queue(draft["id"], {qid: str(transcript)})["status"] == "approved"
+    captured = {}
+    _stop_with(monkeypatch, [], captured)
+    prepare.send_draft(draft["id"])
+    assert captured["extra_answers"]["Transcript"] == str(transcript)
+    kept = next(q for q in db.get_draft(draft["id"])["questions"] if q["id"] == qid)
+    assert kept["answer"] == str(transcript) and kept["source"] == "you"
+
+
+def _submitted(job_id, status="needs_human", error="A CAPTCHA or security check appeared after Submit."):
+    app_id = db.reserve_application(job_id)
+    db.start_application(app_id, job_id)
+    db.mark_submission_attempted(job_id)
+    db.finish_application(app_id, status, ["clicked Submit"], [], [], error, submission_attempted=True)
+    return app_id
+
+
+def test_an_unconfirmed_attempt_is_finished_in_the_browser_on_its_own_record(candidate, monkeypatch):
+    rows = jobs(1)
+    app_id = _submitted(rows[0].id)
+    draft_id = prepare.draft_for_attempt(app_id)
+    assert db.get_draft(draft_id)["status"] == "unconfirmed"
+    calls = {}
+
+    def fake_apply(job_id, **kwargs):
+        calls.update(kwargs)
+        assert db.start_application(kwargs["application_id"], job_id)
+        db.finish_application(kwargs["application_id"], "applied", ["confirmed"], [], [], submission_attempted=True)
+        return {"status": "applied", "submission_attempted": True}
+
+    monkeypatch.setattr(scheduler, "apply_one", fake_apply)
+    with pytest.raises(ValueError):
+        prepare.send_draft(draft_id)                      # never an ordinary resend
+    prepare.send_draft(draft_id, assist=True)
+    assert calls["application_id"] == app_id and calls["assist"] is True
+    assert db.get_application(app_id)["status"] == "applied"
+    assert db.get_draft(draft_id)["status"] == "sent"
+    assert len(db.list_applications()) == 1                # no second attempt for the posting
+
+
+def test_finishing_in_the_browser_is_refused_once_the_posting_is_confirmed(candidate):
+    rows = jobs(1)
+    app_id = _submitted(rows[0].id)
+    with db.conn() as c:   # a later confirmed record for the same vacancy
+        c.execute("INSERT INTO applications(job_id, status, submission_attempted) VALUES (?, 'applied', 1)",
+                  (rows[0].id,))
+    with pytest.raises(ValueError):
+        db.reopen_for_browser(app_id)
+    applied = db.list_applications()[0]["id"]
+    with pytest.raises(ValueError):
+        prepare.draft_for_attempt(applied)
+
+
+def test_a_draft_with_open_questions_can_still_be_finished_in_the_browser(candidate, monkeypatch):
+    jobs(1)
+    monkeypatch.setattr(prepare, "discover_questions", lambda job: ([
+        prepare._question(1, "Favorite color", "text", [], True)], "greenhouse_form"))
+    prepare.prepare_batch(1, 0, use_luna=False)
+    draft = db.list_drafts()[0]
+    assert draft["status"] == "needs_answers"
+    assert prepare.prepare_for_browser(draft["id"])["status"] == "approved"
+
+
+def test_a_form_that_asked_for_corrections_after_submit_can_be_fixed_and_sent_again(candidate, monkeypatch):
+    rows = jobs(1)
+    monkeypatch.setattr(prepare, "discover_questions", lambda job: ([
+        prepare._question(1, "Are you legally authorized to work in the United States?", "radio", ["Yes", "No"], True),
+        prepare._question(2, "Why us?", "textarea", [], True)], "ashby_form"))
+    prepare.prepare_batch(1, 0, use_luna=False)
+    draft = db.list_drafts()[0]
+    prepare.approve_and_queue(draft["id"], {"q2": "The mission."})
+    error = ("The form reported: Your form needs corrections Missing entry for required field: Are you legally "
+             "authorized to work in the United States? | Missing entry for required field: Are you legally authorized")
+
+    def fake_apply(job_id, **kwargs):
+        db.start_application(kwargs["application_id"], job_id)
+        db.mark_submission_attempted(job_id)
+        db.finish_application(kwargs["application_id"], "needs_human", [], [], [], error, submission_attempted=True)
+        return {"status": "needs_human", "submission_attempted": True, "message": error}
+
+    monkeypatch.setattr(scheduler, "apply_one", fake_apply)
+    prepare.send_draft(draft["id"])
+    record = db.list_applications()[0]
+    assert prepare.refused(record)
+    prepare.reopen_rejected(record["id"])
+    after = db.get_draft(draft["id"])
+    flagged = {q["label"]: q.get("rejected") for q in after["questions"]}
+    assert flagged["Are you legally authorized to work in the United States?"] and not flagged["Why us?"]
+    assert after["status"] == "needs_answers"
+    assert next(q for q in after["questions"] if q["id"] == "q2")["answer"] == "The mission."   # answers kept
+    assert db.get_application(record["id"])["submission_attempted"] == 0
+    assert db.get_job(rows[0].id).status == "prepared"

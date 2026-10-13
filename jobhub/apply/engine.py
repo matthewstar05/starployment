@@ -7,6 +7,7 @@ attempt with a screenshot. No CAPTCHA bypass or guessed factual answers.
 from __future__ import annotations
 
 import itertools
+import json
 import os
 import random
 import re
@@ -42,14 +43,30 @@ SCAN_JS = r"""
     if (!e.dataset.jh) e.dataset.jh = String(window.__jobhubFieldId = (window.__jobhubFieldId || 0) + 1);
     return e.dataset.jh;
   };
+  const customTitle = e => {
+    const field = e.closest('[data-testid=field]');
+    if (!field?.querySelector('[data-testid^="customQuestions."]')) return null;
+    return field.previousElementSibling?.querySelector('p') || null;
+  };
   const ownLabel = e => {
-    const labels = [...(e.labels || [])];
-    if (labels.length) return labels.map(l => l.innerText || l.textContent).join(' ');
+    if (e.closest('[data-testid="phone_number-code"]')) return 'Phone country code';
     if (e.getAttribute('aria-labelledby')) return e.getAttribute('aria-labelledby').split(' ').map(
       id => document.getElementById(id)?.innerText || '').join(' ');
+    const associated = e.id ? document.getElementById(e.id + '-label') : null;
+    if (associated) return associated.innerText;
+    const field = e.closest('[data-testid=field]');
+    const title = field?.querySelector('[id$="-label"]');
+    if (title && !['checkbox','radio'].includes(e.type) && !['checkbox','radio'].includes(e.getAttribute('role')))
+      return title.innerText;
+    const custom = customTitle(e);
+    if (custom && !['checkbox','radio'].includes(e.type) && !['checkbox','radio'].includes(e.getAttribute('role')))
+      return custom.innerText;
+    const labels = [...(e.labels || [])];
+    if (labels.length) return labels.map(l => l.innerText || l.textContent).join(' ');
     return e.getAttribute('aria-label') || '';
   };
-  const placeholder = t => !t || /^(start typing|select|choose|pick|type|search|enter)\b/i.test(t.trim());
+  const placeholder = t => !t || (!/choose not to (?:answer|say|disclose)/i.test(t) &&
+    /^(start typing|select|choose|pick|type|search|enter)\b/i.test(t.trim()));
   const fieldTitle = e => e.closest('.ashby-application-form-field-entry,.ashby-application-form-input-radio-group,.ashby-application-form-input-checkbox-group')
     ?.querySelector('.ashby-application-form-question-title');
   const leverTitle = e => e.closest('.application-question')?.querySelector('.application-label');
@@ -69,7 +86,8 @@ SCAN_JS = r"""
   const required = (e, label) => !!(e.required || e.getAttribute('aria-required') === 'true' ||
       /[*✱]|\(required\)/i.test(label || '') ||
       /(?:^|\s)_?required(?:_|\s|$)/i.test(fieldTitle(e)?.className || '') ||
-      e.closest('[role=group][aria-required=true],[role=radiogroup][aria-required=true],fieldset[aria-required=true]'));
+      e.closest('[role=group][aria-required=true],[role=radiogroup][aria-required=true],fieldset[aria-required=true]') ||
+      /[*✱]/.test(e.closest('[data-testid=field]')?.querySelector('[id$="-label"]')?.parentElement?.innerText || ''));
   const seen = new Set(), out = [];
   // Scope to an application form when the document also contains newsletter/search forms.
   const upload = [...document.querySelectorAll('input[type=file]')].find(e => /resume|cv/i.test(labelFor(e)));
@@ -89,21 +107,37 @@ SCAN_JS = r"""
       value: '', selectedOption: clean(buttons.find(b => b.getAttribute('aria-pressed') === 'true')?.innerText),
       empty: !buttons.some(b => b.getAttribute('aria-pressed') === 'true'), invalid: false, validation: ''});
   }
-  for (const e of scope.querySelectorAll('input,select,textarea,[role=combobox]')) {
-    const type = (e.type || '').toLowerCase();
+  const checked = e => e.checked === true || e.getAttribute('aria-checked') === 'true';
+  // Accessible custom radio groups expose their state through ARIA, not native inputs.
+  for (const group of scope.querySelectorAll('[role=radiogroup]')) {
+    const radios = [...group.querySelectorAll('[role=radio]')].filter(visible);
+    if (!visible(group) || !radios.length) continue;
+    const label = customTitle(group)?.innerText || document.getElementById(group.id + '-label')?.innerText || labelFor(group);
+    radios.forEach(e => { seen.add(e); e.querySelectorAll('input').forEach(n => seen.add(n)); });
+    out.push({idx: idFor(group), kind: 'radio', type: 'custom', tag: group.tagName.toLowerCase(),
+      id: group.id || '', name: group.getAttribute('data-testid') || '', label: clean(label),
+      required: required(group, label) || radios.some(e => required(e, label)),
+      options: radios.map(e => clean(e.getAttribute('aria-label') || e.innerText || ownLabel(e))),
+      optionIdx: radios.map(idFor), ariaOptions: true, value: '',
+      selectedOption: clean(radios.find(checked)?.getAttribute('aria-label') || radios.find(checked)?.innerText),
+      empty: !radios.some(checked), invalid: group.getAttribute('aria-invalid') === 'true', validation: ''});
+  }
+  for (const e of scope.querySelectorAll('input,select,textarea,[role=combobox],[role=checkbox]')) {
+    const type = (e.type || (e.getAttribute('role') === 'checkbox' ? 'checkbox' : '')).toLowerCase();
     if (e.disabled || e.getAttribute('aria-disabled') === 'true' ||
         ['hidden','submit','button','reset'].includes(type) && e.getAttribute('role') !== 'combobox') continue;
-    if (seen.has(e)) continue;
+    if (seen.has(e) || (e.tagName === 'INPUT' && e.closest('[role=checkbox]'))) continue;
     // select2 and jQuery Chosen draw a stand-in for a real <select>, which is what gets filled.
     if (e.closest('.select2-container,.chosen-container')) continue;
     const chosenWidget = e.tagName === 'SELECT' &&
       (e.nextElementSibling?.classList?.contains('chosen-container') ? e.nextElementSibling
         : e.id ? document.getElementById(e.id + '_chosen') : null);
     // Custom radios/checkboxes often hide the native control behind a visible label.
-    const labeledVisible = [...(e.labels || [])].some(visible);
+    const labeledVisible = [...(e.labels || [])].some(visible) ||
+      (e.getAttribute('aria-labelledby') || '').split(' ').some(id => visible(document.getElementById(id)));
     if (type !== 'file' && !visible(e) && !(chosenWidget && visible(chosenWidget)) &&
         !(['radio','checkbox'].includes(type) && labeledVisible)) continue;
-    let rawLabel = labelFor(e);
+    let rawLabel = e.getAttribute('role') === 'checkbox' ? (ownLabel(e) || e.innerText) : labelFor(e);
     // Ashby's repeatable education block labels its fields "Start Date", "School"...
     if (e.closest('.ashby-application-form-input-education-entry') && !/education/i.test(rawLabel)) {
       rawLabel = 'Education ' + rawLabel;
@@ -144,11 +178,12 @@ SCAN_JS = r"""
       rec.invalid = all.some(r => r.willValidate && !r.validity.valid);
     }
     else if (type === 'checkbox') {
-      rec.kind = 'checkbox'; rec.empty = !e.checked; rec.value = e.checked;
+      rec.kind = 'checkbox'; rec.empty = !checked(e); rec.value = checked(e);
       const group = e.closest('fieldset[aria-required],.ashby-application-form-input-checkbox-group,' +
-                              '.ashby-application-form-field-entry,.application-question');
-      const members = group ? [...group.querySelectorAll('input[type=checkbox]')] : [];
-      const title = group?.querySelector('legend,.ashby-application-form-question-title,.application-label');
+                              '.ashby-application-form-field-entry,.application-question,[role=group]');
+      const members = group ? [...group.querySelectorAll('[role=checkbox],input[type=checkbox]')].filter(m => m.getAttribute('role') === 'checkbox' || !m.closest('[role=checkbox]')) : [];
+      const title = customTitle(e) || group?.querySelector('legend,.ashby-application-form-question-title,.application-label') ||
+        (group?.id ? document.getElementById(group.id + '-label') : null);
       // A box inside a block of other inputs (Ashby's Education History: school, degree, dates,
       // and "Still student?") is one part of that block, not a question of its own: its
       // required mark belongs to the block, and unticked is a real answer.
@@ -160,7 +195,8 @@ SCAN_JS = r"""
       else if (members.length > 1 || (members.length === 1 && title && clean(title.innerText) &&
                                       clean(title.innerText) !== rec.label)) {
         rec.groupLabel = clean(title?.innerText) || 'Checkbox choices';
-        rec.groupEmpty = !members.some(m => m.checked);
+        rec.groupEmpty = !members.some(checked);
+        rec.required = rec.required || required(group, title?.innerText);
         rec.groupMembers = members.map(idFor);
         rec.label = rec.groupLabel + ' - ' + rec.label;
         if (rec.required) rec.invalid = rec.groupEmpty;
@@ -178,7 +214,7 @@ SCAN_JS = r"""
       const box = e.closest('[class*=select__control]') || e.parentElement;
       const chosen = box?.querySelector('[class*=singleValue],[class*=single-value],[class*=multiValue]');
       if (chosen?.textContent.trim()) { rec.value = chosen.textContent.trim(); rec.empty = false; }
-      if (e.tagName === 'BUTTON') { rec.value = clean(e.innerText); rec.empty = placeholder(rec.value); }
+      if (['BUTTON','DIV','SPAN'].includes(e.tagName)) { rec.value = clean(e.innerText); rec.empty = placeholder(rec.value); }
     }
     else if (['text','email','tel','url','number','search','date',''].includes(type)) {
       rec.kind = type === 'number' ? 'number' : 'text';
@@ -335,6 +371,19 @@ _PROFILE_LOCK = threading.Lock()
 _PROFILES_IN_USE: set[int] = set()
 # Greenhouse email codes arrive in one mailbox; with codes enabled, one such send at a time.
 _MAILBOX_LOCK = threading.Lock()
+# How long a hand-off window waits for the candidate to finish and submit.
+ASSIST_SECONDS = 20 * 60
+HANDOFF_BANNER_JS = """() => {
+  if (document.getElementById('starployment-handoff')) return;
+  const bar = document.createElement('div');
+  bar.id = 'starployment-handoff';
+  bar.textContent = 'Starployment filled what it could. Finish anything left (a CAPTCHA, a code, a field), '
+    + 'then press Submit yourself. Keep this window open until the confirmation appears.';
+  bar.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:2147483647;padding:10px 16px;'
+    + 'font:600 14px -apple-system,system-ui,sans-serif;color:#1d1a12;background:#f3d27a;'
+    + 'box-shadow:0 2px 8px rgba(0,0,0,.2);pointer-events:none';
+  document.body.appendChild(bar);
+}"""
 
 
 @contextmanager
@@ -352,8 +401,16 @@ def browser_profile_slot():
 
 
 class FormEngine:
-    def __init__(self, job: Job, profile: Profile, settings: dict, resume_path: str, adapter: Adapter, dry_run: bool):
+    def __init__(self, job: Job, profile: Profile, settings: dict, resume_path: str, adapter: Adapter, dry_run: bool,
+                 assist: bool = False):
         self.job, self.profile, self.settings = job, profile, settings
+        # Assist: a visible window, filled as far as Starployment can; the candidate
+        # finishes it (a CAPTCHA, a code, a field) and presses Submit themselves.
+        self.assist = assist
+        # Ashby saves each answer to its server as it is entered and checks those
+        # saves at Submit; a button can look pressed while its save never landed.
+        self._ashby_saves: dict[str, object] = {}
+        self._settled: set[int] = set()
         self.resume_path, self.adapter, self.dry_run = resume_path, adapter, dry_run
         self.log: list[str] = []
         self.screenshots: list[str] = []
@@ -402,9 +459,12 @@ class FormEngine:
             ctx = None
             page = None
             try:
-                ctx = launch_context(playwright, channel, profile_dir, visible=show_browser(self.settings))
+                ctx = launch_context(playwright, channel, profile_dir,
+                                     visible=self.assist or show_browser(self.settings))
                 ctx.set_default_timeout(7000)
                 page = ctx.pages[0] if ctx.pages else ctx.new_page()
+                if self.adapter.name == "ashby":
+                    self._watch_ashby_saves(page)
                 self._opened_at = time.monotonic()
                 return self._run_page(ctx, page, url)
             except Exception as exc:  # noqa: BLE001
@@ -439,7 +499,10 @@ class FormEngine:
             return False
 
     def _find_root(self, page: Page, timeout_ms: int = 15000):
+        if self.adapter.settle_ms == 0:
+            timeout_ms = min(timeout_ms, 600)
         deadline = time.monotonic() + timeout_ms / 1000
+        poll_ms = 40 if self.adapter.settle_ms == 0 else 250
         while time.monotonic() < deadline:
             frames = [page.main_frame] + [f for f in page.frames if f != page.main_frame and self.FRAME_RE.search(f.url or "")]
             for frame in frames:
@@ -456,7 +519,7 @@ class FormEngine:
                         return frame
                 except Exception:  # noqa: BLE001
                     continue
-            page.wait_for_timeout(250)
+            page.wait_for_timeout(poll_ms)
         return None
 
     def _captcha(self, page: Page) -> bool:
@@ -477,9 +540,9 @@ class FormEngine:
         page.wait_for_timeout(self.adapter.settle_ms)
         if page.url != url:
             self._log(f"Redirected to {page.url[:150]}")
-        if self._captcha(page):
+        if self._captcha(page) and not self.assist:
             self._shot(page, "captcha")
-            return self._result("needs_human", "A CAPTCHA or security check is visible. Open the job link to complete it manually.")
+            return self._result("needs_human", "A CAPTCHA or security check is visible. Choose Finish in browser to complete it yourself.")
         root = self._find_root(page, 3000)
         if root is None:
             for selector in self.adapter.apply_click_selectors:
@@ -504,26 +567,34 @@ class FormEngine:
                 page.goto(embed, wait_until="domcontentloaded", timeout=60000)
                 page.wait_for_timeout(self.adapter.settle_ms)
                 root = self._find_root(page, 8000)
+        if root is None and self.assist:
+            # Nothing to fill (a check page, an unfamiliar form): the candidate can still finish it.
+            self.root = page.main_frame
+            return self._hand_off(page)
         if root is None:
             self._shot(page, "noform")
             return self._result("needs_human", "No supported application form found. The job may be closed, login-gated, or use a different flow.")
         self.root = root
         self._hide_banners(page)
-        if self._captcha(page):
+        if self._captcha(page) and not self.assist:
             self._shot(page, "captcha")
-            return self._result("needs_human", "A CAPTCHA or security check must be completed manually.")
+            return self._result("needs_human", "A CAPTCHA or security check must be completed by you. Choose Finish in browser to do it.")
 
         # A choice may reveal follow-up questions. Stop after four bounded passes.
         for pass_no in range(1, 5):
-            fields = self.root.evaluate(SCAN_JS)
+            fields = self._scan_fields(page)
             self._reconcile_answered(fields)
             todo = [f for f in fields if f["idx"] not in self._tried]
             if not todo:
                 break
             self._log(f"Pass {pass_no}: {len(todo)} fields to consider")
             self._fill_fields(page, todo)
-            page.wait_for_timeout(450)
-        fields = self.root.evaluate(SCAN_JS)
+            if self.adapter.settle_ms:
+                page.wait_for_timeout(min(450, self.adapter.settle_ms))
+        fields = self._scan_fields(page)
+        if not fields:
+            self._shot(page, "form-disappeared")
+            return self._result("needs_human", "The application form disappeared after filling; no submission was attempted.")
         self._reconcile_answered(fields)
         self._collect_unanswered(fields)
         self._shot(page, "filled")
@@ -533,6 +604,19 @@ class FormEngine:
         invalid_names = list(dict.fromkeys(f.get("groupLabel", f["label"]) for f in invalid))
         if invalid_names:
             self._log("Invalid after filling: " + "; ".join(invalid_names[:12]))
+        if self.adapter.name == "ashby" and not self.dry_run:
+            unsaved = self._resave_ashby(page, fields)
+            if unsaved and not self.assist:
+                names = [f.get("groupLabel", f["label"]) for f in unsaved]
+                for f in unsaved:
+                    self.question_details.append({"label": f.get("groupLabel", f["label"]), "kind": f["kind"],
+                                                  "required": bool(f["required"]),
+                                                  "options": list(f.get("options") or []), "invalid": True})
+                self._shot(page, "unsaved")
+                return self._result("needs_human", "The employer's form didn't save these answers, so nothing was "
+                                                   "submitted: " + "; ".join(names[:8]))
+        if self.assist:
+            return self._hand_off(page)
         if self.dry_run:
             # A practice run predicts a real send: it names what would stop Submit.
             count = len(required_names)
@@ -548,8 +632,22 @@ class FormEngine:
             return self._result("needs_human", "Required or invalid fields need attention: " + "; ".join(names[:8]))
         if self._captcha(page):
             self._shot(page, "captcha")
-            return self._result("needs_human", "A CAPTCHA or security check must be completed manually.")
+            return self._result("needs_human", "A CAPTCHA or security check must be completed by you. Choose Finish in browser to do it.")
         return self._submit(page)
+
+    def _scan_fields(self, page: Page) -> list[dict]:
+        """Resume parsing can temporarily disable every control on a form."""
+        fields = self.root.evaluate(SCAN_JS)
+        if fields or not self.adapter.settle_ms:
+            return fields
+        deadline = time.monotonic() + 10
+        while (time.monotonic() < deadline and
+               self.root.locator("input:disabled,textarea:disabled,select:disabled").count()):
+            page.wait_for_timeout(200)
+            fields = self.root.evaluate(SCAN_JS)
+            if fields:
+                break
+        return fields
 
     @staticmethod
     def _signature(field: dict) -> tuple[str, str, str, str]:
@@ -628,10 +726,15 @@ class FormEngine:
         # The question text, type, and choices let a reviewer answer later
         # without reopening the employer's form. Values are never recorded.
         details: dict[str, dict] = {}
-        for f in missing:
+        # A filled field the form marks invalid blocks Submit too; report it so the
+        # draft can ask for a different answer instead of stopping with nothing to edit.
+        invalid = [f for f in fields if (f["invalid"] or f.get("ariaInvalid")) and f not in missing]
+        for f in missing + invalid:
             label = f.get("groupLabel", f["label"])
             entry = details.setdefault(label, {"label": label, "kind": f["kind"], "required": bool(f["required"]),
                                                "options": list(f.get("options") or [])})
+            if f in invalid:
+                entry["invalid"] = True
             if "groupLabel" in f:
                 entry["kind"] = "checkbox"
                 member = f["label"].rpartition(" - ")[-1]
@@ -658,17 +761,24 @@ class FormEngine:
         # options only after opening the control. Discover those choices before
         # asking the answer resolver, so an explicit opt-out can be selected
         # without inventing a residence or eligibility fact.
-        for index, question in list(unknown):
+        inspect = list(unknown) + [(index, question) for index, question in enumerate(questions)
+                                  if question.kind == "combobox" and answers.get(index) and
+                                  str(answers[index].value).casefold() == "decline" and
+                                  (index, question) not in unknown]
+        for index, question in inspect:
             field = fields[index]
             if question.kind != "combobox":
                 continue
             discovered = self._discover_combobox_options(page, field)
             if not discovered:
+                if not question.required and answers.get(index) and str(answers[index].value).casefold() == "decline":
+                    answers[index] = None  # Leave optional personal questions blank when no opt-out is offered.
                 continue
             question.options = discovered
             answers[index] = rule_answer(question, self.profile, self.settings, self.job)
             if answers[index] is not None and answers[index].value not in ("", None, []):
-                unknown.remove((index, question))
+                if (index, question) in unknown:
+                    unknown.remove((index, question))
         if unknown:
             self._log(f"Checking known candidate facts for {len(unknown)} additional question(s)")
             found = llm_answers([q for _, q in unknown], self.profile, self.job, self.settings)
@@ -729,7 +839,8 @@ class FormEngine:
         locator = self._loc(page, field)
         try:
             self._click(locator)
-            page.wait_for_timeout(250)
+            if self.adapter.settle_ms:
+                page.wait_for_timeout(min(250, self.adapter.settle_ms))
             options = self._visible_options()
             page.keyboard.press("Escape")
             return options
@@ -771,7 +882,8 @@ class FormEngine:
         locator = self._loc(page, field)
         if kind == "file":
             locator.set_input_files(str(value))
-            page.wait_for_timeout(1000)
+            if self.adapter.settle_ms:
+                page.wait_for_timeout(min(1000, self.adapter.settle_ms))
             return
         if kind in {"text", "number", "textarea"} and field.get("datePicker"):
             self._fill_date(locator, field, str(value))
@@ -802,6 +914,8 @@ class FormEngine:
             else:
                 locator.fill(text)
             locator.press("Tab")
+            if not locator.count():
+                raise RuntimeError("The field was replaced while entering the answer")
             if locator.input_value() != text and not locator.input_value().strip():
                 raise RuntimeError("The form did not retain the supplied value")
             return
@@ -839,7 +953,19 @@ class FormEngine:
                 raise RuntimeError("No unambiguous matching radio option")
             index = question.options.index(option)
             radio = self.root.locator(f'[data-jh="{field["optionIdx"][index]}"]').first
+            if field.get("ariaOptions"):
+                native = radio.locator('input[type=radio]')
+                if native.count():
+                    native.evaluate("el => el.click()")
+                else:
+                    radio.click()
+                if radio.get_attribute("aria-checked") != "true":
+                    raise RuntimeError("The radio choice was not retained")
+                return
             if field.get("buttonOptions"):
+                if radio.get_attribute("aria-pressed") == "true":
+                    radio.click()   # clicking a pressed choice clears it; enter it fresh so it saves again
+                    page.wait_for_timeout(150)
                 radio.click()
                 if radio.get_attribute("aria-pressed") != "true":
                     raise RuntimeError("The yes/no choice was not retained")
@@ -908,14 +1034,16 @@ class FormEngine:
         if text:
             locator.press_sequentially(text[-1], delay=30)
 
-    def _await_options(self, page: Page, timeout_ms: int = 3000) -> list[str]:
+    def _await_options(self, page: Page, timeout_ms: int | None = None) -> list[str]:
         """Options of a searchable list, waiting for results that load as you type."""
+        if timeout_ms is None:
+            timeout_ms = 400 if self.adapter.settle_ms == 0 else 3000
         deadline = time.monotonic() + timeout_ms / 1000
-        page.wait_for_timeout(500)
+        poll_ms = 40 if self.adapter.settle_ms == 0 else 150
         options = self._visible_options()
         while time.monotonic() < deadline and (not options or any(re.search(r"^loading|searching", o, re.I)
                                                                     for o in options)):
-            page.wait_for_timeout(250)
+            page.wait_for_timeout(poll_ms)
             options = self._visible_options()
         return [o for o in options if not re.search(r"^loading|searching", o, re.I)]
 
@@ -982,7 +1110,8 @@ class FormEngine:
     def _fill_combobox(self, page: Page, locator, value: str, question: Q) -> None:
         self._click(locator)
         editable = locator.evaluate("el => el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable")
-        page.wait_for_timeout(200)
+        if self.adapter.settle_ms:
+            page.wait_for_timeout(min(200, self.adapter.settle_ms))
         # select2-style lists open a separate search box when clicked.
         search = locator if editable else self._open_search_box()
         options = self._visible_options()
@@ -1014,9 +1143,13 @@ class FormEngine:
             # Catalog searches (schools, degrees) often match only a shorter prefix:
             # "California Polytechnic" finds "California Polytechnic State University - San Luis Obispo".
             words = re.sub(r"[^\w&' ]+", " ", value).split()
+            searched = {value.casefold()}
             for prefix in dict.fromkeys(" ".join(words[:n]) for n in (len(words), 3, 2, 1) if 0 < n <= len(words)):
                 if chosen is not None:
                     break
+                if prefix.casefold() in searched:
+                    continue
+                searched.add(prefix.casefold())
                 self._search(search, prefix)
                 options = self._await_options(page)
                 chosen = self._pick(options, value)
@@ -1040,7 +1173,8 @@ class FormEngine:
             # Closed lists are answerable only against their actual options.
             if search is not None:
                 search.fill("")
-                page.wait_for_timeout(250)
+                if self.adapter.settle_ms:
+                    page.wait_for_timeout(min(250, self.adapter.settle_ms))
             options = self._visible_options() or options
             actual = Q(question.label, "select", options, question.required, question.name, question.id)
             answer = rule_answer(actual, self.profile, self.settings, self.job)
@@ -1052,7 +1186,8 @@ class FormEngine:
             page.keyboard.press("Escape")
             raise RuntimeError("No unambiguous option matched the candidate's answer")
         self._click_option(chosen)
-        page.wait_for_timeout(250)
+        if self.adapter.settle_ms:
+            page.wait_for_timeout(min(250, self.adapter.settle_ms))
         if locator.get_attribute("aria-invalid") == "true":
             raise RuntimeError("The form rejected the selected option")
 
@@ -1228,7 +1363,8 @@ class FormEngine:
             else:
                 raise RuntimeError("No recognizable code input was found")
             self._log("Filled a fresh email verification code")
-            page.wait_for_timeout(500)
+            if self.adapter.settle_ms:
+                page.wait_for_timeout(min(500, self.adapter.settle_ms))
             signals = self._confirmation_signals(page) - confirmation_baseline
             if signals:
                 self._log_email_confirmation(page, sorted(signals)[0])
@@ -1248,8 +1384,8 @@ class FormEngine:
             errors_before = set(page.evaluate(ERROR_JS))
             button.click(timeout=10000)
             deadline = time.monotonic() + min(float(self.settings.get("submission_timeout_sec", 35)), 35)
+            poll_ms = 40 if self.adapter.settle_ms == 0 else 500
             while time.monotonic() < deadline:
-                page.wait_for_timeout(700)
                 signals = self._confirmation_signals(page) - confirmation_baseline
                 if signals:
                     self._log_email_confirmation(page, sorted(signals)[0])
@@ -1259,6 +1395,7 @@ class FormEngine:
                     return self._result("needs_human", "The employer reported an error after email verification. Check the application manually before any retry.")
                 if self._captcha(page):
                     break
+                page.wait_for_timeout(poll_ms)
         except Exception:
             return self._result("needs_human", "The email code step could not be completed safely. Check the employer form manually.")
         return self._result("needs_human", "The email code was entered, but no employer confirmation appeared. Check manually before retrying.")
@@ -1287,7 +1424,8 @@ class FormEngine:
                 self._log(f"Verification link redirected to untrusted host: {verify_host}")
                 return self._result("needs_human", "The verification link redirected to an untrusted domain.")
 
-            verify_page.wait_for_timeout(1000)
+            if self.adapter.settle_ms:
+                verify_page.wait_for_timeout(min(1000, self.adapter.settle_ms))
             signals = self._confirmation_signals(verify_page) - confirmation_baseline
             if signals:
                 self._log_email_confirmation(verify_page, sorted(signals)[0])
@@ -1301,7 +1439,8 @@ class FormEngine:
                                              (candidates.nth(i).inner_text() or candidates.nth(i).get_attribute("value") or ""), re.I)), None)
             if action_btn is not None:
                 action_btn.click(timeout=10000)
-                verify_page.wait_for_timeout(1000)
+                if self.adapter.settle_ms:
+                    verify_page.wait_for_timeout(min(1000, self.adapter.settle_ms))
                 signals = self._confirmation_signals(verify_page) - confirmation_baseline
                 if signals:
                     self._log_email_confirmation(verify_page, sorted(signals)[0])
@@ -1309,7 +1448,8 @@ class FormEngine:
                     return self._result("applied", "Application submitted. An employer confirmation appeared after email verification.")
 
             page.bring_to_front()
-            page.wait_for_timeout(1000)
+            if self.adapter.settle_ms:
+                page.wait_for_timeout(min(1000, self.adapter.settle_ms))
             signals = self._confirmation_signals(page) - confirmation_baseline
             if signals:
                 self._log_email_confirmation(page, sorted(signals)[0])
@@ -1331,7 +1471,7 @@ class FormEngine:
         if baseline_data is None:
             return self._result("needs_human", "The email verification baseline was missing. Complete the employer form manually.")
         if isinstance(baseline_data, Baseline):
-            baseline_uid = baseline_data.last_uid
+            baseline_uid = baseline_data.max_uid
             started_at = baseline_data.started_at
             uidvalidity = baseline_data.uidvalidity
         else:
@@ -1361,6 +1501,107 @@ class FormEngine:
         if token.kind == "link":
             return self._complete_email_link_verification(page, token.value, confirmation_baseline)
         return self._complete_email_code_verification(page, token.value, confirmation_baseline)
+
+    def _watch_ashby_saves(self, page: Page) -> None:
+        def on_request(request) -> None:
+            if "ApiSetFormValue" not in request.url:
+                return
+            try:
+                path = json.loads(request.post_data or "{}")["variables"]["path"]
+            except (TypeError, ValueError, KeyError):
+                return
+            self._ashby_saves[str(path)] = request   # the latest save for that field counts
+        page.on("request", on_request)
+        page.on("requestfinished", lambda request: self._settled.add(id(request)))
+        page.on("requestfailed", lambda request: self._settled.add(id(request)))
+
+    def _ashby_unsaved(self, page: Page, fields: list[dict]) -> list[dict]:
+        """Filled fields whose latest Ashby save failed, or yes/no buttons that never saved."""
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline and any(id(r) not in self._settled for r in self._ashby_saves.values()):
+            page.wait_for_timeout(250)
+        failed: set[str] = set()
+        for path, request in self._ashby_saves.items():
+            try:
+                response = None if request.failure or id(request) not in self._settled else request.response()
+                body = response.json() if response is not None and response.status < 400 else None
+            except Exception:  # noqa: BLE001
+                body = None
+            if not isinstance(body, dict) or body.get("errors"):
+                failed.add(path)
+        out = []
+        for field in fields:
+            if field["idx"] not in self._filled or not field.get("name") or field["kind"] == "file":
+                continue
+            if field["name"] in failed or (field.get("buttonOptions") and field["name"] not in self._ashby_saves):
+                out.append(field)
+        return out
+
+    def _resave_ashby(self, page: Page, fields: list[dict]) -> list[dict]:
+        """Enter unsaved answers once more; returns fields whose save still failed."""
+        unsaved = self._ashby_unsaved(page, fields)
+        if not unsaved:
+            return []
+        self._log("Ashby didn't save: " + "; ".join(f.get("groupLabel", f["label"]) for f in unsaved[:8])
+                  + ". Entering them again")
+        for field in unsaved:
+            self._filled.discard(field["idx"])
+            self._tried.discard(field["idx"])
+        self._fill_fields(page, unsaved)
+        still = self._ashby_unsaved(page, self._scan_fields(page))
+        # A yes/no button with no save request at all may simply not use one; only a refused save blocks.
+        return [f for f in still if f["name"] in self._ashby_saves]
+
+    def _hand_off(self, page: Page) -> ApplyResult:
+        """Give the filled form to the candidate and wait for the employer's confirmation.
+
+        The candidate may press Submit at any moment, so the submit boundary is
+        recorded first. Starployment never clicks Submit in this mode.
+        """
+        baseline = self._confirmation_signals(page)
+        if not self.submission_attempted:
+            db.mark_submission_attempted(self.job.id)
+            self.submission_attempted = True
+        inbox = baseline_data = None
+        if bool(self.settings.get("email_verification", {}).get("enabled")):
+            try:
+                inbox = EmailVerificationInbox(self.settings["email_verification"], self.profile.email)
+                baseline_data = inbox.baseline()
+            except Exception:  # noqa: BLE001
+                inbox = None
+                self._log("Automatic email verification is unavailable; enter any code yourself")
+        self._log("Handed the form to you in a browser window; waiting for you to press Submit")
+        try:
+            page.evaluate(HANDOFF_BANNER_JS)
+            page.bring_to_front()
+        except Exception:  # noqa: BLE001
+            pass
+        deadline = time.monotonic() + ASSIST_SECONDS
+        code_tried = False
+        while time.monotonic() < deadline:
+            try:
+                if page.is_closed():
+                    break
+                if self._confirmation_signals(page) - baseline:
+                    self._shot(page, "success")
+                    return self._result("applied", "You submitted it in the browser, and the employer's confirmation appeared.")
+                if inbox is not None and not code_tried and self._email_verification_required(page):
+                    code_tried = True
+                    self._log("The employer asked for an email code; reading it from your inbox")
+                    result = self._complete_email_verification(page, inbox, baseline_data, baseline)
+                    if result.status == "applied":
+                        return result
+                page.wait_for_timeout(1000)
+            except Exception:  # noqa: BLE001 - the window was closed, or a navigation detached the form
+                if page.is_closed():
+                    break
+                time.sleep(1)
+        else:
+            self._shot(page, "unconfirmed")
+            return self._result("needs_human", "No employer confirmation appeared within "
+                                f"{ASSIST_SECONDS // 60} minutes. If you submitted it, check your email, then Mark as sent.")
+        return self._result("needs_human", "The browser was closed before an employer confirmation appeared. "
+                                           "If you submitted it, check your email, then Mark as sent.")
 
     def _submit(self, page: Page) -> ApplyResult:
         button = None
@@ -1426,8 +1667,8 @@ class FormEngine:
         self._log("Submitting application once")
         button.click(timeout=10000)
         deadline = time.monotonic() + float(self.settings.get("submission_timeout_sec", 35))
+        poll_ms = 40 if self.adapter.settle_ms == 0 else 500
         while time.monotonic() < deadline:
-            page.wait_for_timeout(700)
             try:
                 if self._confirmation_signals(page) - baseline:
                     self._shot(page, "success")
@@ -1443,11 +1684,11 @@ class FormEngine:
                         return self._result("needs_human", "The employer requested an email code, but the configured mailbox or system credential vault was unavailable. Complete the employer form manually; submission is not confirmed.")
                     msg = ("The employer sent an email verification link. Open it to complete verification; the application is not confirmed yet."
                            if challenge == "link" else
-                           "The employer sent an email verification code. Enter it on the employer form and resubmit; the application is not confirmed yet.")
+                           "The employer sent an email verification code, and the application is not confirmed yet. Choose Finish in browser to enter it, or turn on Finish email verification in Settings → Connections.")
                     return self._result("needs_human", msg)
                 if self._captcha(page):
                     self._shot(page, "captcha")
-                    return self._result("needs_human", "A CAPTCHA or security check appeared after Submit. Check the application manually before trying again.")
+                    return self._result("needs_human", "A CAPTCHA or security check appeared after Submit. Check your email for a confirmation; if there is none, choose Finish in browser to solve it yourself.")
                 if self._root_attached(page):
                     errors = self.root.evaluate(ERROR_JS)
                     if errors:
@@ -1460,7 +1701,8 @@ class FormEngine:
                                 "application. (Form message: " + " | ".join(errors[:2])[:240] + ")")
                         return self._result("needs_human", "The form reported: " + " | ".join(errors[:6]))
             except Exception:  # A navigation may briefly detach the previous form.
-                continue
+                pass
+            page.wait_for_timeout(poll_ms)
         self._shot(page, "unconfirmed")
         return self._result("needs_human", "Submit was clicked, but no new confirmation was detected. Check the employer's confirmation or email before any retry.")
 

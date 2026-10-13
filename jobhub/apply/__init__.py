@@ -7,12 +7,23 @@ from .adapters import adapter_for
 from .engine import FormEngine
 
 
-def apply_to_job(job: Job, profile: Profile, settings: dict, resume_path: str, dry_run: bool | None = None) -> ApplyResult:
-    dry = settings.get("dry_run", False) if dry_run is None else dry_run
+def apply_to_job(job: Job, profile: Profile, settings: dict, resume_path: str, dry_run: bool | None = None,
+                 assist: bool = False) -> ApplyResult:
+    dry = False if assist else settings.get("dry_run", False) if dry_run is None else dry_run
     adapter = adapter_for(job)
     if adapter is None:
         return ApplyResult(status="needs_human", message=f"No adapter for ATS '{job.ats}' ({job.apply_url}). Open manually.")
-    engine = FormEngine(job=job, profile=profile, settings=settings, resume_path=resume_path, adapter=adapter, dry_run=dry)
+    if adapter.assist_only and not assist and not (settings.get("workday") or {}).get("send"):
+        # Workday: every application sits behind the employer's account. Unattended sends need
+        # Settings → Workday → Send Workday applications (apply/workday.py signs in from the vault).
+        return ApplyResult(status="needs_human", message="This employer's Workday application needs you signed in. "
+                                                         "Choose Finish in browser.")
+    engine_class = FormEngine
+    if adapter.name == "workday":
+        from .workday import WorkdayEngine
+        engine_class = WorkdayEngine
+    engine = engine_class(job=job, profile=profile, settings=settings, resume_path=resume_path, adapter=adapter, dry_run=dry,
+                        assist=assist)
     try:
         return engine.run()
     except Exception as e:  # noqa: BLE001

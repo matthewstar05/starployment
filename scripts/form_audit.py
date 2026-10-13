@@ -105,7 +105,7 @@ def fictional_answer(question: dict):
     if kind == "checkbox" and len(options) == 1 and re.search(r"acknowledg|agree|understand|consent|confirm",
                                                               options[0], re.I):
         return options[:1]
-    if DEMOGRAPHIC.search(label) and options:
+    if DEMOGRAPHIC.search(label):
         declined = next((o for o in options if DECLINE.search(o)), None)
         return [declined] if kind == "checkbox" and declined else declined
     if kind == "checkbox" and options:
@@ -152,7 +152,7 @@ def snapshot_jobs(path: Path | None) -> list[tuple[str, str, str]]:
         source.backup(target)
     with sqlite3.connect(copy) as con:
         rows = con.execute("SELECT ats, company, url, apply_url FROM jobs WHERE status='new' AND ats IN "
-                           "('greenhouse','lever','ashby') ORDER BY posted_ts DESC NULLS LAST").fetchall()
+                           "('greenhouse','lever','ashby','workable','rippling') ORDER BY posted_ts DESC NULLS LAST").fetchall()
     copy.unlink()
     from jobhub.scheduler import hosted_posting_url
     return [(ats, company, hosted_posting_url(Job(source="x", ats=ats, company=company, title="", url=url,
@@ -174,7 +174,7 @@ def sample(rows: list[tuple[str, str, str]], count: int, skip: int = 0) -> list[
         by_ats[ats] = by_ats[ats][skip:]
     picked: list[str] = []
     while len(picked) < count and any(by_ats.values()):
-        for ats in ("greenhouse", "ashby", "lever"):
+        for ats in prepare.SUPPORTED_ATS:
             if by_ats[ats] and len(picked) < count:
                 picked.append(by_ats[ats].pop(0))
     return picked
@@ -188,6 +188,9 @@ def raw_field_types(job: Job) -> list[tuple[str, str]]:
     from jobhub.sources.base import client
     from jobhub.sources.import_job import parse_job_url
 
+    if job.ats in ("workable", "rippling"):
+        reader = prepare.workable_questions if job.ats == "workable" else prepare.rippling_questions
+        return [(f"{job.ats}:{q['kind']}", q["label"]) for q in reader(job)]
     parsed = parse_job_url(job.apply_url or job.url)
     out: list[tuple[str, str]] = []
     with client(timeout=15.0) as http:
@@ -216,7 +219,8 @@ def raw_field_types(job: Job) -> list[tuple[str, str]]:
 
 
 KNOWN = {f"greenhouse:{k}" for k in prepare._GH_KINDS} | {f"ashby:{k}" for k in prepare._ASHBY_KINDS} | \
-        {f"lever:{k}" for k in prepare._LEVER_KINDS}
+        {f"lever:{k}" for k in prepare._LEVER_KINDS} | {f"{ats}:{kind}" for ats in ("workable", "rippling")
+        for kind in ("file", "text", "textarea", "select", "checkbox", "radio")}
 
 
 def api_audit(urls: list[str]) -> dict:
@@ -263,8 +267,13 @@ def _graphql_operations(body: str) -> list[tuple[str, str]] | None:
     items = payload if isinstance(payload, list) else [payload]
     if not items or not all(isinstance(item, dict) and "query" in item for item in items):
         return None
-    return [(str(item.get("operationName") or "?"),
-             "mutation" if str(item.get("query") or "").lstrip().startswith("mutation") else "query") for item in items]
+    operations = []
+    for item in items:
+        query = re.sub(r"(?m)^\s*#[^\n]*", "", str(item.get("query") or "")).lstrip()
+        read_only = ((query.startswith("{") or bool(re.match(r"query\b", query))) and
+                     not re.search(r"\bmutation\b", query))
+        operations.append((str(item.get("operationName") or "?"), "query" if read_only else "mutation"))
+    return operations
 
 
 UPLOAD = re.compile(r"amazonaws\.com|storage\.googleapis|blob\.core|parseResume|upload|/submit|/apply\b|"
@@ -285,13 +294,13 @@ def _guard(route) -> None:
         body = (request.post_data_buffer or b"").decode("utf-8", errors="replace")
     except Exception:  # noqa: BLE001
         body = ""
-    operations = _graphql_operations(body) if "graphql" in request.url else None
-    content_type = (request.headers.get("content-type") or "").lower()
+    operations = (_graphql_operations(body) if request.url.startswith(
+        "https://jobs.ashbyhq.com/api/non-user-graphql") else None)
     if operations is not None:
         blocked = any(kind == "mutation" for _, kind in operations)
         name = ",".join(name for name, _ in operations)
     else:
-        blocked = "multipart" in content_type or len(body) > 20000 or bool(UPLOAD.search(request.url))
+        blocked = True  # Unknown non-GET requests may store data, regardless of endpoint spelling.
         name = ""
     try:
         if not blocked:

@@ -77,8 +77,89 @@ def test_resume_files_are_copied_into_the_library_and_matched_by_role(store, mak
         assert files[0]["path"].startswith(str(store / "resumes" / "library"))
         window.profile.files.strategy_changed.emit("library")
         assert db.get_settings()["resume_strategy"] == "library"
+        window.profile.files.enabled_changed.emit(int(files[0]["id"]), False)
+        assert db.list_resume_files()[0]["enabled"] == 0
         window.profile.files.remove_requested.emit(int(files[0]["id"]))
         assert db.list_resume_files() == []
+    finally:
+        controller.stop()
+        window.close()
+        window.deleteLater()
+
+
+def test_resume_files_set_main_and_remove_protection(store, make_pdf):
+    from pathlib import Path
+    from PySide6.QtWidgets import QApplication
+    from jobhub.desktop.controller import DesktopController
+    from jobhub.desktop.ui import JobHubWindow
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    window = JobHubWindow()
+    controller = DesktopController(window, scheduler_enabled=False, show_setup_on_start=False)
+    try:
+        source = make_pdf(store / "Ada_SWE_resume.pdf", ["SWE resume"])
+        window.profile.files.add_requested.emit(str(source), "software")
+        files = db.list_resume_files()
+        assert len(files) == 1
+        window.profile.files.set_main_requested.emit(int(files[0]["id"]))
+        assert db.get_profile().resume_path == files[0]["path"]
+        assert db.list_resume_files()[0]["is_main"] is True
+        saved_path = files[0]["path"]
+        window.profile.files.remove_requested.emit(int(files[0]["id"]))
+        assert Path(saved_path).is_file()  # Protected because it was the main resume!
+    finally:
+        controller.stop()
+        window.close()
+        window.deleteLater()
+
+
+def test_resume_bank_rename_persists_and_updates_automatic_role_without_changing_pdf(store, make_pdf, monkeypatch):
+    from pathlib import Path
+    from PySide6.QtWidgets import QApplication, QComboBox, QPushButton
+    from jobhub.desktop.controller import DesktopController
+    from jobhub.desktop.ui import JobHubWindow
+    from jobhub.desktop.views import resume_builder
+    from jobhub.tailor import resume_file_category
+
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    window = JobHubWindow()
+    controller = DesktopController(window, scheduler_enabled=False, show_setup_on_start=False)
+    try:
+        source = make_pdf(store / "Ada_SWE_resume.pdf", ["Ada Example", "Software Engineer", "Python SQL"])
+        monkeypatch.setattr(resume_builder.QFileDialog, "getOpenFileNames", lambda *a: ([str(source)], ""))
+        files_view = window.profile.files
+        files_view._choose()
+        record = db.list_resume_files()[0]
+        assert record["category"] == "auto" and resume_file_category(record) == "software"
+        files_view.set_main_requested.emit(record["id"])
+        bank_path = record["path"]
+        original = Path(bank_path).read_bytes()
+
+        def row_widgets():
+            row = files_view.rows.itemAt(0).widget()
+            more = next(w for w in row.findChildren(QPushButton) if w.toolTip() == "More")
+            role = next(w for w in row.findChildren(QComboBox) if w.accessibleName() == "Role type")
+            return more, role
+
+        more, role = row_widgets()
+        assert role.currentData() == "auto" and "Software engineering" in role.currentText()
+        answers = iter((("  Financial Analyst  ", True), ("Cancelled", False), ("   ", True)))
+        monkeypatch.setattr(resume_builder.QInputDialog, "getText", lambda *a, **kw: next(answers))
+        for _ in range(3):
+            more, _role = row_widgets()
+            next(action for action in more.menu().actions() if action.text() == "Rename…").trigger()
+            renamed = db.list_resume_files()[0]
+            assert renamed["label"] == "Financial Analyst"
+            assert renamed["id"] == record["id"] and renamed["path"] == bank_path
+            assert renamed["is_main"] and renamed["is_default"] and renamed["enabled"]
+            assert resume_file_category(renamed) == "finance"
+        _, role = row_widgets()
+        assert "Financial analysis" in role.currentText()
+        role.setCurrentIndex(role.findData("data"))
+        role.activated.emit(role.currentIndex())
+        assert resume_file_category(db.list_resume_files()[0]) == "data"
+        assert db.get_profile().resume_path == bank_path
+        assert Path(bank_path).read_bytes() == original == source.read_bytes()
     finally:
         controller.stop()
         window.close()

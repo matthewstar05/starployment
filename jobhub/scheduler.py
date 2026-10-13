@@ -46,7 +46,9 @@ class PostingRefreshError(RuntimeError):
 # Discovered company boards read per provider in one scan. Boards rotate, least
 # recently read first, so every discovered board is read every few scans.
 DISCOVERED_BOARDS_PER_SCAN = 120
-BOARD_SOURCES = ("greenhouse", "lever", "ashby")
+# A Workday board needs a request per page and per description: read fewer at a time.
+DISCOVERED_WORKDAY_PER_SCAN = 25
+BOARD_SOURCES = ("greenhouse", "lever", "ashby", "workday")
 
 
 def _scan_settings(settings: dict) -> dict:
@@ -56,7 +58,8 @@ def _scan_settings(settings: dict) -> dict:
     if settings.get("discover_boards", True):
         companies = settings.get("companies") or {}
         scan["_discovered_boards"] = {
-            ats: db.boards_for_scan(ats, set(companies.get(ats) or []), DISCOVERED_BOARDS_PER_SCAN)
+            ats: db.boards_for_scan(ats, set(companies.get(ats) or []),
+                                    DISCOVERED_WORKDAY_PER_SCAN if ats == "workday" else DISCOVERED_BOARDS_PER_SCAN)
             for ats in BOARD_SOURCES if settings.get("sources", {}).get(ats)
         }
     with db.conn() as c:
@@ -78,7 +81,7 @@ def hosted_posting_url(job: Job) -> str:
     careers page as the posting URL; the board link is the apply URL.
     """
     from .sources.import_job import JobImportError, parse_job_url
-    for url in (job.url, job.apply_url):
+    for url in (job.apply_url, job.url):
         try:
             parse_job_url(url)
             return url
@@ -94,7 +97,7 @@ def enrich_job(job: Job) -> Job:
     response must still identify the same vacancy; otherwise the stored posting
     is left untouched and the caller must stop.
     """
-    if job.ats not in ("greenhouse", "lever", "ashby"):
+    if job.ats not in ("greenhouse", "lever", "ashby", "workable", "rippling"):
         return job
     try:
         from .sources.import_job import fetch_job
@@ -161,9 +164,10 @@ def scan_once() -> dict:
                 log.append(f"linked {hosted} careers-page posting(s) to their Greenhouse boards")
         except Exception as error:  # noqa: BLE001 - never lose a scan over this
             log.append(f"careers-page links: WARNING {error}")
+        from .locations import is_location_acceptable
         by_key: dict[str, Job] = {}
         for job in jobs:
-            if not job.url:
+            if not job.url or not is_location_acceptable(job.location):
                 continue
             key = job_fingerprint(job)
             if key not in by_key or len(job.description) > len(by_key[key].description):
@@ -208,18 +212,20 @@ def queue_application(job_id: str, parallel: int = 1) -> int:
 
 def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | None = None,
               require_eligible: bool = False, extra_answers: dict | None = None,
-              resume_override: str | None = None) -> dict:
+              resume_override: str | None = None, assist: bool = False) -> dict:
     """Reserve once, record before submitting, and persist the outcome atomically.
 
     ``extra_answers`` are answers the candidate approved for this one
     application (question label -> answer). They apply to this attempt only.
     ``resume_override`` is the resume chosen when the application was prepared.
+    ``assist`` opens a visible window the candidate finishes and submits themselves.
     """
     if application_id is None:
         try:
             application_id = queue_application(job_id)
         except ValueError as error:
             return {"error": str(error), "status": "blocked"}
+    earlier = (db.get_application(application_id) or {}).get("log") or [] if assist else []
     with _apply_slots:
         if not db.start_application(application_id, job_id):
             return {"error": "Application reservation is no longer available", "status": "blocked"}
@@ -261,7 +267,7 @@ def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | No
             resume = snapshot_resume_for_application(
                 chosen or resume_for_job(profile, job, settings), application_id,
             )
-            result = apply_to_job(job, profile, settings, resume, dry_run=dry_run)
+            result = apply_to_job(job, profile, settings, resume, dry_run=dry_run, assist=assist)
             if result.status not in ("applied", "dry_run", "needs_human", "failed"):
                 raise ValueError(f"Unknown application outcome: {result.status}")
         except Exception as error:  # noqa: BLE001
@@ -288,6 +294,8 @@ def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | No
                     "The application engine reported success without a durable "
                     "submission attempt record. Review the employer site before retrying."
                 )
+            if earlier:   # finishing an earlier attempt in the browser keeps its evidence
+                result.log = [*earlier, "Finishing in a browser window with you", *result.log]
             db.finish_application(application_id, result.status, result.log, result.screenshots, result.unanswered,
                                   "" if result.status in ("applied", "dry_run") else result.message,
                                   result.resume_path or resume or None, result.submission_attempted,
@@ -332,7 +340,9 @@ def auto_apply_batch() -> list[dict]:
     priority = settings.get("priority_companies") or []
     # Priority companies and starred roles are never applied to unattended.
     candidates = [job for job in db.list_jobs(status="new", min_score=float(settings.get("min_score_to_apply", 60)), limit=100000)
-                  if job.ats in ("greenhouse", "ashby", "lever") and job.score_json.get("auto_apply_eligible", True)
+                  if (job.ats in ("greenhouse", "ashby", "lever", "workable", "rippling")
+                      or (job.ats == "workday" and (settings.get("workday") or {}).get("send")))
+                  and job.score_json.get("auto_apply_eligible", True)
                   and not held_from_automation(job, priority)]
     results = []
     attempted_companies: set[str] = set()

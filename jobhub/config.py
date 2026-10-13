@@ -83,7 +83,7 @@ def secure_data_tree(root: Path | None = None) -> None:
     if not root.exists():
         root.mkdir(parents=True, mode=0o700, exist_ok=True)
     managed_dirs = {"resumes", "tailored", "screenshots", "browser_profile", "agent_scratch"}
-    managed_files = {"jobhub.db", "jobhub.db-wal", "jobhub.db-shm", ".env", ".checkout-import.json"}
+    managed_files = {"jobhub.db", "jobhub.db-wal", "jobhub.db-shm", ".env", ".checkout-import.json", "secrets.json"}
     children = list(root.iterdir())
     if children and not any(item.name in managed_dirs | managed_files for item in children):
         raise ValueError(f"Refusing to change permissions on an unrecognized data directory: {root}")
@@ -189,6 +189,17 @@ CATALOG_ADDITIONS = {
         "cursor", "warp", "saronic",
     ],
 }
+# Workday boards, written tenant.wdN/site (see sources/workday.py). Each was
+# checked against Workday's public job search when added. Banks, insurers, and
+# asset managers that publish nowhere else.
+WORKDAY_COMPANIES = [
+    "citi.wd5/2", "ms.wd5/external", "blackrock.wd1/blackrock_professional", "statestreet.wd1/global",
+    "troweprice.wd5/troweprice", "travelers.wd5/external", "spgi.wd5/spgi_careers", "aig.wd1/early_careers",
+    "aig.wd1/aig", "barclays.wd3/external_career_site_barclays", "vanguard.wd5/vanguard_external",
+    "capitalone.wd12/capital_one", "fmr.wd1/fidelitycareers", "fmr.wd1/targeted", "lseg.wd3/graduate_careers",
+    "td.wd3/td_bank_careers", "clearwateranalytics.wd1/clearwater_analytics_careers", "visa.wd5/visa",
+    "equifax.wd5/ur_external", "cigna.wd5/cignacareers", "nvidia.wd5/nvidiaexternalcareersite",
+]
 GREENHOUSE_COMPANIES = list(dict.fromkeys(GREENHOUSE_COMPANIES + CATALOG_ADDITIONS["greenhouse"]))
 LEVER_COMPANIES = list(dict.fromkeys(LEVER_COMPANIES + CATALOG_ADDITIONS["lever"]))
 ASHBY_COMPANIES = list(dict.fromkeys(ASHBY_COMPANIES + CATALOG_ADDITIONS["ashby"]))
@@ -225,11 +236,12 @@ DEFAULT_SETTINGS: dict = {
     "exclude_title_words": [],
     "include_internships": False,
     "preferred_locations": [],
+    "favorite_locations": ["New York", "Chicago", "Los Angeles", "San Francisco"],
     "remote_ok": True,
     "min_salary": 0,
     "years_experience": 0,
     # --- sources ---
-    "sources": {"greenhouse": True, "lever": True, "ashby": True, "simplify": True,
+    "sources": {"greenhouse": True, "lever": True, "ashby": True, "workday": True, "simplify": True,
                 "remoteok": True, "jobspy": True},
     "jobspy": {
         # ZipRecruiter refuses JobSpy (HTTP 403), so it is not searched by default.
@@ -241,13 +253,13 @@ DEFAULT_SETTINGS: dict = {
         "hours_old": 72,
     },
     "companies": {"greenhouse": GREENHOUSE_COMPANIES, "lever": LEVER_COMPANIES,
-                  "ashby": ASHBY_COMPANIES},
+                  "ashby": ASHBY_COMPANIES, "workday": WORKDAY_COMPANIES},
     # Also scan the public boards of companies found in other listings.
     "discover_boards": True,
     "catalog_version": CATALOG_VERSION,
     # --- resume ---
     # tailored: a one-page PDF generated from the resume builder for each role
-    # library:  the uploaded resume file whose role type best matches the job
+    # library / bank: the most relevant untouched resume selected from the uploaded resume bank
     # original: always the main resume PDF
     "resume_strategy": "tailored",
     # Generated resumes are always one page; ``one_page`` stays for older saved settings.
@@ -258,9 +270,10 @@ DEFAULT_SETTINGS: dict = {
     # --- the Overview "Apply" plan ---
     # posted_within_hours: 0 means any posting date; order: "match" or "newest".
     "apply_plan": {"count": 100, "min_score": 60, "one_per_company": True,
-                   "posted_within_hours": 0, "order": "match"},
+                   "posted_within_hours": 0, "order": "match", "exclude_starred": True},
     # --- optional inbox tracking for replies (uses the mailbox below) ---
-    "email_tracking": {"enabled": False, "lookback_days": 30, "use_luna": False},
+    # archive_rejections: take matched rejection emails out of the Inbox (never deletes; Gmail adds a label).
+    "email_tracking": {"enabled": False, "lookback_days": 30, "use_luna": False, "archive_rejections": False},
     # --- canned answers (edit in the UI; used when a form asks) ---
     "answers": {
         "work_authorized_us": "",
@@ -288,6 +301,16 @@ DEFAULT_SETTINGS: dict = {
     },
     # --- optional agent harness fallback for forms the engine can't finish ---
     "harness": {"enabled": False, "backend": "codex_cli"},
+    # --- Workday (apply/workday.py, vault.py) ---
+    # create_accounts: create each employer's Workday account with a generated
+    # password kept in the local vault, and sign in with it.
+    # send: Approve & send, Send ready, and automatic runs fill and submit
+    # Workday applications, signing in with the vault's saved password.
+    "workday": {"create_accounts": False, "send": False},
+    # --- where saved passwords and API keys live ---
+    # False keeps them in an owner-only file in the data folder, so a rebuilt
+    # app never waits on a Keychain prompt. True uses the OS credential vault.
+    "keychain_protection": False,
 }
 
 
@@ -346,6 +369,10 @@ def validate_settings(settings: dict) -> dict:
         enabled: StrictBool
         backend: Literal["codex_cli", "claude_cli"]
 
+    class Workday(StrictModel):
+        create_accounts: StrictBool
+        send: StrictBool
+
     class ResumeBuilder(StrictModel):
         one_page: StrictBool
         luna_select: StrictBool
@@ -373,6 +400,7 @@ def validate_settings(settings: dict) -> dict:
         count: StrictInt = Field(ge=1, le=500)
         min_score: float = Field(ge=0, le=100, allow_inf_nan=False)
         one_per_company: StrictBool
+        exclude_starred: StrictBool
         posted_within_hours: StrictInt = Field(ge=0, le=8760)
         order: Literal["match", "newest"]
 
@@ -380,6 +408,7 @@ def validate_settings(settings: dict) -> dict:
         enabled: StrictBool
         lookback_days: StrictInt = Field(ge=1, le=365)
         use_luna: StrictBool
+        archive_rejections: StrictBool = False
 
     class EmailVerification(StrictModel):
         enabled: StrictBool
@@ -400,12 +429,11 @@ def validate_settings(settings: dict) -> dict:
             import re
             if self.imap_host and not re.fullmatch(r"[A-Za-z0-9.-]+", self.imap_host):
                 raise ValueError("The IMAP server must be a host name such as imap.gmail.com")
-            if self.enabled and not (
-                re.fullmatch(r"[A-Za-z0-9.-]+", self.imap_host)
-                and self.imap_username
-                and re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", self.sender_address)
-            ):
-                raise ValueError("Enabled email verification needs an IMAP host, username, and exact sender email")
+            if self.sender_address and not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", self.sender_address):
+                raise ValueError("The trusted sender must be one email address")
+            # A blank sender matches ATS and employer senders automatically (see EmailVerificationInbox).
+            if self.enabled and not (re.fullmatch(r"[A-Za-z0-9.-]+", self.imap_host) and self.imap_username):
+                raise ValueError("Enabled email verification needs an IMAP host and username")
             return self
 
     class Settings(StrictModel):
@@ -424,15 +452,16 @@ def validate_settings(settings: dict) -> dict:
         exclude_title_words: list[StrictStr] = Field(max_length=100)
         include_internships: StrictBool
         preferred_locations: list[StrictStr] = Field(max_length=100)
+        favorite_locations: list[StrictStr] = Field(default_factory=lambda: ["New York", "Chicago", "Los Angeles", "San Francisco"], max_length=100)
         remote_ok: StrictBool
         min_salary: StrictInt = Field(ge=0, le=10000000)
         years_experience: float = Field(ge=0, le=80, allow_inf_nan=False, strict=True)
-        sources: dict[Literal["greenhouse", "lever", "ashby", "simplify", "remoteok", "jobspy"], StrictBool]
+        sources: dict[Literal["greenhouse", "lever", "ashby", "workday", "simplify", "remoteok", "jobspy"], StrictBool]
         jobspy: JobSpy
-        companies: dict[Literal["greenhouse", "lever", "ashby"], list[StrictStr]]
+        companies: dict[Literal["greenhouse", "lever", "ashby", "workday"], list[StrictStr]]
         discover_boards: StrictBool
         catalog_version: StrictInt = Field(ge=1)
-        resume_strategy: Literal["original", "tailored", "library"]
+        resume_strategy: Literal["original", "tailored", "library", "bank"]
         resume_builder: ResumeBuilder
         agent: Agent
         luna: Luna
@@ -440,7 +469,9 @@ def validate_settings(settings: dict) -> dict:
         email_tracking: EmailTracking
         answers: Answers
         email_verification: EmailVerification
+        keychain_protection: StrictBool
         harness: Harness
+        workday: Workday
 
         @field_validator("priority_companies")
         @classmethod
@@ -458,9 +489,13 @@ def validate_settings(settings: dict) -> dict:
         @classmethod
         def valid_slugs(cls, value):
             import re
-            for slugs in value.values():
-                if len(slugs) > 500 or any(not re.fullmatch(r"[a-zA-Z0-9_-]{1,100}", slug) for slug in slugs):
-                    raise ValueError("Company boards must be simple slugs, at most 500 per source")
+            for ats, slugs in value.items():
+                # Workday boards are tenant.wdN/site (sources/workday.py); the others are simple slugs.
+                pattern = (r"[a-zA-Z0-9][a-zA-Z0-9-]{0,62}\.wd\d{1,3}/[a-zA-Z0-9][a-zA-Z0-9_.-]{0,99}"
+                           if ats == "workday" else r"[a-zA-Z0-9_-]{1,100}")
+                if len(slugs) > 500 or any(not re.fullmatch(pattern, slug) or ".." in slug for slug in slugs):
+                    raise ValueError("Company boards must be simple slugs (Workday: company.wdN/site), "
+                                     "at most 500 per source")
             return value
 
     # Nested models are local, so resolve annotations against this function's namespace.

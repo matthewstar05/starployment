@@ -93,3 +93,43 @@ def test_import_job_uses_upsert_and_returns_created(monkeypatch):
     assert created is True
     assert result.id == job.id
     assert db.saved == [job]
+
+
+def test_parse_job_url_supports_embed_and_gh_jid(monkeypatch):
+    from jobhub.sources import base
+    monkeypatch.setattr(base, "_GREENHOUSE_BOARD_OF", {"8247550": "seatgeek"})
+
+    # embed with for parameter
+    parsed_embed = importer.parse_job_url("https://boards.greenhouse.io/embed/job_app?for=gemini&token=7951195")
+    assert (parsed_embed.ats, parsed_embed.slug, parsed_embed.posting_id) == ("greenhouse", "gemini", "7951195")
+
+    # embed resolving board token
+    parsed_embed_lookup = importer.parse_job_url("https://boards.greenhouse.io/embed/job_app?token=8247550")
+    assert (parsed_embed_lookup.ats, parsed_embed_lookup.slug, parsed_embed_lookup.posting_id) == ("greenhouse", "seatgeek", "8247550")
+
+    # arbitrary career page with ?gh_jid=
+    parsed_career = importer.parse_job_url("https://seatgeek.com/careers/jobs?gh_jid=8247550")
+    assert (parsed_career.ats, parsed_career.slug, parsed_career.posting_id) == ("greenhouse", "seatgeek", "8247550")
+
+
+def test_parse_job_url_follows_grnh_se_redirect(monkeypatch):
+    class FakeRedirectResponse:
+        def __init__(self, url):
+            self.url = url
+
+    class FakeRedirectClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def get(self, url):
+            return FakeRedirectResponse("https://job-boards.greenhouse.io/airtable/jobs/123456")
+
+    monkeypatch.setattr(importer, "client", FakeRedirectClient)
+    parsed = importer.parse_job_url("https://grnh.se/7pt3sv7q2us")
+    assert (parsed.ats, parsed.slug, parsed.posting_id) == ("greenhouse", "airtable", "123456")

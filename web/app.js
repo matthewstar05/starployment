@@ -29,7 +29,7 @@ function showView(v) {
 function jobCard(j) {
   const cls = j.score >= 70 ? 'hi' : j.score >= 50 ? 'mid' : 'lo';
   const salary = j.salary_min && j.salary_max ? `${money(j.salary_min)}–${money(j.salary_max)}` : money(j.salary_min || j.salary_max);
-  const supported = ['greenhouse','ashby','lever'].includes(j.ats);
+  const supported = ['greenhouse','ashby','lever','workable','rippling'].includes(j.ats);
   const locked = ['applied','queued','applying'].includes(j.status);
   return `<article class="job" data-id="${esc(j.id)}"><div class="score ${cls}" style="--p:${Math.max(0,Math.min(100,Math.round(j.score)))}" title="Match score">${Math.round(j.score)}<small>MATCH</small></div><div class="b">
     <div class="t"><button class="title-link" data-action="detail" data-id="${esc(j.id)}">${esc(j.title)}</button><span class="pill">${esc(j.ats)}</span>${j.status !== 'new' ? `<span class="pill ${esc(j.status)}">${prettyStatus(j.status)}</span>` : ''}</div>

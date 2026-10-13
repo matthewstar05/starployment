@@ -143,31 +143,93 @@ def _greenhouse_board_for(job_id: str) -> str | None:
 
 
 def resolve_hosted_greenhouse(jobs: list, workers: int = 8) -> int:
-    """Point careers-page links that carry ``gh_jid`` at their Greenhouse board. Returns how many."""
+    """Point careers-page links that carry ``gh_jid``, ``grnh.se`` shortlinks, or embed URLs at their Greenhouse board. Returns how many."""
     from urllib.parse import parse_qs, urlsplit
 
-    pending: dict[str, list] = {}
+    pending_gh_jid: dict[str, list] = {}
+    pending_redirect: list[tuple[str, object]] = []
+    pending_embed: list[tuple[str, str, object]] = []
+
     for job in jobs:
         if job.ats in ("greenhouse", "lever", "ashby"):
             continue
         for url in (job.apply_url, job.url):
-            job_id = (parse_qs(urlsplit(url or "").query).get("gh_jid") or [""])[0]
-            if job_id.isdigit():
-                pending.setdefault(job_id, []).append(job)
+            if not url:
+                continue
+            parts = urlsplit(url)
+            host = (parts.hostname or "").lower()
+            if host == "grnh.se":
+                pending_redirect.append((url, job))
                 break
-    if not pending:
-        return 0
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        boards = dict(zip(pending, pool.map(_greenhouse_board_for, pending)))
+            if host in ("boards.greenhouse.io", "job-boards.greenhouse.io") and "/embed/job_app" in parts.path:
+                qs = parse_qs(parts.query)
+                token = (qs.get("token") or qs.get("gh_jid") or [""])[0].strip()
+                for_slug = (qs.get("for") or [""])[0].strip()
+                pending_embed.append((token, for_slug, job))
+                break
+            job_id = (parse_qs(parts.query).get("gh_jid") or [""])[0]
+            if job_id.isdigit():
+                pending_gh_jid.setdefault(job_id, []).append(job)
+                break
+
     resolved = 0
-    for job_id, board in boards.items():
-        if not board:
-            continue
-        for job in pending[job_id]:
+
+    # 1. Resolve grnh.se shortlinks via HTTP redirect
+    if pending_redirect:
+        def _resolve_redirect(item: tuple[str, object]) -> tuple[str, str, object] | None:
+            short_url, job_obj = item
+            try:
+                with client(timeout=10.0, follow_redirects=True) as http:
+                    final_url = str(http.get(short_url).url)
+                parts = urlsplit(final_url)
+                segments = [s for s in parts.path.split("/") if s]
+                if ((parts.hostname or "").lower() in {"boards.greenhouse.io", "job-boards.greenhouse.io",
+                                                         "boards.eu.greenhouse.io", "job-boards.eu.greenhouse.io"}
+                        and parts.scheme == "https" and len(segments) == 3 and segments[1].lower() == "jobs"
+                        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", segments[0])
+                        and segments[2].isdigit()):
+                    return segments[0], segments[2], job_obj
+                qs = parse_qs(parts.query)
+                gh_jid = (qs.get("gh_jid") or qs.get("token") or [""])[0]
+                if gh_jid.isdigit():
+                    board = _greenhouse_board_for(gh_jid)
+                    if board:
+                        return board, gh_jid, job_obj
+            except Exception:
+                pass
+            return None
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for res in pool.map(_resolve_redirect, pending_redirect):
+                if res:
+                    board, job_id, job = res
+                    job.ats = "greenhouse"
+                    job.apply_url = f"https://job-boards.greenhouse.io/{board}/jobs/{job_id}"
+                    job.raw = {**(job.raw or {}), "slug": board, "gh_id": job_id}
+                    resolved += 1
+
+    # 2. Resolve boards.greenhouse.io/embed/job_app URLs
+    for token, for_slug, job in pending_embed:
+        board = for_slug or (_greenhouse_board_for(token) if token.isdigit() else "")
+        if board and token.isdigit() and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", board):
             job.ats = "greenhouse"
-            job.apply_url = f"https://job-boards.greenhouse.io/{board}/jobs/{job_id}"
-            job.raw = {**(job.raw or {}), "slug": board, "gh_id": job_id}
+            job.apply_url = f"https://job-boards.greenhouse.io/{board}/jobs/{token}"
+            job.raw = {**(job.raw or {}), "slug": board, "gh_id": token}
             resolved += 1
+
+    # 3. Resolve ?gh_jid= URLs via _greenhouse_board_for
+    if pending_gh_jid:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            boards = dict(zip(pending_gh_jid, pool.map(_greenhouse_board_for, pending_gh_jid)))
+        for job_id, board in boards.items():
+            if not board:
+                continue
+            for job in pending_gh_jid[job_id]:
+                job.ats = "greenhouse"
+                job.apply_url = f"https://job-boards.greenhouse.io/{board}/jobs/{job_id}"
+                job.raw = {**(job.raw or {}), "slug": board, "gh_id": job_id}
+                resolved += 1
+
     return resolved
 
 

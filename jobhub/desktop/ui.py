@@ -227,6 +227,7 @@ class JobHubWindow(QMainWindow):
         self.dashboard.review_requested.connect(lambda: self.show_applications("review"))
         self.dashboard.tracker_requested.connect(lambda: self.nav.setCurrentRow(TRACKER))
         self.jobs.review_requested.connect(self.show_draft_for_job)
+        self.jobs.bulk_prepare_requested.connect(self._open_plan)
         self.tracker.open_requested.connect(self.open_url_requested)
         self.tracker.connections_requested.connect(self.show_connections)
         self.jobs.apply_requested.connect(self.apply_requested)
@@ -261,7 +262,7 @@ class JobHubWindow(QMainWindow):
             return item
 
         self.refresh_action = action("Refresh Jobs", "Ctrl+R", self.scan_requested.emit)
-        self.apply_action = action("Apply…", "Ctrl+Shift+A", self.dashboard._open_plan)
+        self.apply_action = action("Prepare bulk…", "Ctrl+Shift+A", self._open_plan)
         self.add_posting_action = action("Add Posting…", "Ctrl+N", self._add_posting)
         self.find_action = action("Find Jobs", QKeySequence.StandardKey.Find, self._find_jobs)
         self.setup_action = action("Edit Setup…", "Ctrl+Shift+E", self.setup_requested.emit)
@@ -315,6 +316,11 @@ class JobHubWindow(QMainWindow):
     def _switch_page(self, index: int) -> None:
         if index >= 0:
             self.stack.setCurrentIndex(index)
+
+    def _open_plan(self) -> None:
+        """Open the shared bulk plan, carrying the Jobs star exclusion into it."""
+        exclude = True if self.nav.currentRow() == JOBS and self.jobs.exclude_starred else None
+        self.dashboard._open_plan(exclude_starred=exclude)
 
     def show_jobs(self, status: str = "all") -> None:
         """Open Jobs on a status filter; ``fresh`` shows new roles posted in the last 24 hours."""
@@ -432,8 +438,10 @@ class JobHubWindow(QMainWindow):
             self.dashboard.set_settings(settings)
             backend = (settings.get("agent") or {}).get("backend", "none")
             priority = list(settings.get("priority_companies") or [])
+            mailbox = settings.get("email_verification") or {}
             self.apps.set_context(practice=bool(settings.get("dry_run")), luna_connected=backend not in ("", "none"),
-                                  priority=priority)
+                                  priority=priority, mailbox={k: mailbox.get(k, "") for k in ("imap_host", "imap_username")},
+                                  workday_send=bool((settings.get("workday") or {}).get("send")))
             self.jobs.set_priority(priority)
             tracking = settings.get("email_tracking") or {}
             self.tracker.set_email_state(bool(tracking.get("enabled")), (mail or {}).get("last_checked"),

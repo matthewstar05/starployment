@@ -251,6 +251,9 @@ class ApplyPlanSheet(QDialog):
         self.min_score.setValue(int(plan.get("min_score", 60)))
         self.one_per_company = ToggleSwitch()
         self.one_per_company.setChecked(bool(plan.get("one_per_company", True)))
+        self.exclude_starred = ToggleSwitch()
+        self.exclude_starred.setAccessibleName("Exclude starred jobs from bulk preparation")
+        self.exclude_starred.setChecked(bool(plan.get("exclude_starred", True)))
         self._counts = dict(counts or {})
         self.window_choice = SegmentedControl()
         for text, hours in PLAN_WINDOWS:
@@ -270,11 +273,14 @@ class ApplyPlanSheet(QDialog):
         group.add_row("Order", self.order, "Best match, or newest postings.")
         group.add_row("Minimum match", Stepper(self.min_score), "Skip roles below this score.")
         group.add_row("One per company", self.one_per_company, "Spread applications across employers.")
+        group.add_row("Exclude starred", self.exclude_starred,
+                      "Skip personal and automatic company stars.")
         group.add_row("AI Autofill every question", self.use_luna,
-                      "Each application comes out ready to send; assumptions are labeled for you to check."
+                      "Fills open questions; review labeled assumptions."
                       if connected else "Connect Luna in Settings → Connections first.")
         strategy = {"tailored": "A one-page resume generated for each role from your resume builder",
-                    "library": "The resume file that matches each role type",
+                    "library": "The most relevant resume from your uploaded resume bank",
+                    "bank": "The most relevant resume from your uploaded resume bank",
                     "original": "Your main resume"}.get(str(settings.get("resume_strategy", "tailored")), "")
         group.add_row("Resume", label(strategy, "rowNote"), "Change this in Settings → Resume.")
         column.addWidget(group)
@@ -282,9 +288,9 @@ class ApplyPlanSheet(QDialog):
         self.available = label("", "caption")
         column.addWidget(self.available)
         priority = [c for c in settings.get("priority_companies") or [] if c]
-        if priority:
-            column.addWidget(label("Priority companies (" + ", ".join(priority[:4]) + (" and more" if len(priority) > 4 else "")
-                                   + ") are prepared and starred, then wait for you to approve each one.", "caption"))
+        self.priority_note = label("", "caption")
+        self.priority_note.setVisible(bool(priority))
+        column.addWidget(self.priority_note)
         if settings.get("dry_run"):
             column.addWidget(label("Practice mode is on, so sending fills forms without clicking Submit. "
                                    "Turn it off in Settings when you are ready to submit for real.", "questions"))
@@ -299,6 +305,7 @@ class ApplyPlanSheet(QDialog):
         self.go.clicked.connect(self.accept)
         self.count.valueChanged.connect(self._label)
         self.window_choice.currentIndexChanged.connect(self._label)
+        self.exclude_starred.toggled.connect(self._label)
         self._label()
         actions.addWidget(cancel)
         actions.addWidget(self.go)
@@ -308,13 +315,21 @@ class ApplyPlanSheet(QDialog):
         count = self.count.value()
         self.go.setText(f"Prepare {count} application{'s' if count != 1 else ''}")
         hours = int(self.window_choice.currentData() or 0)
-        if f"preparable_{hours}" in self._counts:
-            ready = int(self._counts[f"preparable_{hours}"])
-            self.available.setText(f"{ready:,} new role{'s' if ready != 1 else ''} on Greenhouse, Lever, or Ashby "
+        key = f"preparable_{hours}"
+        approximate = self.exclude_starred.isChecked() and f"unstarred_{key}" not in self._counts
+        if self.exclude_starred.isChecked() and f"unstarred_{key}" in self._counts:
+            key = f"unstarred_{key}"
+        if key in self._counts:
+            ready = int(self._counts[key])
+            self.available.setText(("Up to " if approximate else "") + f"{ready:,} new role{'s' if ready != 1 else ''} on supported "
                                    f"forms{WINDOW_PHRASES.get(hours, '')}. Other roles stay in Jobs.")
         else:
-            self.available.setText(f"You have {self._new_matches:,} new matches. Greenhouse, Lever, and Ashby roles "
+            self.available.setText(f"You have {self._new_matches:,} new matches. Roles with supported forms "
                                    "can be prepared; others stay in Jobs.")
+        self.priority_note.setText(
+            "Starred roles, including priority companies, are excluded from this bulk plan."
+            if self.exclude_starred.isChecked() else
+            "Starred roles are included for preparation and wait for you to approve and send each one.")
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -324,6 +339,7 @@ class ApplyPlanSheet(QDialog):
     def plan(self) -> dict:
         return {"count": self.count.value(), "min_score": float(self.min_score.value()),
                 "one_per_company": self.one_per_company.isChecked(), "use_luna": self.use_luna.isChecked(),
+                "exclude_starred": self.exclude_starred.isChecked(),
                 "posted_within_hours": int(self.window_choice.currentData() or 0),
                 "order": str(self.order.currentData() or "match")}
 
@@ -509,15 +525,18 @@ class DashboardView(QWidget):
             row.clicked.connect(lambda: self.tracker_requested.emit())
             self.focus_card.add_row(row)
 
-    def _open_plan(self) -> None:
+    def _open_plan(self, *, exclude_starred: bool | None = None) -> None:
         sheet = ApplyPlanSheet(self._settings, self._new_matches, self.window(), counts=self._plan_counts)
+        if exclude_starred is not None:
+            sheet.exclude_starred.setChecked(exclude_starred)
         if sheet.exec() == QDialog.DialogCode.Accepted:
             self.apply_plan_requested.emit(sheet.plan())
 
     def set_stats(self, stats: dict) -> None:
         self._new_matches = int(stats.get("new", 0) or 0)
         self._fresh = int(stats.get("fresh_24", 0) or 0)
-        self._plan_counts = {key: value for key, value in stats.items() if key.startswith("preparable_")}
+        self._plan_counts = {key: value for key, value in stats.items()
+                             if key.startswith(("preparable_", "unstarred_preparable_"))}
         for key, tile in self.tiles.items():
             tile.value.set_value(int(stats.get(key, 0) or 0))
         new, review = int(stats.get("new", 0) or 0), int(stats.get("needs_human", 0) or 0)

@@ -18,12 +18,22 @@ from pathlib import Path
 from urllib.parse import quote
 
 from . import config, db
-from .answers import FORMAT_NAMES, Q, fit_answer, missing_answer as missing, rule_answer
+from .answers import FORMAT_NAMES, Q, fit_answer, missing_answer as missing, needs_attention, rule_answer
 from .models import Job, Profile
 from .sources.base import client, strip_html
 from .sources.import_job import parse_job_url
 
-SUPPORTED_ATS = ("greenhouse", "lever", "ashby")
+SUPPORTED_ATS = ("greenhouse", "lever", "ashby", "workable", "rippling")
+# Prepared for review like the others. Sent through Finish in browser, or by Approve & send,
+# Send ready, and automatic runs once Settings → Workday → Send Workday applications is on
+# (apply/workday.py signs in with the vault's saved password).
+BROWSER_ONLY_ATS = ("workday",)
+PREPARABLE_ATS = SUPPORTED_ATS + BROWSER_ONLY_ATS
+
+
+def sends_unattended(ats: str, settings: dict) -> bool:
+    """Whether Approve & send, Send ready, and automatic runs may send this kind of application."""
+    return ats not in BROWSER_ONLY_ATS or bool((settings.get("workday") or {}).get("send"))
 SOURCE_LABELS = {"saved": "Saved answer", "profile": "From your profile", "resume": "From your resume",
                  "luna": "Drafted by Luna", "autofill": "AI Autofill", "you": "Your answer", "none": "Needs your answer",
                  "declined": "Declined", "file": "Attached"}
@@ -129,6 +139,7 @@ def apply_edits(questions: list[dict], edits: dict[str, object]) -> list[dict]:
             question.update(answer=None, source="none", approved=False)
         elif value != question.get("answer") or question.get("source") != "you":
             question.update(answer=value, source="you", approved=True)
+            question.pop("rejected", None)
     return questions
 
 
@@ -279,8 +290,9 @@ _LEVER_KINDS = {"text": "text", "textarea": "textarea", "multiple-choice": "radi
 _LEVER_STANDARD = (("Resume/CV", "file", True, "resume"), ("Full name", "text", True, "name"),
                    ("Email", "text", True, "email"), ("Phone", "text", False, "phone"),
                    ("Current location", "combobox", False, "location"), ("Current company", "text", False, "org"),
-                   ("LinkedIn URL", "text", False, "urls[LinkedIn]"), ("GitHub URL", "text", False, "urls[GitHub]"),
-                   ("Portfolio URL", "text", False, "urls[Portfolio]"))
+                   ("LinkedIn URL", "text", False, "urls[LinkedIn]"), ("Twitter URL", "text", False, "urls[Twitter]"),
+                   ("GitHub URL", "text", False, "urls[GitHub]"), ("Portfolio URL", "text", False, "urls[Portfolio]"),
+                   ("Other website", "text", False, "urls[Other]"))
 
 
 def lever_cards(page: str) -> list[str]:
@@ -406,10 +418,128 @@ def ashby_questions(job: Job) -> list[dict]:
     return out
 
 
+def workable_questions(job: Job) -> list[dict]:
+    url = job.apply_url or job.url
+    m = re.search(r"/j/([0-9a-zA-Z]+)", url)
+    if not m:
+        raise ValueError("Could not extract Workable job shortcode from URL")
+    shortcode = m.group(1)
+    form_url = f"https://apply.workable.com/api/v1/jobs/{quote(shortcode, safe='')}/form"
+    with client(timeout=15.0) as http:
+        response = http.get(form_url)
+        response.raise_for_status()
+        sections = response.json()
+    out: list[dict] = []
+
+    def handle_field(field: dict) -> None:
+        if not isinstance(field, dict):
+            return
+        ftype = str(field.get("type") or "text").lower()
+        fid = str(field.get("id") or "")
+        flabel = str(field.get("label") or fid)
+        required = field.get("required") is True
+        if ftype == "group":
+            if required:
+                raise ValueError("Required Workable history group needs review on the live form")
+            return
+        if ftype == "file":
+            out.append(_question(len(out) + 1, flabel, "file", [], required, fid))
+        elif ftype == "boolean":
+            out.append(_question(len(out) + 1, flabel, "radio", ["Yes", "No"], required, fid))
+        elif ftype in ("choice", "dropdown", "select") or ("options" in field and isinstance(field["options"], list)):
+            options = []
+            for opt in field.get("options") or []:
+                if isinstance(opt, dict):
+                    options.append(str(opt.get("label") or opt.get("name") or opt.get("value") or ""))
+                elif isinstance(opt, str):
+                    options.append(opt)
+            kind = "select" if field.get("singleOption", True) else "checkbox"
+            out.append(_question(len(out) + 1, flabel, kind, options, required, fid))
+        elif ftype in ("paragraph", "textarea"):
+            out.append(_question(len(out) + 1, flabel, "textarea", [], required, fid))
+        elif ftype == "number":
+            q = _question(len(out) + 1, flabel, "text", [], required, fid)
+            q["format"] = "number"
+            out.append(q)
+        elif ftype == "email":
+            q = _question(len(out) + 1, flabel, "text", [], required, fid)
+            q["format"] = "email"
+            out.append(q)
+        elif ftype == "phone":
+            q = _question(len(out) + 1, flabel, "text", [], required, fid)
+            q["format"] = "phone"
+            out.append(q)
+        elif ftype == "date":
+            q = _question(len(out) + 1, flabel, "text", [], required, fid)
+            q["format"] = "date"
+            out.append(q)
+        else:
+            out.append(_question(len(out) + 1, flabel, "text", [], required, fid))
+
+    for section in (sections if isinstance(sections, list) else []):
+        if not isinstance(section, dict):
+            continue
+        for field in section.get("fields") or []:
+            handle_field(field)
+    if not out:
+        raise ValueError("The public Workable form contained no fields")
+    return out
+
+
+def rippling_questions(job: Job) -> list[dict]:
+    parsed = parse_job_url(job.apply_url or job.url)
+    if parsed.ats != "rippling":
+        raise ValueError("Expected a public Rippling posting")
+    url = f"https://ats.rippling.com/api/v1/board/{quote(parsed.slug, safe='')}/jobs/{quote(parsed.posting_id, safe='')}"
+    with client(timeout=15.0) as http:
+        response = http.get(url)
+        response.raise_for_status()
+        payload = response.json()
+    if str(payload.get("uuid") or "") != parsed.posting_id:
+        raise ValueError("Rippling posting does not match this vacancy")
+    form = payload.get("activeJobApplication") or {}
+    out = []
+    for field in form.get("basicQuestions") or []:
+        field_type = str(field.get("fieldType") or "").upper()
+        kind = "file" if field_type == "FILE" else "text"
+        q = _question(len(out) + 1, field.get("title") or "", kind, [], field.get("required") is True,
+                      str(field.get("oid") or ""))
+        if field_type == "PHONE_NUMBER":
+            q["format"] = "phone"
+        elif field.get("oid") == "email":
+            q["format"] = "email"
+        out.append(q)
+    for section in form.get("additionalQuestions") or []:
+        for field in (section.get("form") or {}).get("questions") or []:
+            field_type = str(field.get("questionType") or "").upper()
+            options = [str(v) for v in field.get("strChoices") or []]
+            if field_type == "YES_NO_SCALE_4":
+                options = ["Strong No", "No", "Yes", "Strong Yes"]
+            kind = ("checkbox" if field_type == "MULTI_SELECT_CHECKBOX" else "select" if options
+                    else "file" if field_type == "FILE" else "textarea" if field_type == "LONG_ANSWER" else "text")
+            q = _question(len(out) + 1, field.get("title") or "", kind, options,
+                          field.get("isRequired") is True,
+                          f"customQuestions.{section.get('id', '')}.{field.get('uniqueKey', '')}")
+            if str(field.get("dataType") or "").casefold() == "number" and not options:
+                q["format"] = "number"
+            out.append(q)
+    if not out:
+        raise ValueError("The public Rippling form contained no fields")
+    return out
+
+
 def discover_questions(job: Job) -> tuple[list[dict], str]:
     """Return the employer's published questions and how they were found."""
-    readers = {"greenhouse": greenhouse_questions, "lever": lever_questions, "ashby": ashby_questions}
+    readers = {
+        "greenhouse": greenhouse_questions,
+        "lever": lever_questions,
+        "ashby": ashby_questions,
+        "workable": workable_questions,
+        "rippling": rippling_questions,
+    }
     reader = readers.get(job.ats)
+    if job.ats in BROWSER_ONLY_ATS:
+        return [], job.ats   # behind the employer's sign-in: filled step by step in the browser
     if reader is None:
         return [], "unsupported"
     try:
@@ -426,6 +556,8 @@ def answer_questions(questions: list[dict], profile: Profile, settings: dict, jo
         if question.get("source") in ("you", "luna", "autofill") and not blank(question.get("answer")):
             continue   # keep a reviewer's answer, a Luna draft, or an AI Autofill answer
         if question["kind"] == "file":
+            if question.get("source") == "you" and not blank(question.get("answer")):
+                continue   # a file the candidate chose for this question
             is_resume = re.search(r"resume|\bcv\b", question["label"], re.I) or question.get("name") == "resume"
             letter = (not is_resume and question.get("required") and re.search(r"cover", question["label"], re.I)
                       and (settings.get("answers") or {}).get("cover_letter_mode", "auto") == "auto")
@@ -465,12 +597,17 @@ def answer_questions(questions: list[dict], profile: Profile, settings: dict, jo
 
 
 def draft_status(questions: list[dict]) -> str:
-    return "needs_answers" if any(missing(q) for q in questions) else "ready"
+    return "needs_answers" if any(needs_attention(q) for q in questions) else "ready"
 
 
 def luna_ready(settings: dict) -> bool:
     backend = (settings.get("agent") or {}).get("backend", "none")
     return backend not in ("", "none") and bool((settings.get("luna") or {}).get("draft_answers", True))
+
+
+def _open(question: dict) -> bool:
+    """A question AI Autofill may answer: still blank, or an answer the employer's form refused."""
+    return question["kind"] != "file" and (blank(question.get("answer")) or bool(question.get("rejected")))
 
 
 def autofill(draft_id: int, settings: dict | None = None) -> int:
@@ -483,7 +620,7 @@ def autofill(draft_id: int, settings: dict | None = None) -> int:
     job, profile = db.get_job(draft["job_id"]), db.get_profile()
     if job is None or profile is None:
         raise ValueError("Job or profile no longer exists")
-    open_questions = [q for q in draft["questions"] if blank(q.get("answer")) and q["kind"] != "file"]
+    open_questions = [q for q in draft["questions"] if _open(q)]
     if not open_questions:
         return 0
     filled = autofill_answers(job, profile, settings, open_questions)
@@ -493,10 +630,13 @@ def autofill(draft_id: int, settings: dict | None = None) -> int:
     by_id = {q["id"]: q for q in current["questions"]}
     for qid, result in filled.items():
         question = by_id.get(qid)
-        if question is not None and blank(question.get("answer")):
+        if question is not None and _open(question):
             question.update(answer=result["answer"], source="autofill", approved=False, note=result.get("note", ""))
+            question.pop("rejected", None)
     status = current["status"] if current["status"] in ("approved", "practice", "error") else draft_status(current["questions"])
-    db.update_draft(draft_id, questions=current["questions"], status=status)
+    # A fill that ran clears the note left by an earlier one that could not.
+    stale = str(current.get("error") or "").startswith(("Luna could not draft answers", "AI Autofill failed"))
+    db.update_draft(draft_id, questions=current["questions"], status=status, **({"error": ""} if stale else {}))
     if filled:
         db.add_event(f"AI Autofill answered {len(filled)} question(s) for {job.company} / {job.title}", "info", job.id)
     return len(filled)
@@ -506,7 +646,7 @@ def autofill_all(progress: Callable[[str, int, int], None] | None = None, worker
     """AI Autofill every open prepared application that still has unanswered questions."""
     settings = db.get_settings()
     targets = [d["id"] for d in db.list_drafts(("ready", "needs_answers", "practice", "error"))
-               if any(blank(q.get("answer")) and q["kind"] != "file" for q in d["questions"])]
+               if any(_open(q) for q in d["questions"])]
     done = filled = failed = 0
 
     def run(draft_id: int) -> int:
@@ -528,16 +668,91 @@ def autofill_all(progress: Callable[[str, int, int], None] | None = None, worker
 
 
 SPAM_REJECTION_RE = re.compile(r"spam filter rejected|flagged as (?:possible )?spam", re.I)
+# After Submit, the employer's form refused the application and asked for corrections
+# (Ashby: "Your form needs corrections · Missing entry for required field: ...").
+CORRECTIONS_RE = re.compile(r"needs corrections|missing entry for required field|"
+                            r"please (?:fix|correct) the (?:errors?|following)", re.I)
+_REFUSED_FIELD_RE = re.compile(r"missing entry for required field:\s*(.+?)(?=\s*(?:\||missing entry for|$))", re.I)
+
+
+def refused(record: dict) -> bool:
+    """True when the employer explicitly refused an attempt after Submit, so it was not received."""
+    error = str(record.get("error") or "")
+    return bool(record.get("submission_attempted")) and bool(SPAM_REJECTION_RE.search(error) or
+                                                             CORRECTIONS_RE.search(error))
 
 
 def reopen_rejected(app_id: int) -> str:
-    """For an attempt the employer's spam filter refused, clear it so it can be prepared and sent again."""
+    """For an attempt the employer explicitly refused, clear it so it can be prepared and sent again.
+
+    A refusal that names fields keeps the prepared answers and flags those
+    fields, so the candidate fixes them instead of starting over.
+    """
     record = db.get_application(app_id)
     if record is None:
         raise ValueError("Application record not found")
-    if not SPAM_REJECTION_RE.search(str(record.get("error") or "")):
+    error = str(record.get("error") or "")
+    if not refused(record):
         raise ValueError("Only an attempt the employer explicitly refused can be prepared again")
-    return db.mark_not_received(app_id, "The employer's spam filter refused this submission; it was not received.")
+    if SPAM_REJECTION_RE.search(error):
+        return db.mark_not_received(app_id, "The employer's spam filter refused this submission; it was not received.")
+    job_id = db.mark_not_received(app_id, "The employer's form asked for corrections after Submit, so it was not received.")
+    draft = db.draft_for_job(job_id)
+    if draft and draft["questions"]:
+        named = {_tidy(m).casefold() for m in _REFUSED_FIELD_RE.findall(error)}
+        for question in draft["questions"]:
+            if _tidy(question["label"]).casefold() in named:
+                question.update(rejected=True, approved=False, note=(
+                    "The employer's form didn't receive this answer. Check it, then send again."))
+        db.update_draft(draft["id"], questions=draft["questions"], status=draft_status(draft["questions"]))
+        try:
+            db.set_job_status(job_id, "prepared")
+        except ValueError:
+            pass
+    return job_id
+
+
+def prepare_for_browser(draft_id: int, edits: dict[str, object] | None = None) -> dict:
+    """Approve what is answered so far for a send the candidate finishes in a browser window.
+
+    Unlike Approve & send, open questions are allowed: the candidate completes them in the window.
+    """
+    draft = db.get_draft(draft_id)
+    if draft is None:
+        raise ValueError("This application is no longer prepared")
+    if draft["status"] == "unconfirmed":
+        return draft
+    if draft["status"] not in db.DRAFT_OPEN + ("practice", "error"):
+        raise ValueError("This application was already sent")
+    questions = apply_edits(draft["questions"], edits or {})
+    for question in questions:
+        if not blank(question.get("answer")):
+            question["approved"] = True
+            question.pop("rejected", None)
+    from .models import now_iso
+    db.update_draft(draft_id, questions=questions, status="approved", approved_at=now_iso(), error="")
+    return db.get_draft(draft_id)
+
+
+def draft_for_attempt(app_id: int) -> int:
+    """The draft that finishes an unconfirmed attempt in the browser; made from the attempt if none exists."""
+    record = db.get_application(app_id)
+    if record is None:
+        raise ValueError("Application record not found")
+    if record.get("status") != "needs_human" or not record.get("submission_attempted"):
+        raise ValueError("Only an unconfirmed submission can be finished in the browser")
+    draft = db.draft_for_job(record["job_id"])
+    if draft is not None:
+        if draft["status"] != "unconfirmed" or int(draft.get("application_id") or 0) != int(app_id):
+            raise ValueError("This application has a newer prepared version; open that one instead")
+        return int(draft["id"])
+    draft_id = db.upsert_draft(record["job_id"], status="error", resume_path=str(record.get("resume_path") or ""))
+    db.update_draft(draft_id, status="unconfirmed", application_id=app_id, error=str(record.get("error") or "")[:400])
+    try:
+        db.set_job_status(record["job_id"], "needs_human")   # still waiting on you, not a new draft
+    except ValueError:
+        pass
+    return draft_id
 
 
 def luna_fill(draft_id: int, settings: dict | None = None) -> int:
@@ -572,13 +787,17 @@ def luna_fill(draft_id: int, settings: dict | None = None) -> int:
 
 # ------------------------------------------------------------------ preparing
 def plan_candidates(count: int, min_score: float, one_per_company: bool = True, *,
-                    posted_within_hours: int = 0, order: str = "match") -> list[Job]:
+                    posted_within_hours: int = 0, order: str = "match",
+                    exclude_starred: bool | None = None) -> list[Job]:
     """New jobs on supported forms, one per employer when asked.
 
     ``posted_within_hours`` keeps only postings published in that window (0 is
     any time). ``order`` is ``"match"`` (best match first) or ``"newest"``
     (most recently posted first).
+    ``exclude_starred`` follows the saved bulk plan when omitted.
     """
+    if exclude_starred is None:
+        exclude_starred = bool((db.get_settings().get("apply_plan") or {}).get("exclude_starred", True))
     busy_companies = set()
     if one_per_company:
         for draft in db.list_drafts(db.DRAFT_OPEN + ("sending",)):
@@ -587,8 +806,8 @@ def plan_candidates(count: int, min_score: float, one_per_company: bool = True, 
     seen: set[str] = set()
     for job in db.list_jobs(status="new", min_score=float(min_score), limit=20000,
                             posted_within_hours=posted_within_hours or None,
-                            order="posted" if order == "newest" else "match"):
-        if job.ats not in SUPPORTED_ATS:
+                            order="posted" if order == "newest" else "match", exclude_starred=exclude_starred):
+        if job.ats not in PREPARABLE_ATS:
             continue
         company = job.company.strip().casefold()
         if one_per_company and (company in seen or company in busy_companies):
@@ -622,17 +841,22 @@ def prepare_job(job: Job, profile: Profile, settings: dict) -> int:
 def prepare_batch(count: int, min_score: float, one_per_company: bool = True, *,
                   use_luna: bool | None = None, progress: Callable[[str, int, int], None] | None = None,
                   stop: threading.Event | None = None, luna_workers: int = 3,
-                  posted_within_hours: int = 0, order: str = "match") -> dict:
+                  posted_within_hours: int = 0, order: str = "match",
+                  exclude_starred: bool | None = None) -> dict:
     """Prepare up to ``count`` applications. Luna drafts run after every form is read.
 
-    Priority-company roles are prepared like any other; they are starred and
-    wait for the candidate's own Approve & send.
+    Starred roles are excluded by default, following the saved bulk plan.
+    When included, they still wait for the candidate's own Approve & send.
     """
     settings = db.get_settings()
     profile = db.get_profile()
     if profile is None or not profile.resume_path or not Path(profile.resume_path).is_file():
         raise ValueError("Add your resume in setup before preparing applications")
-    jobs = plan_candidates(count, min_score, one_per_company, posted_within_hours=posted_within_hours, order=order)
+    from .priority import is_starred
+    if exclude_starred is None:
+        exclude_starred = bool((settings.get("apply_plan") or {}).get("exclude_starred", True))
+    jobs = plan_candidates(count, min_score, one_per_company, posted_within_hours=posted_within_hours, order=order,
+                           exclude_starred=exclude_starred)
     prepared: list[int] = []
     failed = 0
     for index, job in enumerate(jobs, 1):
@@ -640,11 +864,13 @@ def prepare_batch(count: int, min_score: float, one_per_company: bool = True, *,
             break
         if progress:
             progress(f"Preparing {job.company}", index, len(jobs))
+        if exclude_starred and is_starred(db.get_job(job.id) or job, db.get_settings().get("priority_companies") or []):
+            continue  # the candidate may have starred it while an earlier form was being prepared
         try:
             prepared.append(prepare_job(job, profile, settings))
         except Exception:  # noqa: BLE001 - recorded on the draft
             failed += 1
-    drafted = 0
+    drafted = fill_failed = 0
     use_luna = luna_ready(settings) if use_luna is None else use_luna and luna_ready(settings)
     fill = autofill if (settings.get("luna") or {}).get("autofill_on_prepare", True) else luna_fill
     if use_luna and prepared and not (stop is not None and stop.is_set()):
@@ -655,12 +881,13 @@ def prepare_batch(count: int, min_score: float, one_per_company: bool = True, *,
         done = 0
 
         def run(draft_id: int) -> int:
-            nonlocal done
+            nonlocal done, fill_failed
             if stop is not None and stop.is_set():
                 return 0
             try:
                 return fill(draft_id, settings)
             except Exception as error:  # noqa: BLE001
+                fill_failed += 1
                 db.update_draft(draft_id, error=f"Luna could not draft answers: {str(error)[:200]}")
                 return 0
             finally:
@@ -672,14 +899,14 @@ def prepare_batch(count: int, min_score: float, one_per_company: bool = True, *,
             drafted = sum(pool.map(run, needing))
     db.add_event(f"Prepared {len(prepared)} application(s) for review" + (f"; Luna drafted {drafted} answers" if drafted else ""),
                  "success" if prepared else "warn")
-    from .priority import is_starred
     priority = settings.get("priority_companies") or []
     starred = sum(1 for draft_id in prepared if is_starred(db.get_draft(draft_id) or {}, priority))
     return {"prepared": len(prepared), "failed": failed, "considered": len(jobs), "drafted": drafted,
-            "starred": starred}
+            "fill_failed": fill_failed, "starred": starred}
 
 
-def bulk_send_candidates(drafts: list[dict], priority: list[str]) -> tuple[list[dict], list[dict]]:
+def bulk_send_candidates(drafts: list[dict], priority: list[str],
+                         settings: dict | None = None) -> tuple[list[dict], list[dict]]:
     """Split drafts for "Send ready" into (send, held).
 
     An approved draft was approved on its own and goes. A ready draft goes
@@ -689,6 +916,8 @@ def bulk_send_candidates(drafts: list[dict], priority: list[str]) -> tuple[list[
     from .priority import held_from_bulk_send
     send, held = [], []
     for draft in drafts:
+        if not sends_unattended(draft.get("ats") or "", settings or {}):
+            continue   # Workday without Send Workday applications: finished in a browser window
         if draft.get("status") == "ready" and held_from_bulk_send(draft, priority):
             held.append(draft)
         elif draft.get("status") in ("approved", "ready"):
@@ -718,6 +947,7 @@ def approve_and_queue(draft_id: int, edits: dict[str, object] | None = None) -> 
     for question in questions:
         if not blank(question.get("answer")):
             question["approved"] = True
+            question.pop("rejected", None)   # the reviewer saw the form's objection and kept or changed it
     unanswered = [q["label"] for q in questions if missing(q)]
     if unanswered:
         db.update_draft(draft_id, questions=questions, status="needs_answers")
@@ -728,36 +958,55 @@ def approve_and_queue(draft_id: int, edits: dict[str, object] | None = None) -> 
     return db.get_draft(draft_id)
 
 
-def send_draft(draft_id: int, parallel: int = 1) -> dict:
+def send_draft(draft_id: int, parallel: int = 1, assist: bool = False) -> dict:
     """Send one approved draft through the browser engine and record the outcome.
 
     ``parallel`` is how many applications may be in flight at once. When every
     slot is taken (an automatic run, say), the draft stays approved and the
     result's status is ``busy`` so the caller can try again shortly.
+
+    ``assist`` opens a visible window filled as far as Starployment can; the
+    candidate finishes it and presses Submit. An unconfirmed draft reopens its
+    own attempt rather than reserving a second one.
     """
     from . import scheduler
     draft = db.get_draft(draft_id)
     if draft is None:
         raise ValueError("This application is no longer prepared")
-    if draft["status"] != "approved":
+    reopen = assist and draft["status"] == "unconfirmed" and draft.get("application_id")
+    if draft["status"] != "approved" and not reopen:
         raise ValueError("Approve this application before sending it")
     job = db.get_job(draft["job_id"])
     if job is None:
         raise ValueError("The job no longer exists")
     settings = db.get_settings()
+    if not assist and not sends_unattended(job.ats, settings):
+        raise ValueError("This application is on Workday, behind the employer's sign-in. Choose Finish in browser, "
+                         "or turn on Settings → Workday → Send Workday applications.")
     extra: dict[str, object] = {}
     remember: dict[str, object] = {}
     for question in draft["questions"]:
         value = question.get("answer")
-        if blank(value) or not question.get("approved") or question["kind"] == "file":
+        if blank(value) or not question.get("approved"):
+            continue
+        if question["kind"] == "file":
+            # Only a file the candidate chose; the resume and cover letter are attached by the engine.
+            if question.get("source") == "you" and Path(str(value)).is_file():
+                extra[question["label"]] = str(value)
             continue
         if question.get("source") in ("luna", "you", "saved", "autofill"):
             extra.update(send_answers(question, value))
             if question.get("source") in ("luna", "you") and _rememberable(question, value, job):
                 remember[question["label"]] = value
     try:
-        application_id = scheduler.queue_application(job.id, parallel=parallel)
+        if reopen:
+            application_id = int(draft["application_id"])
+            db.reopen_for_browser(application_id)
+        else:
+            application_id = scheduler.queue_application(job.id, parallel=parallel)
     except ValueError as error:
+        if reopen:
+            return {"status": "blocked", "error": str(error), "draft_id": draft_id}
         # Every browser slot is taken: not a problem with this application.
         if "waits its turn" in str(error) or str(error).startswith("An application is already queued"):
             return {"status": "busy", "error": str(error), "draft_id": draft_id}
@@ -765,7 +1014,7 @@ def send_draft(draft_id: int, parallel: int = 1) -> dict:
         return {"status": "blocked", "error": str(error), "draft_id": draft_id}
     db.update_draft(draft_id, status="sending", application_id=application_id, error="")
     result = scheduler.apply_one(job.id, application_id=application_id, extra_answers=extra,
-                                 resume_override=draft.get("resume_path") or None)
+                                 resume_override=draft.get("resume_path") or None, assist=assist)
     status = str(result.get("status"))
     if status == "applied":
         db.update_draft(draft_id, status="sent")
@@ -780,17 +1029,32 @@ def send_draft(draft_id: int, parallel: int = 1) -> dict:
         db.update_draft(draft_id, status="unconfirmed", error=str(result.get("message") or "")[:400])
     else:
         questions = draft["questions"]
-        known = {q["label"].casefold() for q in questions}
+        known = {_tidy(q["label"]).casefold() for q in questions}
         groups = _group_options(questions)
+        refused: set[str] = set()
         for detail in result.get("questions") or []:
-            label = str(detail.get("label") or "").strip()
+            label = _tidy(detail.get("label") or "")
             # A live form reports each box of a "select all that apply" group;
             # the group question already holds that answer.
-            if label and label.casefold() not in known and not _covered_by_group(label, groups):
+            if not label or _covered_by_group(label, groups):
+                continue
+            if label.casefold() not in known:
                 questions.append(_question(len(questions) + 1, label, str(detail.get("kind") or "text"),
                                            detail.get("options") or [], bool(detail.get("required"))))
                 known.add(label.casefold())
+                if not detail.get("invalid"):
+                    continue
+            refused.add(label.casefold())
         answer_questions(questions, db.get_profile() or Profile(), settings, job)
+        # The form refused these answers, or never registered them. Ask again rather
+        # than stopping with a draft that has nothing left to edit.
+        for question in questions:
+            if _tidy(question["label"]).casefold() not in refused or question.get("source") == "file":
+                continue
+            question.update(rejected=True, approved=False)
+            if not blank(question.get("answer")):
+                question["note"] = ("The employer's form didn't accept this answer. "
+                                    "Check it, change it, or try AI Autofill.")
         new_status = "practice" if status == "dry_run" else "needs_answers" if draft_status(questions) == "needs_answers" else "error"
         db.update_draft(draft_id, status=new_status, questions=questions,
                         error="" if status == "dry_run" else str(result.get("message") or result.get("error") or "")[:400])

@@ -109,7 +109,7 @@ class LunaConnection(QWidget):
         self.autofill.toggled.connect(self.changed)
         self.group.add_row("Account", self.backend)
         self.group.add_widget(self.status)
-        self.key_row = self.group.add_row("API key", key_row, "Stored in your system credential vault.")
+        self.key_row = self.group.add_row("API key", key_row, "Stored on this computer, never in the database.")
         self.model_row = self.group.add_row("Model", self.model, "Choose a model, or keep the default.")
         options = [self.group.add_row("Draft custom answers", self.draft_answers, "When preparing applications."),
                    self.group.add_row("Autofill prepared applications", self.autofill,
@@ -205,7 +205,7 @@ class LunaConnection(QWidget):
 
 
 class EmailConnection(QWidget):
-    """A read-only mailbox for reply tracking and Greenhouse email codes."""
+    """A mailbox for reply tracking and Greenhouse email codes, read-only unless rejections are archived."""
 
     changed = Signal()
     test_requested = Signal(dict)
@@ -219,7 +219,8 @@ class EmailConnection(QWidget):
                                         "from replies; keeps only each message's sender, subject, and date." if compact else
                                "Starployment reads your inbox (read-only) to move applications to Assessment, "
                                "Interview, Offer, or Rejected, and optionally to complete email verification codes and links. "
-                               "It keeps only each message's sender, subject, and date.")
+                               "It keeps only each message's sender, subject, and date, and changes nothing in your mailbox "
+                               "unless you turn on Archive rejections.")
         self.provider = QComboBox()
         for key, (title, *_rest) in PROVIDERS.items():
             self.provider.addItem(title, key)
@@ -249,7 +250,9 @@ class EmailConnection(QWidget):
                                "test", "Test")
         self.status.action_clicked.connect(lambda _a: (self.status.busy("Connecting…"), self.test_requested.emit(self.values())))
         self.track = ToggleSwitch()
-        self.track.toggled.connect(self.changed)
+        self.track.toggled.connect(self._track_changed)
+        self.archive = ToggleSwitch()
+        self.archive.toggled.connect(self.changed)
         self.codes = ToggleSwitch()
         self.codes.toggled.connect(self._codes_changed)
         self.sender = QLineEdit()
@@ -265,6 +268,10 @@ class EmailConnection(QWidget):
         self.port_row = self.group.add_row("Port (TLS)", self.port)
         self.group.add_widget(self.status)
         self.group.add_row("Track replies", self.track, "Update Tracker stages from recruiting emails.")
+        self.archive_row = self.group.add_row(
+            "Archive rejections", self.archive,
+            "Takes a rejection out of your Inbox once its application is marked Rejected. Nothing is deleted; "
+            "Gmail labels it Starployment/Rejected.")
         codes_row = self.group.add_row("Finish email verification", self.codes,
                                        "Completes verification codes and links from employer emails.")
         self.sender_row = self.group.add_row("Trusted sender filter", self.sender,
@@ -276,6 +283,11 @@ class EmailConnection(QWidget):
         column.addWidget(self.group)
         self._provider_changed()
         self._codes_changed()
+        self._track_changed()
+
+    def _track_changed(self, *_args) -> None:
+        self.archive_row.setVisible(self.track.isChecked() and not getattr(self, "_compact", False))
+        self.changed.emit()
 
     def _provider_changed(self, *_args) -> None:
         key = str(self.provider.currentData() or "other")
@@ -309,6 +321,8 @@ class EmailConnection(QWidget):
         self.sender.setText(str(verification.get("sender_address") or ""))
         self.codes.setChecked(bool(verification.get("enabled")))
         self.track.setChecked(bool(tracking.get("enabled")))
+        self.archive.setChecked(bool(tracking.get("archive_rejections")))
+        self._track_changed()
         self.password.clear()
         self.forget.setChecked(False)
         self._codes_changed()
@@ -324,7 +338,8 @@ class EmailConnection(QWidget):
                 "imap_port": self.port.value(), "imap_username": self.address.text().strip(),
                 "sender_address": self.sender.text().strip() if self.codes.isChecked() else "",
             },
-            "email_tracking": {"enabled": self.track.isChecked()},
+            "email_tracking": {"enabled": self.track.isChecked(),
+                               "archive_rejections": self.track.isChecked() and self.archive.isChecked()},
         }
         if self.password.text():
             patch["_imap_password"] = self.password.text()

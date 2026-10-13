@@ -184,11 +184,21 @@ def merge_resume_into_library(pdf_path: str) -> tuple[Profile, dict[str, int]]:
         if key(entry, "name") not in have:
             profile.projects.append(entry)
             added["projects"] += 1
-    have = {key(e, "school", "degree") for e in profile.education}
     for entry in parsed.education:
-        if key(entry, "school", "degree") not in have:
+        # The same degree may be saved as "B.S." and printed as "Bachelor of Science".
+        same = next((e for e in profile.education if key(e, "school", "degree") == key(entry, "school", "degree")
+                     or (key(e, "school", "end") == key(entry, "school", "end") and entry.end)), None)
+        if same is None:
             profile.education.append(entry)
             added["education"] += 1
+            continue
+        for detail in entry.details:
+            if detail.casefold() not in {d.casefold() for d in same.details}:
+                same.details.append(detail)
+                added["education"] += 1
+    for award in parsed.awards:
+        if award.casefold() not in {a.casefold() for a in profile.awards}:
+            profile.awards.append(award)
     known = {s.casefold() for s in profile.skills}
     for skill in parsed.skills:
         if skill.casefold() not in known:

@@ -20,7 +20,7 @@ from .models import Job, Profile
 # Facts only the candidate can state. Luna never drafts these.
 SENSITIVE_RE = re.compile(
     r"authori[sz]|sponsor|\bvisa\b|citizen|green card|permanent resident|clearance|nationality|"
-    r"gender|\bsex\b|\brace\b|ethnic|hispanic|latin[oa]|veteran|military|disabilit|orientation|transgender|"
+    r"gender|\bsex\b|\brace\b|racial|ethnic|hispanic|latin[oa]|veteran|military|disabilit|orientation|transgender|"
     r"lgbt|pronoun|\bage\b|\b18\b|date of birth|birth ?date|criminal|convict|felony|arrest|"
     r"salary|compensation|pay expectation|desired pay|hourly rate|pay rate|start date|available to start|"
     r"availability|notice period|relocat|commute|in[- ]office|on[- ]?site|hybrid|social security|\bssn\b|"
@@ -293,7 +293,7 @@ BODY: {snippet[:2500]}
 # Every autofilled answer is labeled, stays with its application (never shared
 # or saved to the question bank), and is reviewed by the candidate before
 # Approve & send. Demographic questions are still declined, never guessed.
-DEMOGRAPHIC_RE = re.compile(r"gender|\bsex\b|\brace\b|ethnic|hispanic|latin[oa]|veteran|military status|"
+DEMOGRAPHIC_RE = re.compile(r"gender|\bsex\b|\brace\b|racial|ethnic|hispanic|latin[oa]|veteran|military status|"
                             r"disabilit|sexual orientation|transgender|lgbt", re.I)
 
 

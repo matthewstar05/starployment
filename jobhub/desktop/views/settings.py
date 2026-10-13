@@ -8,7 +8,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QFrame, QLabel, QLineEdit, QScrollArea, QSpinBox, QVBoxLayout, QWidget
 
-from ...config import ASHBY_COMPANIES, GREENHOUSE_COMPANIES, LEVER_COMPANIES, PRIORITY_COMPANIES
+from ...config import ASHBY_COMPANIES, GREENHOUSE_COMPANIES, LEVER_COMPANIES, PRIORITY_COMPANIES, WORKDAY_COMPANIES
 from .. import fonts
 from ..editors import TagEditor
 from ..widgets import DirtyTracker, FormGroup, PageHeader, SegmentedControl, Stepper, ToggleSwitch, button
@@ -37,6 +37,7 @@ class SettingsView(QWidget):
     appearance_changed = Signal(str)
     typeface_changed = Signal(str)
     resume_strategy_changed = Signal(str)
+    passwords_requested = Signal()
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -86,6 +87,32 @@ class SettingsView(QWidget):
         self.connections_anchor = self.luna
         groups.addWidget(self.luna)
         groups.addWidget(self.email)
+
+        security = FormGroup("Security")
+        self.keychain_protection = ToggleSwitch()
+        self.keychain_protection.setAccessibleName("Keychain protection")
+        security.add_row("Keychain protection", self.keychain_protection,
+                         "Keep the mailbox password and API keys in your system Keychain. Off keeps them in a "
+                         "file only your account can read, so updates never stop to ask for Keychain access.")
+        groups.addWidget(security)
+
+        workday = FormGroup("Workday", "Banks, insurers, and asset managers apply through Workday, which needs an "
+                                       "account at each employer.")
+        self.workday_accounts = ToggleSwitch()
+        self.workday_accounts.setAccessibleName("Manage Workday sign-ins")
+        workday.add_row("Manage Workday sign-ins", self.workday_accounts,
+                        "Create each employer's Workday account with your email and a generated password, accept "
+                        "its account terms, and sign in with it later. Passwords you type are saved too. They stay "
+                        "on this Mac, in Keychain when Keychain protection is on.")
+        self.workday_send = ToggleSwitch()
+        self.workday_send.setAccessibleName("Send Workday applications")
+        workday.add_row("Send Workday applications", self.workday_send,
+                        "Approve & send, Send ready, and automatic runs fill each Workday page, save it, and submit. "
+                        "A page asking something you have no saved answer for comes back to you.")
+        passwords = button("Show saved sign-ins", "secondary")
+        passwords.clicked.connect(self.passwords_requested)
+        workday.add_row("Saved sign-ins", passwords, "Showing a password asks for Touch ID.")
+        groups.addWidget(workday)
 
         # Automation -------------------------------------------------------------
         automation = FormGroup("Automation", "Starployment scans while the app is open and the computer is awake.")
@@ -157,27 +184,32 @@ class SettingsView(QWidget):
         # Resume ---------------------------------------------------------------
         resume = FormGroup("Resume")
         self.strategy = SegmentedControl()
-        self.strategy.addItem("Generated", "tailored")
-        self.strategy.addItem("Matched file", "library")
+        self.strategy.addItem("Tailor from profile", "tailored")
+        self.strategy.addItem("Resume bank", "library")
         self.strategy.addItem("Main resume", "original")
         self.strategy.activated.connect(lambda _i: self.resume_strategy_changed.emit(str(self.strategy.currentData())))
         self.max_skills = QSpinBox()
         self.max_skills.setRange(5, 80)
         resume.add_row("Resume to send", self.strategy,
-                       "Generated builds a one-page resume per role from Profile → Resume builder.")
+                       "Choose between generating a tailored resume per role from your profile, or selecting the most relevant untouched resume from your uploaded resume bank.")
         resume.add_row("Skills listed per resume", Stepper(self.max_skills))
         groups.addWidget(resume)
 
         # Sources -------------------------------------------------------------
-        sources = FormGroup("Company job boards", "Public Greenhouse, Lever, and Ashby boards to scan. Use the name "
-                                                  "from the board's web address, e.g. stripe for job-boards.greenhouse.io/stripe.")
+        sources = FormGroup("Company job boards", "Public Greenhouse, Lever, Ashby, and Workday boards to scan. Use the "
+                                                  "name from the board's web address, e.g. stripe for "
+                                                  "job-boards.greenhouse.io/stripe.")
         self.greenhouse = TagEditor("Add a Greenhouse board", GREENHOUSE_COMPANIES)
         self.lever = TagEditor("Add a Lever board", LEVER_COMPANIES)
         self.ashby = TagEditor("Add an Ashby board", ASHBY_COMPANIES)
+        self.workday = TagEditor("Add a Workday board", WORKDAY_COMPANIES)
         self.search_terms = TagEditor("Add a phrase")
         sources.add_row("Greenhouse", self.greenhouse)
         sources.add_row("Lever", self.lever)
         sources.add_row("Ashby", self.ashby)
+        sources.add_row("Workday", self.workday, "Written company.wdN/site, from the careers address: citi.wd5/2 for "
+                                                 "citi.wd5.myworkdayjobs.com/2. See Workday above for "
+                                                 "how these applications are sent.")
         sources.add_row("Job-site searches", self.search_terms, "Phrases used on Indeed, LinkedIn, and Google Jobs.")
         self.discover_boards = ToggleSwitch()
         self.discover_boards.setAccessibleName("Discover more company boards")
@@ -187,10 +219,10 @@ class SettingsView(QWidget):
 
         self.tracker.watch(
             self.auto_apply, self.dry_run, self.interval, self.max_apply, self.min_score, self.luna, self.email,
-            self.parallel_sends, self.show_browser,
+            self.parallel_sends, self.show_browser, self.keychain_protection, self.workday_accounts, self.workday_send,
             self.target_titles, self.locations, self.exclude_words, self.remote_ok, self.include_internships,
             self.min_salary, self.years_experience, self.max_skills, self.greenhouse, self.lever,
-            self.ashby, self.search_terms, self.priority_companies, self.discover_boards,
+            self.ashby, self.workday, self.search_terms, self.priority_companies, self.discover_boards,
         )
 
     # Compatibility aliases for the email fields.
@@ -256,7 +288,14 @@ class SettingsView(QWidget):
             self.min_score.setValue(int(s.get("min_score_to_apply", 60)))
             self.parallel_sends.setValue(int(s.get("parallel_sends", 4)))
             self.show_browser.setChecked(bool(s.get("show_browser", False)))
-            self.strategy.setCurrentIndex(max(0, self.strategy.findData(str(s.get("resume_strategy", "tailored")))))
+            self.keychain_protection.setChecked(bool(s.get("keychain_protection", False)))
+            workday = s.get("workday") or {}
+            self.workday_accounts.setChecked(bool(workday.get("create_accounts", False)))
+            self.workday_send.setChecked(bool(workday.get("send", False)))
+            strat = str(s.get("resume_strategy", "tailored"))
+            if strat == "bank":
+                strat = "library"
+            self.strategy.setCurrentIndex(max(0, self.strategy.findData(strat)))
             builder = s.get("resume_builder") or {}
             self.max_skills.setValue(int(builder.get("max_skills", 28)))
             self.luna.set_values(s)
@@ -272,6 +311,7 @@ class SettingsView(QWidget):
             self.greenhouse.set_values(list(companies.get("greenhouse") or []))
             self.lever.set_values(list(companies.get("lever") or []))
             self.ashby.set_values(list(companies.get("ashby") or []))
+            self.workday.set_values(list(companies.get("workday") or []))
             self.search_terms.set_values(list((s.get("jobspy") or {}).get("search_terms") or []))
             self.priority_companies.set_values(list(s.get("priority_companies") or []))
             self.discover_boards.setChecked(bool(s.get("discover_boards", True)))
@@ -289,6 +329,8 @@ class SettingsView(QWidget):
             "min_score_to_apply": float(self.min_score.value()),
             "parallel_sends": self.parallel_sends.value(),
             "show_browser": self.show_browser.isChecked(),
+            "keychain_protection": self.keychain_protection.isChecked(),
+            "workday": {"create_accounts": self.workday_accounts.isChecked(), "send": self.workday_send.isChecked()},
             "resume_strategy": self.strategy.currentData(),
             "resume_builder": {"one_page": True, "max_skills": self.max_skills.value(),
                                **luna.pop("resume_builder")},
@@ -302,7 +344,7 @@ class SettingsView(QWidget):
             "min_salary": self.min_salary.value(),
             "years_experience": float(self.years_experience.value()),
             "companies": {"greenhouse": self.greenhouse.values(), "lever": self.lever.values(),
-                          "ashby": self.ashby.values()},
+                          "ashby": self.ashby.values(), "workday": self.workday.values()},
             "jobspy": {"search_terms": self.search_terms.values()[:20]},
             "priority_companies": self.priority_companies.values(),
             "discover_boards": self.discover_boards.isChecked(),

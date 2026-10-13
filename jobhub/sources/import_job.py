@@ -35,19 +35,64 @@ _HOSTS = {
     "jobs.lever.co": "lever",
     "jobs.eu.lever.co": "lever-eu",
     "jobs.ashbyhq.com": "ashby",
+    "grnh.se": "greenhouse",
+    "apply.workable.com": "workable",
+    "ats.rippling.com": "rippling",
 }
 _SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # Ashby board names are organization names and may contain spaces ("Superhuman Platform Inc").
 _ASHBY_SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,127}$")
 
 
-def parse_job_url(url: str) -> ParsedJobURL:
+def parse_job_url(url: str, *, _redirects: int = 0) -> ParsedJobURL:
     if not isinstance(url, str) or not url.strip():
         raise JobImportError("A public job URL is required")
+    from urllib.parse import parse_qs
+    from .base import _greenhouse_board_for
+
     parts = urlsplit(url.strip())
     if parts.scheme.lower() != "https" or parts.username or parts.password or parts.port:
         raise JobImportError("Only HTTPS public job-board URLs are supported")
     host = (parts.hostname or "").lower().rstrip(".")
+
+    # Follow grnh.se shortlink redirects
+    if host == "grnh.se":
+        if _redirects >= 4:
+            raise JobImportError("Could not resolve shortlink: redirect loop")
+        try:
+            with client(timeout=10.0, follow_redirects=True) as http:
+                response = http.get(url.strip())
+                final_url = str(response.url)
+        except Exception as exc:
+            raise JobImportError(f"Could not resolve shortlink: {exc}") from exc
+        return parse_job_url(final_url, _redirects=_redirects + 1)
+
+    # Handle boards.greenhouse.io/embed/job_app URLs
+    if host in ("boards.greenhouse.io", "job-boards.greenhouse.io") and "/embed/job_app" in parts.path:
+        qs = parse_qs(parts.query)
+        token = (qs.get("token") or qs.get("gh_jid") or [""])[0].strip()
+        for_slug = (qs.get("for") or [""])[0].strip()
+        if for_slug:
+            slug = for_slug
+            posting_id = token
+        elif token:
+            slug = _greenhouse_board_for(token) or ""
+            posting_id = token
+        else:
+            slug, posting_id = "", ""
+        if slug and posting_id and _SEGMENT.match(slug) and _SEGMENT.match(posting_id):
+            return ParsedJobURL("greenhouse", slug, posting_id)
+        raise JobImportError("Could not resolve embedded Greenhouse job application")
+
+    # Handle arbitrary career sites with ?gh_jid=
+    if host not in _HOSTS and parts.query:
+        qs = parse_qs(parts.query)
+        gh_jid = (qs.get("gh_jid") or [""])[0].strip()
+        if gh_jid and gh_jid.isdigit():
+            slug = _greenhouse_board_for(gh_jid)
+            if slug and _SEGMENT.match(slug):
+                return ParsedJobURL("greenhouse", slug, gh_jid)
+
     ats = _HOSTS.get(host)
     if not ats:
         raise JobImportError("Unsupported job-board host")
@@ -57,7 +102,11 @@ def parse_job_url(url: str) -> ParsedJobURL:
     if "%2f" in parts.path.lower() or "%5c" in parts.path.lower():
         raise JobImportError("Invalid job-board path")
     segments = [segment for segment in path.split("/") if segment]
-    if ats == "greenhouse":
+    if ats in ("workable", "rippling"):
+        marker = "j" if ats == "workable" else "jobs"
+        valid = len(segments) in (3, 4) and segments[1] == marker and (len(segments) == 3 or segments[3] == "apply")
+        slug, posting_id = (segments[0], segments[2]) if valid else ("", "")
+    elif ats == "greenhouse":
         valid = len(segments) == 3 and segments[1].lower() == "jobs"
         slug, posting_id = (segments[0], segments[2]) if valid else ("", "")
     else:
@@ -80,6 +129,12 @@ def _get_payload(parsed: ParsedJobURL) -> dict:
         api_host = "api.eu.lever.co" if parsed.ats == "lever-eu" else "api.lever.co"
         endpoint = f"https://{api_host}/v0/postings/{slug}/{posting_id}"
         params = {"mode": "json"}
+    elif parsed.ats == "workable":
+        endpoint = f"https://apply.workable.com/api/v2/accounts/{slug}/jobs/{posting_id}"
+        params = {}
+    elif parsed.ats == "rippling":
+        endpoint = f"https://ats.rippling.com/api/v1/board/{slug}/jobs/{posting_id}"
+        params = {}
     else:
         # Ashby's public board endpoint returns the board's listed postings.
         # Matching locally avoids guessing an undocumented per-posting URL.
@@ -101,6 +156,35 @@ def _get_payload(parsed: ParsedJobURL) -> dict:
 
 
 def _job_from_payload(parsed: ParsedJobURL, payload: dict, requested_url: str) -> Job:
+    if parsed.ats in ("workable", "rippling"):
+        expected = str(payload.get("shortcode" if parsed.ats == "workable" else "uuid") or "")
+        if expected.casefold() != parsed.posting_id.casefold():
+            raise JobImportError("Public posting no longer matches the requested vacancy")
+        if parsed.ats == "workable":
+            if payload.get("state") != "published":
+                raise JobImportError("Public posting is no longer published")
+            location = payload.get("location") or {}
+            loc = ", ".join(str(location[k]) for k in ("city", "region", "country") if location.get(k))
+            desc = strip_html("\n".join(str(payload.get(k) or "") for k in ("description", "requirements", "benefits")))
+            title = payload.get("title") or ""
+            published = payload.get("published")
+            remote = bool(payload.get("remote"))
+            company = parsed.slug.replace("-", " ").title()
+            url = f"https://apply.workable.com/{parsed.slug}/j/{parsed.posting_id}/"
+        else:
+            desc = payload.get("description") or {}
+            desc = strip_html("\n".join(str(v) for v in desc.values())) if isinstance(desc, dict) else strip_html(str(desc))
+            loc = "; ".join(str(v) for v in payload.get("workLocations") or [])
+            title = payload.get("name") or ""
+            published = payload.get("createdOn")
+            remote = "remote" in loc.casefold()
+            company = payload.get("companyName") or parsed.slug.replace("-", " ").title()
+            url = f"https://ats.rippling.com/{parsed.slug}/jobs/{parsed.posting_id}"
+        salary_min, salary_max = parse_salary(desc)
+        return Job(source=parsed.ats, ats=parsed.ats, company=company, title=title, location=loc,
+                   remote=remote, salary_min=salary_min, salary_max=salary_max, url=url, apply_url=url,
+                   description=desc[:15000], posted_at=published,
+                   raw={"slug": parsed.slug, f"{parsed.ats}_id": parsed.posting_id})
     if parsed.ats == "greenhouse":
         title = payload.get("title", "")
         desc = strip_html(payload.get("content", ""))

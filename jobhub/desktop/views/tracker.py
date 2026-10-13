@@ -28,10 +28,11 @@ from PySide6.QtWidgets import (
 )
 
 from ..delegates import SCORE_ROLE, STATUS_ROLE, SUBTITLE_ROLE, GlassTable, RoleDelegate, ScoreDelegate, StatusDelegate, TextDelegate
-from ..format import (ACTIVE_STAGES, CLOSED_STAGES, STAGE_ORDER, compact_money, local_time, plural, relative_time,
-                      salary, status_label, tracker_stats)
+from ..format import (ACTIVE_STAGES, CLOSED_STAGES, STAGE_ORDER, compact_money, local_time, parse_time, plural,
+                      priority_rank, relative_time, salary, status_label, tracker_stats)
 from ..native_glass import prepare_window
-from ..widgets import EmptyState, FormGroup, GlassPanel, PageHeader, SearchField, SegmentedControl, button, label, paint_backdrop
+from ..widgets import (ChoiceButton, EmptyState, FormGroup, GlassPanel, PageHeader, SearchField, SegmentedControl,
+                       ToggleSwitch, button, label, paint_backdrop)
 
 SORT_ROLE = int(Qt.ItemDataRole.UserRole) + 40
 ID_ROLE = int(Qt.ItemDataRole.UserRole) + 41
@@ -154,6 +155,10 @@ class TrackerView(QWidget):
     HEADERS = ("ROLE", "LOCATION", "SALARY", "APPLIED", "STAGE", "UPDATED", "SOURCE", "MATCH", "NOTE")
     FILTERS = (("All", "all"), ("Active", "active"), ("Assessment", "assessment"), ("Interview", "interview"),
                ("Offer", "offer"), ("Closed", "closed"))
+    # Sort menu choices: (label, value, column, order). Column headers still sort too.
+    SORTS = (("Newest applied", "applied", APPLIED, Qt.SortOrder.DescendingOrder),
+             ("Priority", "priority", STAGE, Qt.SortOrder.AscendingOrder),
+             ("Recently updated", "updated", UPDATED, Qt.SortOrder.DescendingOrder))
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -207,6 +212,22 @@ class TrackerView(QWidget):
         card_layout = QVBoxLayout(card)
         card_layout.setContentsMargins(8, 6, 8, 8)
         card_layout.setSpacing(4)
+        table_head = QHBoxLayout()
+        table_head.setContentsMargins(10, 2, 2, 0)
+        table_head.setSpacing(10)
+        self.shown = label("", "caption", wrap=False)
+        table_head.addWidget(self.shown)
+        table_head.addStretch(1)
+        self.hide_rejected = ToggleSwitch("Hide rejections")
+        self.hide_rejected.setToolTip("Leave out applications the employer rejected")
+        self.hide_rejected.toggled.connect(self._apply_filter)
+        table_head.addWidget(self.hide_rejected)
+        self.sort = ChoiceButton("sort", "Sort")
+        for text, value, _column, _order in self.SORTS:
+            self.sort.add_option(text, value)
+        self.sort.changed.connect(self._sort_chosen)
+        table_head.addWidget(self.sort)
+        card_layout.addLayout(table_head)
         self.table = GlassTable(0, len(self.HEADERS))
         self.table.setObjectName("glassTable")
         self.table.setAccessibleName("Application tracker")
@@ -229,6 +250,7 @@ class TrackerView(QWidget):
         self.table.verticalHeader().setDefaultSectionSize(52)
         self.table.setSortingEnabled(True)
         self.table.sortItems(self.APPLIED, Qt.SortOrder.DescendingOrder)
+        header.sortIndicatorChanged.connect(self._sort_indicator_changed)
         self.table.cellClicked.connect(self._cell_clicked)
         self.table.cellDoubleClicked.connect(self._cell_double_clicked)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -313,7 +335,10 @@ class TrackerView(QWidget):
         applied.setToolTip(local_time(applied_at))
         stage_item = SortItem(status_label(stage))
         stage_item.setData(STATUS_ROLE, stage)
-        stage_item.setData(SORT_ROLE, STAGE_ORDER.index(stage) if stage in STAGE_ORDER else 0)
+        # Priority order: offers, interviews, assessments, waiting, withdrawn, rejected; newest update first within each
+        when = parse_time(updated_at)
+        rank = priority_rank({"kind": "application", "status": "applied", "stage": stage})
+        stage_item.setData(SORT_ROLE, rank * 1e10 - (when.timestamp() if when else 0.0))
         stage_item.setToolTip("Click to change the stage" + (" · updated from your inbox" if record.get("stage_source") == "email" else ""))
         updated = SortItem(relative_time(updated_at) if updated_at else "—")
         updated.setData(SORT_ROLE, updated_at)
@@ -356,9 +381,11 @@ class TrackerView(QWidget):
             text += " " + str(self.table.item(row, self.ROLE).data(SUBTITLE_ROLE) or "")
             stage_ok = (wanted == "all" or (wanted == "active" and stage in ACTIVE_STAGES)
                         or (wanted == "closed" and stage in CLOSED_STAGES) or stage == wanted)
-            hidden = not stage_ok or bool(query and query not in text.casefold())
+            hidden = (not stage_ok or bool(query and query not in text.casefold())
+                      or (stage == "rejected" and self.hide_rejected.isChecked()))
             self.table.setRowHidden(row, hidden)
             visible += not hidden
+        self.shown.setText(plural(visible, "application") + (" shown" if visible < len(self.rows) else ""))
         if not visible:
             if self.rows:
                 self.empty.set_text("No matches", "Nothing in the Tracker matches this filter.")
@@ -366,6 +393,17 @@ class TrackerView(QWidget):
                 self.empty.set_text("Nothing sent yet", "Applications appear here once they are submitted. "
                                                         "Add ones you sent elsewhere with Add.")
         self.body.setCurrentWidget(self.table if visible else self.empty)
+
+    def _sort_chosen(self, value) -> None:
+        for _text, option, column_index, order in self.SORTS:
+            if option == value:
+                self.table.sortItems(column_index, order)
+
+    def _sort_indicator_changed(self, column_index: int, order) -> None:
+        """Keep the Sort menu in step with header clicks."""
+        for _text, option, sort_column, sort_order in self.SORTS:
+            if sort_column == column_index and sort_order == order:
+                self.sort.set_value(option)
 
     def _selected_id(self):
         row = self.table.currentRow()

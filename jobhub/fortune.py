@@ -1146,6 +1146,12 @@ def _build_rank_map() -> tuple[dict[str, int], list[tuple[str, int]]]:
 
 def fortune_rank(company: str) -> int | None:
     """Return the 1-based rank (1..1000) of a company, or None if not found."""
+    return _rank_of(str(company or ""))
+
+
+@lru_cache(maxsize=16384)
+def _rank_of(company: str) -> int | None:
+    # Cached: a miss scans the whole list three times, and tables and SQL filters ask per row.
     from .priority import normalize_company
 
     name = normalize_company(company)

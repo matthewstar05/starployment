@@ -56,3 +56,28 @@ def test_careers_page_links_are_pointed_at_their_greenhouse_board(monkeypatch):
     again = careers("SeatGeek", "https://seatgeek.com/jobs/8247550?gh_jid=8247550")
     assert base.resolve_hosted_greenhouse([again, careers("Gone", "https://example.test/careers?gh_jid=999")]) == 1
     assert len(FakeClient.calls) == asked
+
+
+def test_resolve_hosted_greenhouse_handles_embed_and_grnh_se(monkeypatch):
+    class FakeResolverClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def get(self, url):
+            if "grnh.se" in url:
+                return type("R", (), {"url": "https://job-boards.greenhouse.io/doordash/jobs/8264542"})()
+            return type("R", (), {"url": url, "status_code": 404})()
+
+    monkeypatch.setattr(base, "client", FakeResolverClient)
+    embed_with_for = careers("Gemini", "https://boards.greenhouse.io/embed/job_app?for=gemini&token=7951195")
+    shortlink = careers("DoorDash", "https://grnh.se/ltx0agxi1us")
+
+    assert base.resolve_hosted_greenhouse([embed_with_for, shortlink]) == 2
+    assert (embed_with_for.ats, embed_with_for.apply_url) == ("greenhouse", "https://job-boards.greenhouse.io/gemini/jobs/7951195")
+    assert (shortlink.ats, shortlink.apply_url) == ("greenhouse", "https://job-boards.greenhouse.io/doordash/jobs/8264542")

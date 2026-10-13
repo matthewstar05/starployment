@@ -29,13 +29,17 @@ class Adapter:
         r"(?:successfully submitted (?:your |an )?application)|your application is in", re.I))
     form_ready_selector: str = "input[type=file], form"
     settle_ms: int = 1800
+    # Filled only in a visible window the candidate signs in to; never sent unattended.
+    assist_only: bool = False
 
 
 def _with_suffix(url: str, suffix: str) -> str:
     parts = urlsplit(url)
     path = parts.path.rstrip("/")
-    if not path.endswith(suffix):
+    if not path.endswith(suffix.rstrip("/")):
         path += suffix
+    elif suffix.endswith("/"):
+        path += "/"
     return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
 
 
@@ -43,7 +47,7 @@ def adapter_for(job: Job) -> Adapter | None:
     """Use the actual URL host, never an untrusted substring or source hint.
 
     Company-owned pages and other ATSs can still be discovered and ranked, but
-    automatic submission is limited to the three implementations below.
+    automatic submission is limited to the implementations below.
     """
     url = job.apply_url or job.url
     try:
@@ -64,4 +68,17 @@ def adapter_for(job: Job) -> Adapter | None:
         return Adapter("lever", _with_suffix(url, "/apply"),
                        submit_selectors=["#btn-submit", "button[type=submit]:visible"],
                        form_ready_selector="input[name=name], input[type=file]")
+    if host == "apply.workable.com" and re.fullmatch(r"/[^/]+/j/[A-Za-z0-9]+(?:/apply)?/?", parsed.path):
+        return Adapter(
+            name="workable",
+            apply_url=_with_suffix(url, "/apply/"),
+            submit_selectors=["button:has-text('Submit application')", "button[type=submit]"],
+            form_ready_selector="input#firstname, input[name=firstname], input[type=file], form",
+        )
+    if host.endswith(".myworkdayjobs.com") and host.count(".") == 3 and "/job/" in parsed.path:
+        return Adapter("workday", url, assist_only=True, settle_ms=1500)
+    if host == "ats.rippling.com" and re.fullmatch(r"/[^/]+/jobs/[0-9a-fA-F-]{36}(?:/apply)?/?", parsed.path):
+        return Adapter("rippling", _with_suffix(url, "/apply"),
+                       submit_selectors=["button[type=submit]:has-text('Apply')"],
+                       form_ready_selector="input[type=file], input[autocomplete=given-name], form")
     return None

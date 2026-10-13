@@ -18,12 +18,14 @@ each one waits for its own Approve & send.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLineEdit,
@@ -39,14 +41,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ...answers import missing_answer
+from ...answers import needs_attention
+from ...prepare import CORRECTIONS_RE, bulk_send_candidates, refused
 from ...fortune import fortune_rank
 from ...models import posted_epoch
 from ...priority import held_from_bulk_send, is_starred
 from ..delegates import RECORD_ROLE, SEARCH_ROLE, SUBTITLE_ROLE, ApplicationDelegate
 from ..editors import FlowLayout, _AutoText
-from ..format import (local_time, parse_time, plural, posted_label, pretty_log_line, relative_time,
-                      retryable_job_ids, salary, status_label)
+from ..format import (display_status, email_link, local_time, parse_time, plural, posted_label, pretty_log_line,
+                      priority_rank, relative_time, retryable_job_ids, salary, status_label)
 from ..widgets import (
     ChoiceButton,
     EmptyState,
@@ -67,7 +70,7 @@ SOURCE_TEXT = {"saved": "Saved answer", "profile": "From your profile", "resume"
                "declined": "Declined", "file": "Attached automatically"}
 FILTERS = (("All", "all"), ("Starred", "starred"), ("To review", "review"), ("Approved", "approved"),
            ("Sent", "sent"), ("Issues", "issues"))
-SORTS = (("Recent activity", "recent"), ("Newest posted", "posted"), ("Best match", "match"),
+SORTS = (("Recent activity", "recent"), ("Priority", "priority"), ("Newest posted", "posted"), ("Best match", "match"),
          ("Company A–Z", "company"), ("Status", "status"))
 BUCKET_ORDER = {"review": 0, "approved": 1, "issues": 2, "sent": 3}
 OPEN_DRAFT = {"preparing", "ready", "needs_answers", "approved", "sending", "practice", "error"}
@@ -81,6 +84,12 @@ def activity_time(record: dict) -> float:
         value = record.get("finished_at") or record.get("started_at")
     when = parse_time(value)
     return when.timestamp() if when else 0.0
+
+
+def finishable(record: dict) -> bool:
+    """An unconfirmed engine submission the candidate can finish in a visible browser window."""
+    return (record.get("status") == "needs_human" and bool(record.get("submission_attempted"))
+            and record.get("method") != "manual" and not refused(record))
 
 
 def latest_attempts(applications: list[dict]) -> list[dict]:
@@ -112,6 +121,9 @@ def sort_records(records: list[dict], key: str) -> list[dict]:
         return sorted(records, key=lambda r: (str(r.get("company") or "").casefold(), -activity_time(r)))
     if key == "status":
         return sorted(records, key=lambda r: (BUCKET_ORDER.get(bucket(r), 9), -activity_time(r)))
+    if key == "priority":
+        # Offers, interviews, and assessments first; rejections last.
+        return sorted(records, key=lambda r: (priority_rank(r), -activity_time(r)))
     return sorted(records, key=lambda r: -activity_time(r))
 
 
@@ -122,6 +134,43 @@ def bucket(record: dict) -> str:
     if status == "applied" or record.get("submission_attempted"):
         return "sent"
     return "issues"
+
+
+class FilePicker(QWidget):
+    """Choose a local file for an upload question (a transcript, a portfolio PDF)."""
+
+    def __init__(self, path: str, required: bool, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("formRow")
+        self.path = path if path and Path(path).is_file() else ""
+        self.required = required
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        self.name = label("", "rowNote")
+        row.addWidget(self.name, 1)
+        self.choose = button("Choose file…", "secondary", icon="file-up")
+        self.choose.clicked.connect(self._choose)
+        row.addWidget(self.choose, 0)
+        self.clear = button("Clear", "quiet")
+        self.clear.clicked.connect(lambda: self._set(""))
+        row.addWidget(self.clear, 0)
+        self._set(self.path)
+
+    def _choose(self) -> None:
+        start = str(Path(self.path).parent) if self.path else str(Path.home())
+        path, _ = QFileDialog.getOpenFileName(self, "Choose a file to attach", start,
+                                              "Documents (*.pdf *.doc *.docx *.txt *.rtf *.png *.jpg *.jpeg);;All files (*)")
+        if path:
+            self._set(path)
+
+    def _set(self, path: str) -> None:
+        self.path = path
+        self.name.setText(Path(path).name if path else (
+            "Choose a file to attach, or apply on the employer's site and choose Mark as sent."
+            if self.required else "Optional: no file chosen, so this upload stays empty."))
+        self.name.setToolTip(path)
+        self.clear.setVisible(bool(path))
 
 
 class QuestionRow(QWidget):
@@ -148,7 +197,9 @@ class QuestionRow(QWidget):
         column.addLayout(top)
         self.editor = self._editor(question)
         column.addWidget(self.editor)
-        if question.get("note") and source == "luna":
+        if question.get("rejected") and question.get("note"):
+            column.addWidget(label(str(question["note"]), "questions"))
+        elif question.get("note") and source == "luna":
             column.addWidget(label("Luna used: " + str(question["note"]), "lunaNote"))
         elif question.get("note") and source == "autofill":
             column.addWidget(label(str(question["note"]), "lunaNote"))
@@ -163,9 +214,7 @@ class QuestionRow(QWidget):
                 attached = ("A cover letter written from your resume is attached." if re.search(r"cover", question["label"], re.I)
                             else "Your resume for this role is attached.")
                 return label(attached, "rowNote")
-            return label("Starployment can't attach this file. Apply on the employer's site, then right-click "
-                         "the application and choose Mark as sent." if question.get("required") else
-                         "Optional: Starployment leaves this upload empty.", "rowNote")
+            return FilePicker(str(value or "") if question.get("source") == "you" else "", bool(question.get("required")))
         if kind == "checkbox" and options:
             chosen = {str(v).casefold() for v in (value if isinstance(value, list) else [])}
             holder = QWidget()
@@ -200,6 +249,8 @@ class QuestionRow(QWidget):
 
     def value(self):
         editor = self.editor
+        if isinstance(editor, FilePicker):
+            return editor.path
         if hasattr(editor, "boxes"):
             return [box.text() for box in editor.boxes if box.isChecked()]
         if isinstance(editor, ToggleSwitch):
@@ -225,6 +276,7 @@ class DraftDetail(QWidget):
     """Review panel for a prepared application."""
 
     approve_requested = Signal(int, dict)
+    browser_requested = Signal(int, dict)
     save_requested = Signal(int, dict)
     luna_requested = Signal(int)
     remove_requested = Signal(int)
@@ -241,6 +293,7 @@ class DraftDetail(QWidget):
         self._show_all = False
         self._practice = False
         self._luna_connected = False
+        self._workday_send = False   # Settings → Workday → Send Workday applications
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea()
@@ -287,6 +340,11 @@ class DraftDetail(QWidget):
         self.approve = button("Approve & send", icon="applications")
         self.approve.setToolTip("Approve every answer shown and send this application")
         self.approve.clicked.connect(self._approve)
+        self.browser = button("Finish in browser", "secondary", icon="external")
+        self.browser.setToolTip("Open this application in a browser window, filled as far as Starployment can. "
+                                "You finish anything left (a CAPTCHA, a code, a field) and press Submit yourself.")
+        self.browser.clicked.connect(
+            lambda: self.draft and self.browser_requested.emit(int(self.draft["id"]), self.edits()))
         self.save = button("Save answers", "secondary")
         self.save.clicked.connect(self._save)
         self.luna = button("AI Autofill", "secondary", icon="luna")
@@ -304,7 +362,8 @@ class DraftDetail(QWidget):
         self.remove.clicked.connect(self._remove)
         self.star = button("Star", "quiet", icon="star")
         self.star.clicked.connect(self._toggle_star)
-        for widget in (self.approve, self.luna, self.save, self.star, self.resume, self.posting, self.remove):
+        for widget in (self.approve, self.browser, self.luna, self.save, self.star, self.resume, self.posting,
+                       self.remove):
             actions.addWidget(widget)
         column.addWidget(actions_holder)
 
@@ -326,8 +385,10 @@ class DraftDetail(QWidget):
         column.addStretch(1)
 
     # -------------------------------------------------------------- data
-    def set_context(self, *, practice: bool, luna_connected: bool, priority: list[str] | None = None) -> None:
+    def set_context(self, *, practice: bool, luna_connected: bool, priority: list[str] | None = None,
+                    workday_send: bool = False) -> None:
         self._practice, self._luna_connected = practice, luna_connected
+        self._workday_send = workday_send   # applies the next time a draft is shown
         if priority is not None:
             self.priority = list(priority)
         if self.draft is not None:
@@ -351,9 +412,10 @@ class DraftDetail(QWidget):
         self.monogram.set_text(company)
         self.status.set_status(status, status_label(status))
         questions = list(draft.get("questions") or [])
-        missing = [q for q in questions if missing_answer(q)]
+        missing = [q for q in questions if needs_attention(q)]
         luna = [q for q in questions if q.get("source") in ("luna", "autofill") and not q.get("approved")]
-        source = {"greenhouse_form": "Greenhouse", "lever_form": "Lever", "ashby_form": "Ashby"}.get(
+        source = {"greenhouse_form": "Greenhouse", "lever_form": "Lever", "ashby_form": "Ashby",
+                  "workable_form": "Workable", "rippling_form": "Rippling"}.get(
             str(draft.get("question_source") or ""), "")
         meta = [f"Match {float(draft.get('score') or 0):.0f}"]
         if draft.get("posted_at"):
@@ -375,7 +437,7 @@ class DraftDetail(QWidget):
             text = "Practice run finished. Nothing was submitted. Review, then send when practice mode is off."
         elif missing:
             names = "; ".join(str(q["label"])[:60] for q in missing[:3]) + (" and more" if len(missing) > 3 else "")
-            text = (f"{plural(len(missing), 'required question')} need{'s' if len(missing) == 1 else ''} your answer "
+            text = (f"{plural(len(missing), 'question')} need{'s' if len(missing) == 1 else ''} your answer "
                     f"before sending: {names}" + (f" · Last attempt: {draft['error']}" if draft.get("error") else "") + ".")
         elif luna:
             text = (f"{plural(len(luna), 'answer')} came from Luna or AI Autofill, including any labeled assumptions. "
@@ -384,11 +446,21 @@ class DraftDetail(QWidget):
             text = "Every known question has an answer from your saved facts. Approve & send when ready."
         else:
             text = "The form's questions are checked when sending. Saved answers fill what they can; anything else comes back here."
+        workday = draft.get("ats") == "workday" and not self._workday_send
+        if draft.get("ats") == "workday" and status in ("ready", "needs_answers", "approved", "practice", "error"):
+            text = ("Workday application · Approve & send signs in to the employer's Workday, fills each page from "
+                    "your saved answers, and submits. A question you have no saved answer for comes back here; "
+                    "Finish in browser lets you answer it." if self._workday_send else
+                    "Workday application · Choose Finish in browser. Starployment signs in for you when Manage "
+                    "Workday sign-ins is on, fills each page from your saved answers; you check it, press Save "
+                    "and Continue, and press Submit.")
         self.next_step.setText(text)
         self.practice_note.setVisible(self._practice)
         sendable = status in ("ready", "needs_answers", "approved", "practice", "error")
-        self.approve.setEnabled(sendable)
+        self.approve.setEnabled(sendable and not workday)
+        self.approve.setVisible(not workday)
         self.approve.setText("Send now" if status == "approved" else "Approve & send")
+        self.browser.setEnabled(sendable)
         self.save.setEnabled(sendable)
         self.luna.setEnabled(status in ("ready", "needs_answers", "practice", "error"))
         self.luna.setToolTip("Fill every open question with a realistic answer from your profile. Assumptions are "
@@ -432,7 +504,7 @@ class DraftDetail(QWidget):
         shown = questions if self._show_all else [q for q in questions if q not in routine]
         # What still needs you comes first, then Luna's drafts to check, then the rest.
         def priority(q):
-            if missing_answer(q):
+            if needs_attention(q):
                 return 0
             if q.get("answer") in (None, "", []) and q.get("kind") != "file":
                 return 2
@@ -504,6 +576,8 @@ class ApplicationsView(QWidget):
     prepare_requested = Signal(str)
     autofill_all_requested = Signal()
     reopen_requested = Signal(int)
+    browser_draft_requested = Signal(int, dict)
+    browser_attempt_requested = Signal(int)
     star_requested = Signal(str, bool)
     mark_sent_requested = Signal(str)
     hide_requested = Signal(int)
@@ -514,13 +588,17 @@ class ApplicationsView(QWidget):
         self.setObjectName("applicationWorkspace")
         self.applications: list[dict] = []
         self.drafts: list[dict] = []
+        self._sending_ids: set[int] = set()
         self.records: list[dict] = []
         self.priority: list[str] = []
+        self.mailbox: dict = {}   # the inbox the Tracker reads, to open a stage's email
+        self.workday_send = False   # Send ready includes Workday drafts (Settings → Workday)
         self.selected_application: dict | None = None
         self._questions: list[str] = []
         self._signature: object = None
         self._loading_note = False
         self._note_dirty = False
+        self._selecting_row = False
         self._continuable_ids: set[object] = set()
 
         column = QVBoxLayout(self)
@@ -534,8 +612,8 @@ class ApplicationsView(QWidget):
         self.autofill_all_button.setToolTip("Run AI Autofill on every prepared application that still has open questions")
         self.autofill_all_button.clicked.connect(self.autofill_all_requested)
         self.send_all_button = button("Send ready", icon="applications")
-        self.send_all_button.setToolTip("Approve and send every application that is ready. "
-                                        "Starred applications are left for you to send one by one.")
+        self.send_all_button.setToolTip("Approve and send ready applications eligible for bulk sending. "
+                                        "Starred applications wait for individual approval; Workday uses Finish in browser.")
         self.send_all_button.setEnabled(False)
         self.send_all_button.clicked.connect(self.send_approved_requested)
         self.header.add_action(self.reset_button)
@@ -551,6 +629,11 @@ class ApplicationsView(QWidget):
         self.search.textChanged.connect(self._rebuild_list)
         toolbar.addWidget(self.search, 1)
         toolbar.addStretch(0)
+        self.hide_rejected = ToggleSwitch("Hide rejections")
+        self.hide_rejected.setToolTip("Leave out applications the employer rejected")
+        self.hide_rejected.toggled.connect(self._rebuild_list)
+        self.hide_rejected.setMinimumWidth(self.hide_rejected.sizeHint().width())   # the search field gives way first
+        toolbar.addWidget(self.hide_rejected)
         self.filter = SegmentedControl(compact=True)
         for text, value in FILTERS:
             self.filter.addItem(text, value)
@@ -589,6 +672,7 @@ class ApplicationsView(QWidget):
         self.list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.list.currentRowChanged.connect(self._select_row)
+        self.list.itemDoubleClicked.connect(self._open_email_for_item)
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self._context_menu)
         self.empty = EmptyState("applications", "No applications yet",
@@ -608,6 +692,7 @@ class ApplicationsView(QWidget):
         self.attempt_page = self._build_attempt_detail()
         self.draft_detail = DraftDetail()
         self.draft_detail.approve_requested.connect(self.approve_send_requested)
+        self.draft_detail.browser_requested.connect(self.browser_draft_requested)
         self.draft_detail.save_requested.connect(self.save_draft_requested)
         self.draft_detail.luna_requested.connect(self.luna_requested)
         self.draft_detail.remove_requested.connect(self._confirm_remove)
@@ -681,7 +766,18 @@ class ApplicationsView(QWidget):
                                       "Prepare it again to answer and send it.")
         self.reopen_button.clicked.connect(
             lambda: self.selected_application and self.reopen_requested.emit(int(self.selected_application["id"])))
+        self.browser_button = button("Finish in browser", icon="external")
+        self.browser_button.setToolTip("Open this application in a browser window, filled as far as Starployment can. "
+                                       "You solve the check or enter the code, then press Submit yourself.")
+        self.browser_button.clicked.connect(
+            lambda: self.selected_application and self.browser_attempt_requested.emit(int(self.selected_application["id"])))
+        self.email_button = button("Open email", "secondary", icon="mail")
+        self.email_button.setToolTip("Open the email about this stage (an assessment, an interview)")
+        self.email_button.clicked.connect(
+            lambda: self.selected_application and self._open_email(self.selected_application))
         actions.addWidget(self.reopen_button)
+        actions.addWidget(self.email_button)
+        actions.addWidget(self.browser_button)
         actions.addWidget(self.answer_button)
         actions.addWidget(self.posting_button)
         actions.addWidget(self.resume_button)
@@ -726,9 +822,31 @@ class ApplicationsView(QWidget):
         return page
 
     # ------------------------------------------------------------------ data
+    def set_sending(self, draft_ids: set[int]) -> None:
+        self._sending_ids = set(draft_ids)
+        self._update_send_ready()
+
+    def _update_send_ready(self) -> None:
+        candidates, _held = bulk_send_candidates(
+            [d for d in self.drafts if d.get("id") not in self._sending_ids], self.priority,
+            {"workday": {"send": self.workday_send}})
+        count = len(candidates)
+        self.send_all_button.setText(f"Send ready ({count})" if count else "Send ready")
+        self.send_all_button.setEnabled(bool(count))
+
     def set_context(self, *, practice: bool = False, luna_connected: bool = False,
-                    priority: list[str] | None = None) -> None:
-        self.draft_detail.set_context(practice=practice, luna_connected=luna_connected, priority=priority)
+                    priority: list[str] | None = None, mailbox: dict | None = None,
+                    workday_send: bool = False) -> None:
+        self.draft_detail.set_context(practice=practice, luna_connected=luna_connected, priority=priority,
+                                      workday_send=workday_send)
+        if workday_send != self.workday_send:
+            self.workday_send = workday_send
+            self._update_send_ready()
+        if mailbox is not None and mailbox != self.mailbox:
+            self.mailbox = dict(mailbox)
+            self._signature = None
+            if self.applications or self.drafts:
+                self.set_applications(self.applications, self.drafts)
         if priority is not None and list(priority) != self.priority:
             self.priority = list(priority)
             self._signature = None
@@ -742,10 +860,11 @@ class ApplicationsView(QWidget):
              tuple(a.get("unanswered") or ()), len(a.get("log") or ()), a.get("submission_attempted"),
              a.get("job_id"), a.get("canonical_key"), a.get("title"), a.get("company"),
              a.get("url"), a.get("location"), a.get("resume_path"), a.get("hidden"), a.get("starred"),
-             a.get("posted_at"), a.get("score"))
+             a.get("posted_at"), a.get("score"), a.get("stage"), a.get("stage_mail_message_id"),
+             a.get("stage_mail_subject"))
             for a in applications
         ), tuple((d.get("id"), d.get("status"), d.get("updated_at"), d.get("score"), d.get("starred"),
-                  d.get("posted_at")) for d in drafts))
+                  d.get("posted_at"), d.get("ats"), d.get("company")) for d in drafts))
         if signature == self._signature:
             return
         self._signature = signature
@@ -764,16 +883,15 @@ class ApplicationsView(QWidget):
                     if a.get("job_id") not in open_jobs]
         for record in records:
             record["_starred"] = is_starred(record, self.priority)
+            record["_display_status"] = display_status(record)
+            record["_email"] = email_link(record, self.mailbox)
         self.records = records
         approved = sum(1 for d in self.drafts if d.get("status") == "approved")
-        # Starred applications are sent one by one, never by Send ready.
-        sendable = sum(1 for d in records if d['kind'] == 'draft' and (
-            d.get('status') == 'approved' or (d.get('status') == 'ready' and not held_from_bulk_send(d, self.priority))))
-        self.send_all_button.setText(f"Send ready ({sendable})" if sendable else "Send ready")
-        self.send_all_button.setEnabled(bool(sendable))
+        self._update_send_ready()
         self.autofill_all_button.setEnabled(any(
             d.get("status") in ("ready", "needs_answers") and any(
-                q.get("answer") in (None, "", []) and q.get("kind") != "file" for q in d.get("questions") or [])
+                (q.get("answer") in (None, "", []) or q.get("rejected")) and q.get("kind") != "file"
+                for q in d.get("questions") or [])
             for d in self.drafts))
         review = sum(1 for d in self.drafts if d.get("status") in ("ready", "needs_answers", "practice", "preparing"))
         sent = sum(1 for a in self.applications if a.get("status") == "applied")
@@ -786,7 +904,10 @@ class ApplicationsView(QWidget):
         wanted = self.filter.currentData() or "all"
         query = self.search.text().casefold().strip()
         out = []
+        hide_rejected = self.hide_rejected.isChecked()
         for record in self.records:
+            if hide_rejected and record.get("kind") != "draft" and record.get("stage") == "rejected":
+                continue
             if wanted == "starred" and not record.get("_starred"):
                 continue
             if wanted not in ("all", "starred") and bucket(record) != wanted:
@@ -807,7 +928,7 @@ class ApplicationsView(QWidget):
         for row, record in enumerate(visible):
             if record["kind"] == "draft":
                 questions = record.get("questions") or []
-                open_count = sum(1 for q in questions if missing_answer(q))
+                open_count = sum(1 for q in questions if needs_attention(q))
                 luna = sum(1 for q in questions if q.get("source") in ("luna", "autofill") and not q.get("approved"))
                 hint = (f"{plural(open_count, 'answer')} needed" if open_count else
                         f"Luna drafted {luna}" if luna else f"Match {float(record.get('score') or 0):.0f}")
@@ -825,7 +946,8 @@ class ApplicationsView(QWidget):
             item.setData(SUBTITLE_ROLE, hint)
             item.setData(SEARCH_ROLE, when)
             item.setToolTip(f"{record.get('company') or 'Employer'} · {record.get('title') or 'Role'}\n"
-                            f"{status_label(record.get('status'))}" + (f"\n{hint}" if hint else "")
+                            f"{status_label(record['_display_status'])}" + (f"\n{hint}" if hint else "")
+                            + ("\nDouble-click to open the email" if record.get("_email") else "")
                             + ("\nStarred" if record.get("_starred") else "")
                             + (f"\nPosted {local_time(record['posted_at'])}" if record.get("posted_at") else ""))
             item.setSizeHint(QSize(0, ApplicationDelegate.HEIGHT))
@@ -889,7 +1011,7 @@ class ApplicationsView(QWidget):
         self.next_step.hide()
         self.questions_label.hide()
         for widget in (self.answer_button, self.posting_button, self.resume_button, self.continue_button,
-                       self.reopen_button):
+                       self.reopen_button, self.browser_button, self.email_button):
             widget.hide()
 
     def _set_detail_enabled(self, enabled: bool) -> None:
@@ -897,6 +1019,15 @@ class ApplicationsView(QWidget):
             widget.setEnabled(enabled)
 
     def _select_row(self, row: int) -> None:
+        if self._selecting_row:
+            return
+        self._selecting_row = True
+        try:
+            self._show_row(row)
+        finally:
+            self._selecting_row = False
+
+    def _show_row(self, row: int) -> None:
         item = self.list.item(row) if row >= 0 else None
         record = item.data(RECORD_ROLE) if item else None
         if not record:
@@ -904,22 +1035,26 @@ class ApplicationsView(QWidget):
             self._set_detail_enabled(False)
             self._show_placeholder()
             return
+        current = self.draft_detail.draft
+        same = (record["kind"] == "draft" and current is not None
+                and current.get("id") == record.get("id"))
+        if current is not None and not same and self.draft_detail.dirty():
+            # Saving refreshes the list synchronously. Finish this selection once,
+            # using refreshed data (shared answers may have changed the target).
+            self.save_draft_requested.emit(int(current["id"]), self.draft_detail.edits())
+            record = next((r for r in self.records if self._key(r) == self._key(record)), record)
+            if record["kind"] != "draft":
+                self.draft_detail.draft = None
         if record["kind"] == "draft":
             if self._note_dirty:
                 self._save_note()
             current = self.draft_detail.draft
             same = current is not None and current.get("id") == record.get("id")
-            if current is not None and not same and self.draft_detail.dirty():
-                self.save_draft_requested.emit(int(current["id"]), self.draft_detail.edits())
             self.selected_application = None
             if not (same and self.draft_detail.dirty() and current.get("status") == record.get("status")):
                 self.draft_detail.set_draft(record)
             self.detail_stack.setCurrentWidget(self.draft_detail)
             return
-        current = self.draft_detail.draft
-        if current is not None and self.draft_detail.dirty():
-            self.save_draft_requested.emit(int(current["id"]), self.draft_detail.edits())
-            self.draft_detail.draft = None
         self.detail_stack.setCurrentWidget(self.attempt_page)
         self._select_application(record)
 
@@ -934,8 +1069,10 @@ class ApplicationsView(QWidget):
         self.detail_title.setText(str(application.get("title") or "Role"))
         self.detail_company.setText(company + (f" · {application['location']}" if application.get("location") else ""))
         self.monogram.set_text(company)
-        self.status_label.set_status(status, status_label(status))
+        shown_status = application.get("_display_status") or display_status(application)
+        self.status_label.set_status(shown_status, status_label(shown_status))
         self.status_label.show()
+        self.email_button.setVisible(bool(application.get("_email")))
         time_parts = [f"Started {local_time(application.get('started_at'))}"]
         if application.get("finished_at"):
             time_parts.append(f"Updated {local_time(application.get('finished_at'))}")
@@ -948,15 +1085,24 @@ class ApplicationsView(QWidget):
         if application.get("stage") and application.get("stage") != "applied":
             time_parts.append(f"Stage: {status_label(application['stage'])}")
         self.meta_label.setText("  ·  ".join(time_parts))
-        rejected = bool(re.search(r"spam filter rejected|flagged as (?:possible )?spam", str(application.get("error") or ""), re.I))
-        self.reopen_button.setVisible(rejected and bool(application.get("submission_attempted")))
+        rejected = refused(application)
+        corrections = rejected and bool(CORRECTIONS_RE.search(str(application.get("error") or "")))
+        self.reopen_button.setVisible(rejected)
+        self.browser_button.setVisible(finishable(application))
         if status == "applied" and application.get("method") == "manual":
             text = "You marked this application as sent. It is in the Tracker."
         elif status == "applied":
             text = "Employer confirmation recorded. Your application is complete."
-        elif rejected and application.get("submission_attempted"):
+        elif corrections:
+            text = ("The employer's form asked for corrections after Submit, so it was not received. "
+                    "Choose Prepare again: your answers are kept and the fields it named are marked.")
+        elif rejected:
             text = ("The employer's spam filter refused this submission, so it was not received. "
                     "Choose Prepare again to answer any questions and send it.")
+        elif finishable(application) and re.search(r"captcha|security check|verification", str(application.get("error") or ""), re.I):
+            text = ("Stopped at a check Starployment can't complete. Choose Finish in browser: it opens the form "
+                    "filled in, you solve the check or enter the code and press Submit. It may already have been "
+                    "received, so look for a confirmation email first.")
         elif application.get("submission_attempted"):
             text = "The result is unconfirmed. Check the employer site before any retry."
         elif status == "dry_run":
@@ -1031,6 +1177,16 @@ class ApplicationsView(QWidget):
             self.note_status.setText("Saved")
             self.note_save_requested.emit(int(self.selected_application["id"]), text)
 
+    def _open_email(self, record: dict) -> None:
+        link = record.get("_email") or email_link(record, self.mailbox)
+        if link:
+            self.open_requested.emit(link)
+
+    def _open_email_for_item(self, item: QListWidgetItem) -> None:
+        record = item.data(RECORD_ROLE) if item else None
+        if record and record.get("_email"):
+            self._open_email(record)
+
     def _confirm_remove(self, draft_id: int) -> None:
         self.remove_draft_requested.emit(draft_id)
         self.draft_detail.draft = None
@@ -1046,11 +1202,19 @@ class ApplicationsView(QWidget):
         status = str(record.get("status") or "")
         busy = status in ("sending", "queued", "running")
         starred = bool(record.get("_starred"))
+        if record.get("_email"):
+            menu.addAction("Open email", lambda: self._open_email(record))
         if record.get("url"):
             menu.addAction("Open posting", lambda: self.open_requested.emit(str(record["url"])))
         if job_id:
             menu.addAction("Remove star" if starred else "Star", lambda: self.star_requested.emit(job_id, not starred))
         sent = record["kind"] == "attempt" and status == "applied"
+        if not busy and record["kind"] == "draft" and status in ("ready", "needs_answers", "approved", "practice", "error"):
+            menu.addAction("Finish in browser…", lambda: self.browser_draft_requested.emit(
+                int(record["id"]), self.draft_detail.edits()
+                if (self.draft_detail.draft or {}).get("id") == record["id"] else {}))
+        elif not busy and record["kind"] == "attempt" and finishable(record):
+            menu.addAction("Finish in browser…", lambda: self.browser_attempt_requested.emit(int(record["id"])))
         if job_id and not sent and not busy:
             menu.addAction("Mark as sent…", lambda: self._confirm_mark_sent(record))
         if not busy:

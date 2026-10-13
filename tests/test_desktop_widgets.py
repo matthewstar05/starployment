@@ -42,19 +42,20 @@ def test_reduced_motion_environment_override(monkeypatch):
 
 
 def test_toggle_switch_is_a_checkbox_and_lands_on_its_end_state(app, monkeypatch):
-    from jobhub.desktop.widgets import ToggleSwitch
+    from jobhub.desktop.widgets import Motion, ToggleSwitch
 
     monkeypatch.setenv("JOBHUB_REDUCED_MOTION", "0")
+    monkeypatch.setattr(Motion, "BASE", 30)
     switch = ToggleSwitch("Include remote roles")
     switch.resize(320, 30)
     switch.show()
     _settle(app)
     switch.setChecked(True)
-    _settle(app, 800)
+    _settle(app, 60)
     assert switch.isChecked()
     assert switch._position == pytest.approx(1.0)
     switch.click()
-    _settle(app, 800)
+    _settle(app, 60)
     assert not switch.isChecked()
     assert switch._position == pytest.approx(0.0)
     switch.close()
@@ -84,6 +85,7 @@ def test_fade_stack_removes_its_opacity_effect_after_the_transition(app, monkeyp
     from jobhub.desktop.widgets import FadeStack, Motion
 
     monkeypatch.setenv("JOBHUB_REDUCED_MOTION", "0")
+    monkeypatch.setattr(Motion, "PAGE", 100)
     stack = FadeStack()
     pages = [QLabel(f"Page {n}") for n in range(3)]
     for page in pages:
@@ -94,7 +96,7 @@ def test_fade_stack_removes_its_opacity_effect_after_the_transition(app, monkeyp
     stack.setCurrentIndex(2)
     assert stack.currentIndex() == 2
     assert pages[2].graphicsEffect() is not None
-    _settle(app, Motion.PAGE + 700)
+    _settle(app, Motion.PAGE + 100)
     assert pages[2].graphicsEffect() is None
     assert pages[2].pos() == stack.contentsRect().topLeft()
     stack.close()
@@ -104,10 +106,11 @@ def test_count_up_label_reaches_the_exact_value(app, monkeypatch):
     from jobhub.desktop.widgets import CountUpLabel, Motion
 
     monkeypatch.setenv("JOBHUB_REDUCED_MOTION", "0")
+    monkeypatch.setattr(Motion, "COUNT", 40)
     number = CountUpLabel(0)
     number.show()
     number.set_value(1234)
-    _settle(app, Motion.COUNT + 600)
+    _settle(app, Motion.COUNT + 50)
     assert number.text() == "1,234"
     number.close()
 

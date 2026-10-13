@@ -80,10 +80,12 @@ class DesktopController(QObject):
         self._preparing = False
         self._preparing_jobs: set[str] = set()
         self._sending: set[int] = set()          # queued or in flight
+        self._in_browser: set[int] = set()       # drafts the candidate finishes in a visible window
         self._send_queue: deque[int] = deque()
         self._send_active: dict[int, str] = {}   # draft id -> employer, while its browser runs
         self._send_counts = {"sent": 0, "other": 0}
         self._mail_state: dict = {"last_checked": None, "unmatched": 0}
+        self._mail_syncing = threading.Event()
 
         window.scan_requested.connect(self.scan)
         window.apply_requested.connect(self.apply)
@@ -112,6 +114,8 @@ class DesktopController(QObject):
         window.apps.reset_requested.connect(self.reset_unfinished)
         window.apps.autofill_all_requested.connect(self.autofill_all)
         window.apps.reopen_requested.connect(self.reopen_rejected)
+        window.apps.browser_draft_requested.connect(self.finish_draft_in_browser)
+        window.apps.browser_attempt_requested.connect(self.finish_attempt_in_browser)
         # Stars, marking as sent, and removing from the Applications list
         window.jobs.star_requested.connect(self.set_star)
         window.apps.star_requested.connect(self.set_star)
@@ -130,12 +134,16 @@ class DesktopController(QObject):
         files = window.profile.files
         files.add_requested.connect(self.add_resume_file)
         files.category_changed.connect(lambda fid, cat: self._resume_file_update(fid, category=cat))
+        files.rename_requested.connect(lambda fid, name: self._resume_file_update(fid, label=name))
         files.default_requested.connect(lambda fid: self._resume_file_update(fid, is_default=True))
+        files.enabled_changed.connect(lambda fid, en: self._resume_file_update(fid, enabled=int(en)))
+        files.set_main_requested.connect(self.set_main_resume_from_bank)
         files.remove_requested.connect(self.remove_resume_file)
         files.open_requested.connect(self.open_resume)
         files.open_folder_requested.connect(self.open_resume_folder)
         files.strategy_changed.connect(self.set_resume_strategy)
         window.settings.resume_strategy_changed.connect(self.set_resume_strategy)
+        window.settings.passwords_requested.connect(self.show_saved_sign_ins)
         # Connections
         self._wire_connections(window.settings.luna, window.settings.email)
         self.refresh(include_account=True)
@@ -185,8 +193,6 @@ class DesktopController(QObject):
                                 con.execute("UPDATE runs SET applied=? WHERE id=?",
                                             (sum(result.get("status") == "applied" for result in results), report["run_id"]))
                     result = {"scan": report, "applications": results}
-                    if db.get_settings().get("email_tracking", {}).get("enabled"):
-                        self._submit_assist("mail_sync", self._mail_sync_job, False)
                 elif kind == "apply":
                     result = scheduler.apply_one(payload)
                 elif kind == "import":
@@ -222,6 +228,10 @@ class DesktopController(QObject):
         self._next_cycle_at = started + interval
         scheduler.STATE.next_scan_at = str(int(self._next_cycle_at))
         self._tasks.put(("cycle", None))
+        # The inbox is checked on the same schedule as the job scan. It runs
+        # beside the scan, so a slow or failed scan never delays it.
+        if settings.get("email_tracking", {}).get("enabled"):
+            self.sync_email()
         self._status("Searching your sources for new jobs…", 0, "busy")
         self._update_scan_state(settings)
 
@@ -310,35 +320,55 @@ class DesktopController(QObject):
         db.add_event(f"Desktop {kind} failed: {error}", "error")
         self.refresh()
 
+    def _job_data(self, settings: dict) -> dict:
+        """The job library's page, counts, and stats; reused while no job changed.
+
+        These queries read the whole library, so repeating them on every
+        15-second refresh made the window stutter. Posting-age counts are
+        recomputed at least every five minutes.
+        """
+        jobs_view = self.window.jobs
+        job_query = jobs_view.query
+        job_status = jobs_view.selected_status
+        posted_hours = jobs_view.posted_hours or None
+        page_size = jobs_view.page_size
+        key = (db.jobs_version(), int(time.time() // 300), job_status, job_query, posted_hours,
+               jobs_view.exclude_starred, jobs_view.sort_key, jobs_view.sort_descending, page_size, jobs_view.page,
+               tuple(settings.get("priority_companies") or ()))
+        cached = getattr(self, "_job_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        total_jobs = db.count_jobs(status=job_status, q=job_query, posted_within_hours=posted_hours,
+                                   exclude_starred=jobs_view.exclude_starred)
+        page = min(jobs_view.page, max(0, (total_jobs - 1) // page_size))
+        data = {
+            "page": page,
+            "total_jobs": total_jobs,
+            "jobs": db.list_jobs(status=job_status, q=job_query, limit=page_size, offset=page * page_size,
+                                 posted_within_hours=posted_hours, order=jobs_view.sort_key,
+                                 descending=jobs_view.sort_descending, exclude_starred=jobs_view.exclude_starred),
+            "top_jobs": db.list_jobs(status="new", limit=5),
+            "stats": {**db.job_stats(), **db.fresh_counts(),
+                      **{"unstarred_" + name: value for name, value in db.fresh_counts(exclude_starred=True).items()
+                         if name.startswith("preparable_")}},
+        }
+        self._job_cache = (key, data)
+        return data
+
     def refresh(self, *, include_account: bool = False) -> None:
         try:
-            jobs_view = self.window.jobs
-            job_query = jobs_view.query
-            job_status = jobs_view.selected_status
-            posted_hours = jobs_view.posted_hours or None
-            total_jobs = db.count_jobs(status=job_status, q=job_query, posted_within_hours=posted_hours)
-            page_size = self.window.jobs.page_size
-            self.window.jobs.page = min(
-                self.window.jobs.page,
-                max(0, (total_jobs - 1) // page_size),
-            )
             settings = db.get_settings()
+            job_data = self._job_data(settings)
+            self.window.jobs.page = job_data["page"]
+            self.window.apps.set_sending(self._sending)
             self.window.set_data(
                 profile=db.get_profile() if include_account else None,
                 settings=settings if include_account or self._settings_changed(settings) else None,
-                jobs=db.list_jobs(
-                    status=job_status,
-                    q=job_query,
-                    limit=page_size,
-                    offset=self.window.jobs.page * page_size,
-                    posted_within_hours=posted_hours,
-                    order=jobs_view.sort_key,
-                    descending=jobs_view.sort_descending,
-                ),
-                total_jobs=total_jobs,
-                top_jobs=db.list_jobs(status="new", limit=5),
+                jobs=job_data["jobs"],
+                total_jobs=job_data["total_jobs"],
+                top_jobs=job_data["top_jobs"],
                 applications=db.list_applications(limit=300),
-                stats={**db.job_stats(), **db.fresh_counts()},
+                stats=dict(job_data["stats"]),
                 events=db.list_events(limit=60),
                 drafts=db.list_drafts(),
                 tracker=db.list_tracker(),
@@ -457,8 +487,14 @@ class DesktopController(QObject):
     def save_settings(self, patch: dict) -> None:
         try:
             patch = dict(patch)
-            self._store_mail_secret(patch)
             previous = db.get_settings()
+            protect = patch.get("keychain_protection", previous.get("keychain_protection", False))
+            if protect and not previous.get("keychain_protection", False):
+                # Hand saved secrets to Keychain before reads start looking there.
+                from ..apply.email_verification import _FileVault
+                _FileVault().move_to_system_vault()
+                db.set_settings({"keychain_protection": True})
+            self._store_mail_secret(patch)
             settings = db.set_settings(patch)
             if ("appearance" in patch and settings["appearance"] != previous.get("appearance")) or \
                     ("font" in patch and settings.get("font") != previous.get("font")):
@@ -487,7 +523,8 @@ class DesktopController(QObject):
         self._submit_assist("rescore", scheduler.rescore, None)
 
     def open_url(self, url: str) -> None:
-        if url.startswith(("https://", "http://")):
+        # message:// opens one email in Apple Mail by its Message-ID.
+        if url.startswith(("https://", "http://", "message://")):
             QDesktopServices.openUrl(QUrl(url))
 
     def open_resume(self, path: str) -> None:
@@ -539,7 +576,60 @@ class DesktopController(QObject):
         except RuntimeError:   # shut down between the check and the submit
             pass
 
+    # ------------------------------------------------------------ Workday sign-ins
+    def show_saved_sign_ins(self) -> None:
+        """The vault's Workday accounts; a password only after Touch ID (vault.authenticate)."""
+        from .. import vault
+        from .views.passwords import PasswordsSheet
+        sheet = PasswordsSheet(self.window)
+        sheet.set_accounts(vault.list_accounts())
+        sheet.unlocked_until = 0.0
+        sheet.reveal_requested.connect(lambda tenant: self._unlock_sign_in(sheet, tenant, False))
+        sheet.copy_requested.connect(lambda tenant: self._unlock_sign_in(sheet, tenant, True))
+        sheet.forget_requested.connect(lambda tenant: self._forget_sign_in(sheet, tenant))
+        sheet.exec()
+
+    def _unlock_sign_in(self, sheet, tenant: str, copy: bool) -> None:
+        from .. import vault
+        if time.monotonic() < getattr(sheet, "unlocked_until", 0.0):
+            self._vault_unlocked(sheet, tenant, copy)
+            return
+        sheet.set_message("Waiting for Touch ID…")
+        self._submit_assist("vault_auth", vault.authenticate, (sheet, tenant, copy),
+                            "show a saved Workday password")
+
+    def _vault_unlocked(self, sheet, tenant: str, copy: bool) -> None:
+        from .. import vault
+        password = vault.password_for(tenant)
+        if not password:
+            sheet.set_message("That password could not be read from the vault.")
+            return
+        if copy:
+            clipboard = QApplication.clipboard()
+            clipboard.setText(password)
+            # Clear it after a minute unless something else was copied since.
+            QTimer.singleShot(60_000, lambda: clipboard.text() == password and clipboard.clear())
+            sheet.set_message("Copied. The clipboard clears in a minute.")
+        else:
+            sheet.show_password(tenant, password)
+            sheet.set_message("")
+
+    def _forget_sign_in(self, sheet, tenant: str) -> None:
+        from .. import vault
+        vault.delete_account(tenant)
+        sheet.set_accounts(vault.list_accounts())
+        sheet.set_message("Forgotten here. The account on the employer's Workday still exists.")
+
     def _assist_finished(self, kind: str, context: object, result: object) -> None:
+        if kind == "vault_auth":
+            sheet, tenant, copy = context
+            ok, message = result
+            if not ok:
+                sheet.set_message(message or "Touch ID did not confirm it was you.")
+                return
+            sheet.unlocked_until = time.monotonic() + 120
+            self._vault_unlocked(sheet, tenant, copy)
+            return
         if kind == "plan":
             self._preparing = False
             report = result if isinstance(result, dict) else {}
@@ -550,18 +640,27 @@ class DesktopController(QObject):
                 text += f" · Luna drafted {drafted} answers"
             if failed:
                 text += f" · {failed} could not be prepared"
+            fill_failed = int(report.get("fill_failed", 0))
+            if fill_failed:
+                text += (f" · AI Autofill could not run on {fill_failed}; the reason is on each one. "
+                         "Try AI Autofill again from Applications")
             starred = int(report.get("starred", 0))
             if starred:
                 text += f" · {starred} starred for you to send one by one"
             if not report.get("considered"):
                 text = "No new matches fit this plan. Widen the posting window, lower the minimum match, or run a scan."
-            self._status(text, 9000, "success" if prepared else "warning")
+            self._status(text, 15_000 if fill_failed else 9000,
+                         "success" if prepared and not fill_failed else "warning")
             if prepared:
                 self.window.show_applications("review")
         elif kind == "prepare_one":
             self._preparing_jobs.discard(str(context))
             self.window.jobs.set_preparing(self._preparing_jobs)
-            self._status("Application prepared · review it in Applications", tone="success")
+            if result:
+                self._status(f"Application prepared, but AI Autofill could not run: {result} "
+                             "Try AI Autofill again from the application.", 15_000, "warning")
+            else:
+                self._status("Application prepared · review it in Applications", tone="success")
             self.window.show_draft_for_job(str(context))
             self.refresh(include_account=True)
             return
@@ -613,6 +712,9 @@ class DesktopController(QObject):
         self.refresh()
 
     def _assist_failed(self, kind: str, context: object, error: str) -> None:
+        if kind == "vault_auth":
+            context[0].set_message(f"Touch ID is unavailable: {error[:120]}")
+            return
         if kind == "plan":
             self._preparing = False
         if kind == "prepare_one":
@@ -641,7 +743,7 @@ class DesktopController(QObject):
 
     # ------------------------------------------------------------------ apply flow
     def start_plan(self, plan: dict) -> None:
-        """Prepare the top matches for review (Overview → Apply)."""
+        """Prepare the top matches for review from Overview, Jobs or the menu."""
         settings = db.get_settings()
         if not settings.get("setup_complete"):
             self._status("Complete setup before preparing applications")
@@ -652,9 +754,11 @@ class DesktopController(QObject):
             return
         hours = int(plan.get("posted_within_hours", 0) or 0)
         order = str(plan.get("order") or "match")
+        exclude_starred = bool(plan.get("exclude_starred", (settings.get("apply_plan") or {}).get("exclude_starred", True)))
         try:
             db.set_settings({"apply_plan": {"count": int(plan["count"]), "min_score": float(plan["min_score"]),
                                             "one_per_company": bool(plan["one_per_company"]),
+                                            "exclude_starred": exclude_starred,
                                             "posted_within_hours": hours, "order": order}})
         except Exception as exc:  # noqa: BLE001
             self._status(f"Could not save the plan: {exc}", tone="error")
@@ -673,7 +777,7 @@ class DesktopController(QObject):
         def run() -> dict:
             return prepare.prepare_batch(int(plan["count"]), float(plan["min_score"]), bool(plan["one_per_company"]),
                                          use_luna=bool(plan.get("use_luna", True)), progress=progress, stop=stop,
-                                         posted_within_hours=hours, order=order)
+                                         posted_within_hours=hours, order=order, exclude_starred=exclude_starred)
 
         self._submit_assist("plan", run, None)
 
@@ -687,7 +791,7 @@ class DesktopController(QObject):
         if job is None or profile is None:
             self._status("That job or your profile is missing", tone="warning")
             return
-        if job.ats not in prepare.SUPPORTED_ATS:
+        if job.ats not in prepare.PREPARABLE_ATS:
             self._status("This posting uses a form Starployment cannot fill. Open the posting to apply yourself.",
                          tone="warning")
             return
@@ -700,7 +804,8 @@ class DesktopController(QObject):
         self.refresh()
         self._status(f"Preparing {job.company} · {job.title}…", 0, "busy")
 
-        def run() -> int:
+        def run() -> str:
+            """Prepare, then fill. Returns why the fill did not run, or ""."""
             settings = db.get_settings()
             draft_id = prepare.prepare_job(job, profile, settings)
             if prepare.luna_ready(settings):
@@ -710,7 +815,8 @@ class DesktopController(QObject):
                     fill(draft_id, settings)
                 except Exception as error:  # noqa: BLE001
                     db.update_draft(draft_id, error=f"Luna could not draft answers: {str(error)[:200]}")
-            return draft_id
+                    return str(error)[:200]
+            return ""
 
         self._submit_assist("prepare_one", run, job_id)
 
@@ -751,7 +857,7 @@ class DesktopController(QObject):
         settings = db.get_settings()
         candidates, held = prepare.bulk_send_candidates(
             [d for d in db.list_drafts(("approved", "ready")) if d["id"] not in self._sending],
-            settings.get("priority_companies") or [])
+            settings.get("priority_companies") or [], settings)
         if not candidates:
             self._status("Nothing is ready to send. Use Autofill all or answer the open questions first."
                          + (f" {len(held)} starred application{'s' if len(held) != 1 else ''} wait for you to "
@@ -799,7 +905,53 @@ class DesktopController(QObject):
         except ValueError as exc:
             self._status(str(exc), tone="warning")
             return
+        draft = db.draft_for_job(job_id)
+        if draft and draft["questions"] and draft["status"] in db.DRAFT_OPEN:
+            # The refusal named fields: the prepared answers are kept and those fields are marked.
+            self._status("Not received, so it is ready to fix and send again · the fields the employer named are "
+                         "marked", 9000, "success")
+            self.refresh()
+            self.window.apps.select_draft_for_job(job_id)
+            return
         self.prepare_job(job_id)
+
+    def finish_draft_in_browser(self, draft_id: int, edits: dict) -> None:
+        """Open a prepared application in a visible window; the candidate finishes it and presses Submit."""
+        answer = QMessageBox.question(
+            self.window, "Finish in browser",
+            "Starployment will open this application in a browser window and fill in everything it can.\n\n"
+            "Finish anything left (a CAPTCHA, an email code, a field it couldn't fill), then press Submit "
+            "yourself. Keep the window open until the employer's confirmation appears, and Starployment "
+            "records it. This is a real submission, even in practice mode.")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            prepare.prepare_for_browser(draft_id, edits)
+        except ValueError as exc:
+            self._status(str(exc), tone="warning")
+            self.refresh()
+            return
+        prepare.share_answers(draft_id)
+        self._in_browser.add(draft_id)
+        self._queue_send([draft_id])
+
+    def finish_attempt_in_browser(self, app_id: int) -> None:
+        """Reopen an unconfirmed submission (a CAPTCHA, an email code) in a visible window for the candidate."""
+        answer = QMessageBox.question(
+            self.window, "Finish in browser",
+            "Starployment already pressed Submit on this application once, and it may have been received. "
+            "Check your email for a confirmation first; if there is one, choose Mark as sent instead.\n\n"
+            "Otherwise Starployment opens the form in a browser window, filled in. Solve the check or enter "
+            "the code, then press Submit yourself, and keep the window open until the confirmation appears.")
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            draft_id = prepare.draft_for_attempt(app_id)
+        except ValueError as exc:
+            self._status(str(exc), tone="warning")
+            return
+        self._in_browser.add(draft_id)
+        self._queue_send([draft_id])
 
     def _queue_send(self, draft_ids: list[int]) -> None:
         settings = db.get_settings()
@@ -814,9 +966,13 @@ class DesktopController(QObject):
             self._sending.add(draft_id)
             self._send_queue.append(draft_id)
         count, parallel = len(self._sending), self._parallel_sends(settings)
-        self._status(("Practice run" if settings.get("dry_run") else "Sending")
-                     + (f" · {count} applications, {min(count, parallel)} at a time in the background" if count > 1
-                        else " in the background") + "…", 0, "busy")
+        if draft_ids and all(d in self._in_browser for d in draft_ids) and count == len(draft_ids):
+            self._status("Opening a browser window · finish anything left and press Submit there. "
+                         "Starployment records the employer's confirmation.", 0, "busy")
+        else:
+            self._status(("Practice run" if settings.get("dry_run") else "Sending")
+                         + (f" · {count} applications, {min(count, parallel)} at a time in the background"
+                            if count > 1 else " in the background") + "…", 0, "busy")
         self._pump_sends()
         self.refresh()
 
@@ -845,7 +1001,7 @@ class DesktopController(QObject):
 
     def _send_worker(self, draft_id: int, parallel: int) -> None:
         try:
-            result = prepare.send_draft(draft_id, parallel=parallel)
+            result = prepare.send_draft(draft_id, parallel=parallel, assist=draft_id in self._in_browser)
         except Exception as exc:  # noqa: BLE001
             self.signals.send_done.emit(draft_id, None, str(exc))
         else:
@@ -861,6 +1017,7 @@ class DesktopController(QObject):
             QTimer.singleShot(5000, self._pump_sends)
             return
         self._sending.discard(draft_id)
+        self._in_browser.discard(draft_id)
         self._send_counts["sent" if status in ("applied", "dry_run") else "other"] += 1
         draft = db.get_draft(draft_id) or {}
         subject = f"{draft.get('company') or 'Application'}"
@@ -952,7 +1109,11 @@ class DesktopController(QObject):
         report = db.reset_unfinished(include_attempts=include_attempts)
         self._status(f"Cleared {report['drafts']} prepared application{'s' if report['drafts'] != 1 else ''}"
                      + (f" and {report['attempts']} unfinished attempt{'s' if report['attempts'] != 1 else ''}"
-                        if include_attempts else "") + ". Everything submitted was kept.", tone="success")
+                        if include_attempts else "") + ". Everything submitted was kept."
+                     + (f" Kept {report['kept']} sent without a confirmation, since "
+                        f"{'it' if report['kept'] == 1 else 'they'} may have reached the employer. "
+                        "Check the employer's site, then right-click it for Mark as sent or Remove from list."
+                        if report.get("kept") else ""), tone="success")
         db.add_event(f"Reset unfinished applications: {report['drafts']} drafts, {report['attempts']} attempts")
         self.refresh()
 
@@ -974,15 +1135,23 @@ class DesktopController(QObject):
 
     def _mail_sync_job(self):
         from .. import email_tracker
-        return email_tracker.sync(db.get_settings())
+        try:
+            return email_tracker.sync(db.get_settings())
+        finally:
+            self._mail_syncing.clear()
 
     def sync_email(self, manual: bool = False) -> None:
         if not db.get_settings().get("email_tracking", {}).get("enabled"):
             self._status("Turn on reply tracking in Settings → Connections → Email", tone="info")
             self.window.show_connections()
             return
+        if self._mail_syncing.is_set():
+            if manual:   # one inbox check at a time; the running one covers this request
+                self._status("Your inbox is already being checked", tone="info")
+            return
         if manual:
             self._status("Checking your inbox…", 0, "busy")
+        self._mail_syncing.set()
         self._submit_assist("mail_sync", self._mail_sync_job, manual)
 
     # ------------------------------------------------------------------ profile
@@ -1034,12 +1203,23 @@ class DesktopController(QObject):
             self._status(str(exc), tone="warning")
         self.refresh(include_account=True)
 
+    def set_main_resume_from_bank(self, file_id: int) -> None:
+        try:
+            db.set_main_resume(file_id)
+            self._status("Updated main resume", tone="success")
+        except Exception as exc:  # noqa: BLE001
+            self._status(f"Could not update main resume: {exc}", tone="error")
+        self.refresh(include_account=True)
+
     def remove_resume_file(self, file_id: int) -> None:
+        profile = db.get_profile()
+        main_path = str(profile.resume_path) if profile else ""
         path = db.remove_resume_file(file_id)
         if path:
             target = Path(path)
             try:
-                if target.parent.resolve() == config.RESUME_LIBRARY.resolve() and target.is_file():
+                is_main = bool(main_path and str(target.resolve()) == str(Path(main_path).resolve()))
+                if target.parent.resolve() == config.RESUME_LIBRARY.resolve() and target.is_file() and not is_main:
                     target.unlink()
             except OSError:
                 pass
@@ -1097,7 +1277,7 @@ class DesktopController(QObject):
             agents.save_api_key(backend, key)
             panel.key.clear()
             panel.status_requested.emit(backend)
-            self._status("API key saved in your system credential vault", tone="success")
+            self._status("API key saved on this computer", tone="success")
         except Exception as exc:  # noqa: BLE001
             self._status(f"Could not save the key: {exc}", tone="error")
 
@@ -1121,7 +1301,7 @@ class DesktopController(QObject):
                 try:
                     mailbox_session = Temporary(mailbox).open()
                     mailbox_session.logout()
-                    return True, "Connected. Save settings to keep this app password in your system vault."
+                    return True, "Connected. Save settings to keep this app password on this computer."
                 except Exception as error:  # noqa: BLE001
                     return False, f"The mail server rejected the sign-in. Check the address and app password. ({str(error)[:120]})"
             if not username or not _keyring().get_password(SERVICE, username):

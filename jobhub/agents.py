@@ -234,7 +234,7 @@ def status(backend: str) -> Status:
         return Status(False, "Unknown connection", "Choose Claude or ChatGPT.", "")
     if not spec.cli:
         if _api_key(backend):
-            return Status(True, f"{spec.name} saved", "Stored in your system credential vault.", "test")
+            return Status(True, f"{spec.name} saved", "Stored on this computer, never in the database.", "test")
         return Status(False, f"Add your {spec.name}", "Paste a key to connect.", "key")
     binary = find_cli(spec.cli)
     if not binary:

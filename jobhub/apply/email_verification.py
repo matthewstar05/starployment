@@ -1,6 +1,7 @@
 """Opt-in, read-only IMAP lookup for a fresh Greenhouse application code.
 
-The mailbox password lives only in the operating system credential vault. No
+The mailbox password lives in the operating system credential vault when
+Keychain protection is on, otherwise in an owner-only secrets file. No
 message body or code is persisted, logged, or sent to an LLM. A code is usable
 only when it arrived after the application began and came from the exact sender
 the candidate configured for this mailbox.
@@ -10,6 +11,8 @@ from __future__ import annotations
 import dis
 import imaplib
 import inspect
+import json
+import os
 import re
 import ssl
 import time
@@ -102,7 +105,97 @@ def redact_token(value: str, kind: str = "code") -> str:
     return "[redacted]"
 
 
+class _FileVault:
+    """Owner-only secrets file for when Keychain protection is off.
+
+    The installed app is ad-hoc signed, so every rebuild looks like a new app
+    to Keychain and asks again. This file needs no prompt. A secret saved in
+    Keychain earlier is copied here the first time it is read.
+    """
+
+    class errors:
+        class PasswordDeleteError(Exception):
+            pass
+
+    @staticmethod
+    def _path():
+        from .. import config
+        return config.DATA / "secrets.json"
+
+    def _load(self) -> dict:
+        try:
+            data = json.loads(self._path().read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _save(self, data: dict) -> None:
+        path = self._path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + ".tmp")
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2)
+        os.replace(temporary, path)
+        if not data:
+            path.unlink(missing_ok=True)
+
+    def get_password(self, service: str, username: str) -> str | None:
+        value = self._load().get(service, {}).get(username)
+        if value:
+            return value
+        try:
+            value = _system_vault().get_password(service, username)
+        except Exception:  # noqa: BLE001 - no vault or a locked one means nothing to copy
+            return None
+        if value:
+            self.set_password(service, username, value)
+        return value
+
+    def set_password(self, service: str, username: str, password: str) -> None:
+        data = self._load()
+        data.setdefault(service, {})[username] = password
+        self._save(data)
+
+    def delete_password(self, service: str, username: str) -> None:
+        data = self._load()
+        found = data.get(service, {}).pop(username, None) is not None
+        if not data.get(service):
+            data.pop(service, None)
+        self._save(data)
+        try:
+            vault = _system_vault()
+            vault.delete_password(service, username)
+            found = True
+        except Exception:  # noqa: BLE001 - a copy left in Keychain is optional to clear
+            pass
+        if not found:
+            raise self.errors.PasswordDeleteError(username)
+
+    def move_to_system_vault(self) -> None:
+        """Turning protection on: hand every saved secret to Keychain."""
+        data = self._load()
+        vault = _system_vault()
+        for service, entries in data.items():
+            for username, password in entries.items():
+                vault.set_password(service, username, password)
+        self._save({})
+
+
+def keychain_protection() -> bool:
+    try:
+        from .. import db
+        return bool(db.get_settings().get("keychain_protection", False))
+    except Exception:  # noqa: BLE001 - no database yet means the default
+        return False
+
+
 def _keyring():
+    """The vault Starployment's secrets use, chosen by Settings → Security."""
+    return _system_vault() if keychain_protection() else _FileVault()
+
+
+def _system_vault():
     try:
         import keyring
     except ImportError as exc:
@@ -270,8 +363,14 @@ def _code_from_message(message, length: int | None = None) -> str | None:
         rf"([A-Za-z0-9]{{{len_pat}}})\b",
         re.I,
     )
+    # Greenhouse: "Copy and paste this code into the security code field on your
+    # application:" with the code on its own line after the colon.
+    labeled = re.compile(rf"\bcode\b[^\n:.]{{0,80}}:\s*([A-Za-z0-9]{{{len_pat}}})\b", re.I)
     # Preserve the exact characters. A form may treat codes as case-sensitive.
-    matches = {match.group(1) for match in pattern.finditer(body)}
+    matches = {match.group(1) for match in pattern.finditer(body)} | {
+        match.group(1) for match in labeled.finditer(body)}
+    # The words after "code" ("this code into the field") are not codes.
+    matches = {m for m in matches if not re.fullmatch(r"[a-z]+", m)}
     return next(iter(matches)) if len(matches) == 1 else None
 
 
@@ -374,7 +473,7 @@ class EmailVerificationInbox:
                     from_str = " ".join(from_addrs).lower()
                     if employer and employer.strip().lower() in from_str:
                         pass
-                    elif re.search(r"greenhouse|ashby|lever|jobs|careers|talent|recruit|verify|verification|confirm|no-?reply", from_str):
+                    elif re.search(r"greenhouse|ashby|lever|workday|jobs|careers|talent|recruit|verify|verification|confirm|no-?reply", from_str):
                         pass
                     else:
                         continue
@@ -394,10 +493,11 @@ class EmailVerificationInbox:
                 body = _plain_text(message)
                 combined = f"{subject} {body}"
                 if employer and employer.strip():
-                    emp = employer.strip().lower()
-                    if emp not in combined.lower():
+                    # "Shieldai" in the job list is "Shield AI" in the email.
+                    squash = lambda text: re.sub(r"[^a-z0-9]", "", text.lower())  # noqa: E731
+                    if squash(employer) not in squash(combined):
                         continue
-                if not re.search(r"greenhouse|verif|security|code|confirm|token|application", subject, re.I):
+                if not re.search(r"greenhouse|verif|activat|security|code|confirm|token|application", subject, re.I):
                     continue
                 matched.append((uid, message))
             return matched

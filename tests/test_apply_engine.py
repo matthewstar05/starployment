@@ -943,3 +943,143 @@ def test_practice_mode_stops_before_verification_or_submit(fixture_form, monkeyp
     assert attempted == []
     assert "Dry run" in result.message
 
+
+
+
+def test_accessible_radio_scale_is_required_and_retains_its_choice(fixture_form):
+    fields = """<fieldset><legend>AI experience *</legend><div role="radiogroup" aria-required="true">
+      <div role="radio" aria-label="No" aria-checked="false" tabindex="0"
+           onclick="this.parentElement.querySelectorAll('[role=radio]').forEach(e=>e.setAttribute('aria-checked','false'));this.setAttribute('aria-checked','true')">No</div>
+      <div role="radio" aria-label="Yes" aria-checked="false" tabindex="0"
+           onclick="this.parentElement.querySelectorAll('[role=radio]').forEach(e=>e.setAttribute('aria-checked','false'));this.setAttribute('aria-checked','true')">Yes</div>
+    </div></fieldset>"""
+    fixture_form[1]["AI experience"] = "Yes"
+    result, page, _ = execute(fixture_form, fields, dry=True)
+    assert result.status == "dry_run", result
+    assert not result.unanswered
+    assert page.get_by_role("radio", name="Yes", exact=True).get_attribute("aria-checked") == "true"
+    assert page.evaluate("window.submissions || 0") == 0
+
+
+def test_accessible_checkbox_group_skips_hidden_duplicates_and_keeps_selection(fixture_form):
+    fields = """<label id="skills-label">Languages *</label><div id="skills" role="group" aria-required="true">
+      <div role="checkbox" aria-checked="false" tabindex="0" onclick="this.setAttribute('aria-checked',this.getAttribute('aria-checked')==='true'?'false':'true')">
+        <input type="checkbox" style="display:none">Python</div>
+      <div role="checkbox" aria-checked="false" tabindex="0" onclick="this.setAttribute('aria-checked',this.getAttribute('aria-checked')==='true'?'false':'true')">
+        <input type="checkbox" style="display:none">Go</div>
+    </div>"""
+    fixture_form[1].update({"Languages - Python": True, "Languages - Go": False})
+    result, page, _ = execute(fixture_form, fields, dry=True)
+    assert result.status == "dry_run", result
+    scanned = page.evaluate(SCAN_JS)
+    boxes = [f for f in scanned if f["kind"] == "checkbox"]
+    assert len(boxes) == 2 and all(f["groupLabel"] == "Languages" for f in boxes)
+    assert all(not f["groupEmpty"] for f in boxes)
+    assert page.get_by_role("checkbox").first.get_attribute("aria-checked") == "true"
+    assert page.get_by_role("checkbox").nth(1).get_attribute("aria-checked") == "false"
+
+
+def test_custom_question_sibling_heading_labels_text_radio_and_checkboxes(browser):
+    page = browser.new_page()
+    page.set_content('''<form>
+      <div><div><p>Relevant experience</p></div><div data-testid="field">
+        <input aria-required="true" data-testid="customQuestions.form.question"></div></div>
+      <div><div><p>AI experience</p></div><div data-testid="field">
+        <div role="radiogroup" data-testid="customQuestions.form.ai">
+          <div role="radio" aria-checked="false">No</div><div role="radio" aria-checked="false">Yes</div>
+        </div></div></div>
+      <div><div><p>Languages</p></div><div data-testid="field">
+        <div role="group" data-testid="customQuestions.form.languages">
+          <div role="checkbox" aria-checked="false">Python</div><div role="checkbox" aria-checked="false">Go</div>
+        </div></div></div></form>''')
+    fields = page.evaluate(SCAN_JS)
+    assert [f["label"] for f in fields] == ["AI experience", "Relevant experience", "Languages - Python", "Languages - Go"]
+    assert next(f for f in fields if f["label"] == "Relevant experience")["required"]
+    page.close()
+
+
+def test_accessible_radio_with_hidden_native_input_uses_and_verifies_native_state(fixture_form):
+    fixture_form[1]["Work authorization"] = "Yes"
+    fields = '''<fieldset role="radiogroup" aria-labelledby="authorization-label" aria-required="true">
+      <legend id="authorization-label">Work authorization</legend>
+      <div role="radio" aria-checked="false" aria-labelledby="authorization-label yes-label">
+        <label><input style="display:none" type="radio" name="authorized" required
+          onchange="this.closest('[role=radio]').setAttribute('aria-checked','true')"><span id="yes-label">Yes</span></label>
+      </div></fieldset>'''
+    result, page, _ = execute(fixture_form, fields, dry=True)
+    assert result.status == "dry_run" and not result.unanswered
+    assert page.get_by_role("radio").get_attribute("aria-checked") == "true"
+    assert page.locator('input[name=authorized]').is_checked()
+
+
+def test_form_disappearing_after_fill_cannot_be_counted_ready_or_submitted(fixture_form):
+    result, page, _ = execute(fixture_form, '''<script>
+      document.querySelector('#first').addEventListener('blur',()=>document.querySelector('form').remove());
+    </script>''')
+    assert result.status == "needs_human" and "disappeared" in result.message
+    assert not result.submission_attempted and not fixture_form[2]
+
+
+def test_a_filled_field_the_form_marks_invalid_is_reported_for_review(tmp_path):
+    job = Job(source="g", ats="greenhouse", company="A", title="T", url="https://job-boards.greenhouse.io/a/jobs/1")
+    engine = FormEngine(job, Profile(), {}, str(tmp_path / "r.pdf"), adapter_for(job), True)
+    engine._filled.add("1")
+    fields = [{"idx": "1", "label": "Your organization", "kind": "text", "required": True, "invalid": True, "empty": False,
+               "options": []},
+              {"idx": "2", "label": "Website", "kind": "text", "required": False, "invalid": False, "empty": False, "options": []}]
+    engine._filled.add("2")
+    engine._collect_unanswered(fields)
+    assert engine.question_details == [{"label": "Your organization", "kind": "text", "required": True,
+                                        "options": [], "invalid": True}]
+
+
+def test_finish_in_browser_hands_off_and_records_the_candidates_submit(fixture_form, monkeypatch):
+    create, answers, attempted = fixture_form
+    # A required field Starployment cannot answer: a normal send would stop here.
+    # The page script plays the candidate, who fills it and presses Submit.
+    engine, context, page = create(
+        '<label for="color">Favorite color *</label><input id="color" required>',
+        submit="document.body.innerHTML='Your application has been submitted';",
+        before="<script>setTimeout(() => { document.querySelector('#color').value = 'Blue';"
+               " document.querySelector('form').requestSubmit(); }, 1500)</script>")
+    engine.assist = True
+    result = engine._run_page(context, page, engine.adapter.apply_url)
+    assert result.status == "applied" and result.submission_attempted
+    assert attempted == [engine.job.id]                      # the boundary is recorded before the hand-off
+    assert not any("Submitting application once" in line for line in result.log)   # Starployment never clicked
+
+
+def test_finish_in_browser_without_a_confirmation_stays_for_review(fixture_form, monkeypatch):
+    create, answers, attempted = fixture_form
+    monkeypatch.setattr(engine_module, "ASSIST_SECONDS", 1)
+    engine, context, page = create()
+    engine.assist = True
+    result = engine._run_page(context, page, engine.adapter.apply_url)
+    assert result.status == "needs_human" and result.submission_attempted
+    assert page.evaluate("window.submissions || 0") == 0
+    assert "Mark as sent" in result.message
+
+
+class _Save:
+    def __init__(self, failure=None, body=None):
+        self.failure, self._body = failure, body if body is not None else {"data": {"setFormValue": {}}}
+
+    def response(self):
+        return self
+
+    status = 200
+
+    def json(self):
+        return self._body
+
+
+def test_ashby_answers_that_did_not_save_are_found_before_submit(tmp_path):
+    job = Job(source="a", ats="ashby", company="A", title="T", url="https://jobs.ashbyhq.com/a/0e5c4b0a-1234-4cde-8f00-123456789abc")
+    engine = FormEngine(job, Profile(), {}, str(tmp_path / "r.pdf"), adapter_for(job), False)
+    saves = {"ok": _Save(), "failed": _Save(failure="net::ERR_FAILED"), "refused": _Save(body={"errors": [{}]})}
+    engine._ashby_saves = dict(saves)
+    engine._settled = {id(r) for r in saves.values()}
+    fields = [{"idx": str(i), "name": name, "label": name, "kind": "text"} for i, name in enumerate(saves)]
+    fields.append({"idx": "9", "name": "never", "label": "Authorized?", "kind": "radio", "buttonOptions": True})
+    engine._filled.update({"0", "1", "2", "9"})
+    assert [f["name"] for f in engine._ashby_unsaved(None, fields)] == ["failed", "refused", "never"]

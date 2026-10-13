@@ -128,22 +128,45 @@ def _parse_entries(lines: list[str], project: bool) -> list:
     return entries
 
 
+GPA_RE = re.compile(r"GPA:\s*([\d.]+(?:\s*/\s*[\d.]+)?)", re.I)
+# "Relevant Coursework: ...", "Concentration: ...", "Activities/Societies: ..."
+LABEL_RE = re.compile(r"^[A-Z][\w/&' -]{2,40}:\s*\S")
+
+
 def _parse_education(lines: list[str]) -> list[Education]:
+    """Degrees with their GPA and every detail line beneath them (coursework,
+    concentration, activities), kept verbatim apart from PDF line wrapping."""
     entries: list[Education] = []
-    school = ""
+    school, school_location = "", ""
+    in_detail = False
     for raw in lines:
         line = raw.strip()
         if not line:
             continue
-        if DEGREE_RE.match(line) and not BULLET_RE.match(raw):
+        bullet = BULLET_RE.match(raw)
+        if DEGREE_RE.match(line) and not bullet:
             left, _, start, end = _entry_header(raw)
             degree = left.split("|")[0].strip()
-            entries.append(Education(school=school, degree=degree, start=start, end=end))
-        elif re.search(r"University|College|Institute", line) and not BULLET_RE.match(raw):
-            school = _entry_header(raw)[0].strip()
+            entries.append(Education(school=school, location=school_location, degree=degree, start=start, end=end))
+            in_detail = False
+        elif re.search(r"University|College|Institute", line) and not bullet and not LABEL_RE.match(line):
+            school, school_location = _entry_header(raw)[:2]
             if entries and not entries[-1].school:
-                entries[-1].school = school
-        elif entries and (gpa := re.search(r"GPA:\s*([\d.]+(?:\s*/\s*[\d.]+)?)", line, re.I)):
+                entries[-1].school, entries[-1].location = school, school_location
+            in_detail = False
+        elif not entries:
+            continue
+        elif in_detail and raw[:1].isspace() and not bullet:
+            entries[-1].details[-1] += " " + _clean_line(line)
+        elif bullet or LABEL_RE.match(line):
+            text = _clean_line(BULLET_RE.sub("", raw))
+            if gpa := GPA_RE.match(text):
+                entries[-1].gpa = gpa.group(1)
+                text = text[gpa.end():].lstrip(" |;,")
+            if text:
+                entries[-1].details.append(text)
+            in_detail = bool(text)
+        elif gpa := GPA_RE.search(line):
             entries[-1].gpa = gpa.group(1)
     return entries
 
@@ -210,6 +233,8 @@ def heuristic_profile(text: str) -> Profile:
     p.experience = _parse_entries(secs.get("EXPERIENCE", []) + secs.get("WORK", []), project=False)
     p.projects = _parse_entries(secs.get("PROJECTS", []) + secs.get("PROJECT", []), project=True)
     p.summary = _clean_line(" ".join(secs.get("SUMMARY", [])))
+    # "Community Service: ..." sits under Experience but is not a role of its own.
+    p.awards = [_clean_line(line) for line in text.splitlines() if re.match(r"\s*Community Service:\s*\S", line, re.I)]
     return p
 
 

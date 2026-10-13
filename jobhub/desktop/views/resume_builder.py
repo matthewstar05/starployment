@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
@@ -27,10 +28,9 @@ from PySide6.QtWidgets import (
 from ..delegates import TwoLineDelegate
 from ..editors import BulletEditor, TagEditor
 from ..widgets import ElidedLabel, EmptyState, FormGroup, GlassPanel, SegmentedControl, ToggleSwitch, button, label
+from ...tailor import RESUME_CATEGORIES, category_label, resume_file_category
 
-CATEGORIES = (("software", "Software engineering"), ("data", "Data science & analytics"),
-              ("ml", "Machine learning & AI"), ("quant", "Fintech & quant"), ("product", "Product & program"),
-              ("general", "General"))
+CATEGORIES = tuple(item for item in RESUME_CATEGORIES if item[0] != "general")
 
 SPECS = {
     "experience": (("title", "Title", "Software Engineer Intern"), ("company", "Company", "Company name"),
@@ -401,6 +401,9 @@ class ResumeFiles(QWidget):
     remove_requested = Signal(int)
     open_requested = Signal(str)
     open_folder_requested = Signal()
+    enabled_changed = Signal(int, bool)
+    set_main_requested = Signal(int)
+    rename_requested = Signal(int, str)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -408,10 +411,10 @@ class ResumeFiles(QWidget):
         column = QVBoxLayout(self)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(16)
-        choice = FormGroup("Resume to send", "Applies to new applications and to prepared ones when you prepare them again.")
+        choice = FormGroup("Resume bank", "Automatic role detection uses each resume’s name and PDF text. You can also choose a role type yourself.")
         self.strategy = SegmentedControl()
-        self.strategy.addItem("Generated", "tailored")
-        self.strategy.addItem("Matched file", "library")
+        self.strategy.addItem("Tailor from profile", "tailored")
+        self.strategy.addItem("Resume bank", "library")
         self.strategy.addItem("Main resume", "original")
         self.strategy.activated.connect(lambda _i: self.strategy_changed.emit(str(self.strategy.currentData())))
         self.strategy_note = label("", "rowNote")
@@ -421,7 +424,7 @@ class ResumeFiles(QWidget):
         column.addWidget(choice)
 
         header = QHBoxLayout()
-        header.addWidget(label("Resume files", "groupTitle"))
+        header.addWidget(label("Resume bank", "groupTitle"))
         header.addStretch(1)
         folder = button("Open folder", "quiet", icon="folder")
         folder.clicked.connect(self.open_folder_requested)
@@ -435,9 +438,9 @@ class ResumeFiles(QWidget):
         self.rows.setContentsMargins(16, 8, 12, 8)
         self.rows.setSpacing(0)
         column.addWidget(self.panel)
-        self.empty = label("No resume files yet. Add a PDF for each kind of role you apply to, for example one for "
+        self.empty = label("No resumes in your Resume bank yet. Add a PDF for each kind of role you apply to, for example one for "
                            "software engineering and one for data science. Starployment picks the matching file "
-                           "for each job when “Matched file” is selected.", "rowNote")
+                           "for each job when “Resume bank” is selected.", "rowNote")
         column.addWidget(self.empty)
         column.addStretch(1)
         self._describe()
@@ -445,17 +448,19 @@ class ResumeFiles(QWidget):
     def _describe(self, *_args) -> None:
         self.strategy_note.setText({
             "tailored": "A one-page resume is generated for each role from your Resume builder.",
-            "library": "Each job gets the uploaded file whose role type matches it best, or your default file.",
+            "library": "Matches resumes to jobs locally, with no AI calls or tokens. Your PDFs are sent unchanged.",
             "original": "Every application uses your main resume from setup.",
         }.get(str(self.strategy.currentData()), ""))
 
     def set_strategy(self, strategy: str) -> None:
+        if strategy == "bank":
+            strategy = "library"
         index = self.strategy.findData(strategy)
         if index >= 0:
             self.strategy.setCurrentIndex(index)
 
     def set_files(self, files: list[dict]) -> None:
-        signature = tuple((f.get("id"), f.get("category"), f.get("is_default"), f.get("label")) for f in files)
+        signature = tuple((f.get("id"), f.get("category"), f.get("is_default"), f.get("label"), f.get("enabled", 1), f.get("is_main", False)) for f in files)
         if signature == self._signature:
             return
         self._signature = signature
@@ -472,26 +477,47 @@ class ResumeFiles(QWidget):
             text = QVBoxLayout()
             text.setSpacing(1)
             text.addWidget(ElidedLabel(str(record.get("label") or "Resume"), "rowPrimary"))
-            text.addWidget(ElidedLabel("Default resume" if record.get("is_default") else "Used for matching roles",
-                                       "rowSecondary"))
+            if record.get("is_main"):
+                subtitle = "Main resume" + (" · Default fallback" if record.get("is_default") else "")
+            else:
+                subtitle = "Default fallback" if record.get("is_default") else "Used for matching roles"
+            text.addWidget(ElidedLabel(subtitle, "rowSecondary"))
             line.addLayout(text, 1)
             category = QComboBox()
+            detected = resume_file_category({**record, "category": "auto"})
             for key, title in CATEGORIES:
+                if key == "auto" and detected != "general":
+                    title = f"Automatic · {category_label(detected)}"
                 category.addItem(title, key)
-            category.setCurrentIndex(max(0, category.findData(record.get("category") or "general")))
+            selected = record.get("category") or "auto"
+            category.setCurrentIndex(max(0, category.findData("auto" if selected == "general" else selected)))
+            category.setToolTip("Automatic detects the role from the resume name and PDF text. Choose a role to override it.")
             category.activated.connect(lambda _i, c=category, fid=record["id"]: self.category_changed.emit(int(fid), str(c.currentData())))
             category.setAccessibleName("Role type")
             line.addWidget(category)
+            consider_toggle = ToggleSwitch()
+            consider_toggle.setChecked(bool(record.get("enabled", 1)))
+            consider_toggle.setToolTip("Consider this resume during job matching in Resume Bank")
+            consider_toggle.toggled.connect(lambda checked, fid=record["id"]: self.enabled_changed.emit(int(fid), bool(checked)))
+            line.addWidget(consider_toggle)
             open_button = button("", "quiet", icon="eye")
             open_button.setToolTip("Open")
             open_button.clicked.connect(lambda _=False, p=record["path"]: self.open_requested.emit(str(p)))
             line.addWidget(open_button)
+            remove_button = button("", "quiet", icon="trash")
+            remove_button.setToolTip("Remove from resume bank")
+            remove_button.clicked.connect(lambda _=False, fid=record["id"]: self.remove_requested.emit(int(fid)))
+            line.addWidget(remove_button)
             more = button("", "quiet", icon="chevron-down")
             more.setToolTip("More")
             menu = QMenu(more)
+            menu.addAction("Rename…", lambda fid=record["id"], name=record.get("label") or "Resume": self._rename(int(fid), str(name)))
+            menu.addSeparator()
+            if not record.get("is_main"):
+                menu.addAction("Set as main resume", lambda fid=record["id"]: self.set_main_requested.emit(int(fid)))
             if not record.get("is_default"):
-                menu.addAction("Make default", lambda fid=record["id"]: self.default_requested.emit(int(fid)))
-            menu.addAction("Remove", lambda fid=record["id"]: self.remove_requested.emit(int(fid)))
+                menu.addAction("Make default fallback", lambda fid=record["id"]: self.default_requested.emit(int(fid)))
+            menu.addAction("Remove from bank", lambda fid=record["id"]: self.remove_requested.emit(int(fid)))
             more.setMenu(menu)
             line.addWidget(more)
             self.rows.addWidget(row)
@@ -502,21 +528,18 @@ class ResumeFiles(QWidget):
         self.panel.setVisible(bool(files))
         self.empty.setVisible(not files)
 
+    def _rename(self, file_id: int, current_name: str) -> None:
+        name, accepted = QInputDialog.getText(self, "Rename resume", "Resume name", text=current_name)
+        if accepted:
+            self.rename_requested.emit(file_id, name)
+
     def _choose(self) -> None:
         from pathlib import Path
         paths, _ = QFileDialog.getOpenFileNames(self, "Add resume PDFs", str(Path.home()), "PDF files (*.pdf)")
         for path in paths:
-            self.add_requested.emit(path, guess_category(Path(path).stem))
+            self.add_requested.emit(path, "auto")
 
 
 def guess_category(name: str) -> str:
     """Guess a role type from a file name such as ``Ada_SWE_resume`` or ``data-science-cv``."""
-    import re
-    lowered = name.lower()
-    tokens = set(re.split(r"[^a-z0-9]+", lowered))
-    for key, words in (("quant", ("quant", "fintech", "trading", "finance")), ("ml", ("ml", "machine", "ai")),
-                       ("data", ("data", "analytics", "analyst", "ds")), ("product", ("product", "pm")),
-                       ("software", ("swe", "software", "engineer", "engineering", "dev", "backend", "frontend"))):
-        if any(word in tokens or (len(word) > 3 and word in lowered) for word in words):
-            return key
-    return "general"
+    return resume_file_category({"label": name})
