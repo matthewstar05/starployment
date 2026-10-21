@@ -37,7 +37,7 @@ COMPANIES = [
     ("Example", "Data Engineer", "Remote", 128_000, 150_000, 77),
     ("Vantage", "Security Engineer", "Washington, DC", 150_000, 190_000, 35),
 ]
-PAGES = ("dashboard", "jobs", "applications", "tracker", "profile", "resume-bank", "builder", "settings", "apply", "setup")
+PAGES = ("dashboard", "jobs", "applications", "applications-compact", "tracker", "profile", "resume-bank", "builder", "settings", "apply", "setup")
 # README image names written by --docs.
 DOC_NAMES = {
     "dashboard-light.png": "starployment-overview-light.png",
@@ -237,6 +237,7 @@ def main() -> int:
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     os.environ["QT_SCALE_FACTOR"] = str(args.scale)
     os.environ["JOBHUB_REDUCED_MOTION"] = "1"
+    os.environ["JOBHUB_UI_PREFS"] = "0"    # the owner's own view choices never change a screenshot
 
     from PySide6.QtWidgets import QApplication, QPushButton
 
@@ -270,7 +271,7 @@ def main() -> int:
         controller.refresh(include_account=True)
         window.resize(width, height)
         window.show()
-        shots = (("dashboard", 0), ("jobs", 1), ("applications", 2), ("tracker", 3), ("profile", 4),
+        shots = (("dashboard", 0), ("jobs", 1), ("applications", 2), ("applications-compact", 2), ("tracker", 3), ("profile", 4),
                  ("resume-bank", 4), ("builder", 4), ("settings", 5))
         for page, index in shots:
             if page not in pages:
@@ -278,7 +279,8 @@ def main() -> int:
             window.nav.setCurrentRow(index)
             if page == "jobs":
                 window.jobs.table.selectRow(1)
-            if page == "applications":
+            if page in ("applications", "applications-compact"):
+                window.apps.view.choose("compact" if page == "applications-compact" else "comfortable")
                 window.apps.list.setCurrentRow(0)
             if page == "profile":
                 window.profile.show_tab("details")

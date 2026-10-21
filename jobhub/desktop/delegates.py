@@ -280,14 +280,25 @@ class ActionDelegate(QStyledItemDelegate):
 
 
 class ApplicationDelegate(QStyledItemDelegate):
-    """A two-line application row: monogram, employer, role, status, and time."""
+    """An application row: monogram, employer, role, status, and time.
+
+    Comfortable rows use two lines; ``compact`` rows fit everything on one line
+    so long lists show about twice as many applications."""
 
     HEIGHT = 64
+    COMPACT_HEIGHT = 34
+    compact = False
+
+    def row_height(self) -> int:
+        return self.COMPACT_HEIGHT if self.compact else self.HEIGHT
 
     def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
-        return QSize(max(1, option.rect.width()), self.HEIGHT)
+        return QSize(max(1, option.rect.width()), self.row_height())
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
+        if self.compact:
+            self._paint_compact(painter, option, index)
+            return
         colors = current_colors()
         record = index.data(RECORD_ROLE) or {}
         company = str(record.get("company") or "Employer")
@@ -333,6 +344,52 @@ class ApplicationDelegate(QStyledItemDelegate):
             painter.setPen(qcolor(colors["text_subtle"]))
             painter.drawText(QRectF(rect.right() - time_width - 10, rect.top() + 32, time_width, 18),
                              Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, when)
+        painter.restore()
+
+    def _paint_compact(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
+        colors = current_colors()
+        record = index.data(RECORD_ROLE) or {}
+        company = str(record.get("company") or "Employer")
+        title = str(record.get("title") or "Role")
+        status = str(record.get("_display_status") or record.get("status") or "unknown")
+        detail = str(index.data(SUBTITLE_ROLE) or "")
+        rect = QRectF(option.rect).adjusted(4, 1, -4, -1)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        if item_state_selected(option):
+            painter.fillPath(rounded_path(rect, 9), qcolor(colors["fill_selected"]))
+        elif item_state_hover(option):
+            painter.fillPath(rounded_path(rect, 9), qcolor(colors["fill_hover"]))
+        paint_monogram(painter, QRectF(rect.left() + 8, rect.center().y() - 11, 22, 22), company)
+        fg, bg = color_for_status(status)
+        pill_font = ui_font(10, QFont.Weight.DemiBold)
+        pill_text = status_label(status)
+        pill_width = QFontMetrics(pill_font).horizontalAdvance(pill_text) + 14
+        pill = QRectF(rect.right() - pill_width - 8, rect.center().y() - 9, pill_width, 18)
+        paint_pill(painter, pill, pill_text, fg, bg, pill_font)
+        left = rect.left() + 40
+        star = record.get("_starred")
+        room = pill.left() - left - 10 - (14 if star else 0)
+        primary, secondary = ui_font(13, QFont.Weight.DemiBold), ui_font(12)
+        name_width = min(QFontMetrics(primary).horizontalAdvance(company), room * 0.45)
+        shown = QFontMetrics(primary).elidedText(company, Qt.TextElideMode.ElideRight, int(name_width))
+        line = QRectF(left, rect.top(), name_width, rect.height())
+        painter.setFont(primary)
+        painter.setPen(qcolor(colors["text"]))
+        painter.drawText(line, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, shown)
+        after = left + QFontMetrics(primary).horizontalAdvance(shown)
+        if star:
+            star_color = colors["red"] if star == "red" else colors["amber"]
+            paint_star_mark(painter, QPointF(after + 9, rect.center().y()), 4.5, star_color)
+            after += 14
+        rest = pill.left() - after - 18
+        if rest > 20:
+            painter.setFont(secondary)
+            painter.setPen(qcolor(colors["text_muted"]))
+            text = f"{title} · {detail}" if detail else title
+            painter.drawText(QRectF(after + 8, rect.top(), rest, rect.height()),
+                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                             QFontMetrics(secondary).elidedText(text, Qt.TextElideMode.ElideRight, int(rest)))
         painter.restore()
 
 

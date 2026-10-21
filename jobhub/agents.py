@@ -305,14 +305,26 @@ def _scratch() -> Path:
 
 # Preparation and AI Autofill fan out (parallel_prepare x parallel_agent_calls); this
 # ceiling keeps the number of agent processes alive at once bounded.
-MAX_AGENT_CALLS = 24
+MAX_AGENT_CALLS = 8
 _call_slots = threading.BoundedSemaphore(MAX_AGENT_CALLS)
+_calls_running = 0
+_calls_lock = threading.Lock()
 
 
 def complete(prompt: str, settings: dict, *, timeout: int = 120) -> str:
     """Send one prompt to the connected agent and return its text reply."""
+    global _calls_running
+    from .governor import wait_for_headroom
     with _call_slots:
-        return _complete(prompt, settings, timeout)
+        # Past the first call, wait while the computer is busy so it stays responsive.
+        wait_for_headroom(lambda: _calls_running, max_wait=300)
+        with _calls_lock:
+            _calls_running += 1
+        try:
+            return _complete(prompt, settings, timeout)
+        finally:
+            with _calls_lock:
+                _calls_running -= 1
 
 
 def _complete(prompt: str, settings: dict, timeout: int) -> str:
@@ -392,17 +404,58 @@ def _codex_cli(prompt: str, model: str, timeout: int) -> str:
         shutil.rmtree(scratch, ignore_errors=True)
 
 
+_AGY_SIGN_IN = ("antigravity-oauth-token", "installation_id")
+_AGY_HISTORY = ("annotations", "brain", "conversations", "implicit", "presence", "log", "crashes")
+_agy_home_lock = threading.Lock()
+_agy_home_ready = False
+
+
+def _agy_home() -> Path | None:
+    """A private agy home holding only the candidate's sign-in, linked from their own.
+
+    agy starts every MCP server in the user's config on every call (often a dozen,
+    ~35 s and hundreds of MB each time) and offers no per-call switch. Starployment
+    needs plain text replies, so its calls run with this home: no MCP servers, no
+    plugins, and the user's own agy config is never changed. ``None`` when agy has
+    no saved sign-in to link, so the call runs as before."""
+    global _agy_home_ready
+    real = Path.home() / ".gemini" / "antigravity-cli"
+    if not (real / "antigravity-oauth-token").is_file():
+        return None
+    home = Path(config.AGENT_HOME) / "agy"
+    state = home / ".gemini" / "antigravity-cli"
+    with _agy_home_lock:
+        state.mkdir(parents=True, exist_ok=True, mode=0o700)
+        for name in _AGY_SIGN_IN:
+            source, link = real / name, state / name
+            if source.exists() and not (link.is_symlink() and link.resolve() == source.resolve()):
+                link.unlink(missing_ok=True)
+                link.symlink_to(source)
+        if not _agy_home_ready:   # once per launch: drop the conversations earlier calls left behind
+            for name in _AGY_HISTORY:
+                shutil.rmtree(state / name, ignore_errors=True)
+            _agy_home_ready = True
+    return home
+
+
 def _antigravity_cli(prompt: str, model: str, timeout: int) -> str:
     binary = find_cli("agy")
     if not binary:
         raise AgentError("Antigravity CLI (agy) is not installed")
     scratch = _scratch()
     try:
-        command = [binary, "-p", prompt, "--output-format", "json"]
+        command = [binary, "-p", prompt, "--output-format", "json", "--sandbox", "--disable-slash-commands"]
         if model:
             command += ["--model", model]
+        env = _env_for(binary)
+        try:
+            home = _agy_home()
+        except OSError:
+            home = None
+        if home is not None:
+            env["HOME"] = str(home)
         result = subprocess.run(command, capture_output=True, text=True, timeout=timeout,
-                                env=_env_for(binary), cwd=str(scratch))
+                                env=env, cwd=str(scratch))
         try:
             data = json.loads(result.stdout)
         except json.JSONDecodeError as error:

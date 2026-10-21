@@ -119,6 +119,7 @@ SCREENSHOTS = DATA / "screenshots"
 BROWSER_PROFILE = DATA / "browser_profile"
 RESUME_LIBRARY = RESUMES / "library"
 AGENT_SCRATCH = DATA / "agent_scratch"
+AGENT_HOME = DATA / "agent_home"       # agy runs here: the sign-in only, no MCP servers
 DB_PATH = DATA / "jobhub.db"
 WEB = ROOT / "web"
 

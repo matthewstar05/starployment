@@ -161,6 +161,12 @@ def test_status_reports_install_and_login_steps(monkeypatch, tmp_path):
 def test_antigravity_cli_runner_and_complete(tmp_path, monkeypatch):
     scratch_dir = tmp_path / "scratch"
     monkeypatch.setattr(agents.config, "AGENT_SCRATCH", scratch_dir)
+    monkeypatch.setattr(agents.config, "AGENT_HOME", tmp_path / "agent_home")
+    real = tmp_path / "home" / ".gemini" / "antigravity-cli"
+    real.mkdir(parents=True)
+    (real / "antigravity-oauth-token").write_text("token")
+    (real / "mcp").mkdir()                                   # the user's MCP servers are never linked
+    monkeypatch.setattr(agents.Path, "home", classmethod(lambda cls: tmp_path / "home"))
     monkeypatch.setattr(agents, "find_cli", lambda name: f"/opt/{name}")
     calls = []
 
@@ -178,7 +184,11 @@ def test_antigravity_cli_runner_and_complete(tmp_path, monkeypatch):
     assert res == "reply text"
     assert len(calls) == 1
     cmd, kwargs = calls[0]
-    assert cmd == ["/opt/agy", "-p", prompt, "--output-format", "json", "--model", model]
+    assert cmd == ["/opt/agy", "-p", prompt, "--output-format", "json", "--sandbox", "--disable-slash-commands",
+                   "--model", model]
+    state = tmp_path / "agent_home" / "agy" / ".gemini" / "antigravity-cli"
+    assert kwargs["env"]["HOME"] == str(tmp_path / "agent_home" / "agy")
+    assert (state / "antigravity-oauth-token").read_text() == "token" and not (state / "mcp").exists()
     assert kwargs["cwd"].startswith(str(scratch_dir))
     assert not any(scratch_dir.iterdir())
 

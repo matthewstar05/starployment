@@ -857,6 +857,12 @@ class SegmentedControl(QWidget):
     def itemData(self, index: int) -> object:  # noqa: N802
         return self._items[index][1]
 
+    def setItemText(self, index: int, text: str) -> None:  # noqa: N802
+        if 0 <= index < len(self._items) and self._items[index][0] != text:
+            self._items[index] = (text, self._items[index][1])
+            self.updateGeometry()
+            self._set_thumb(self._segment_rect(self._index))
+
     def findData(self, data: object) -> int:  # noqa: N802
         return next((i for i, (_, value) in enumerate(self._items) if value == data), -1)
 

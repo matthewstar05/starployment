@@ -6,10 +6,13 @@ The list on the left mixes two kinds of records:
   each with a proposed answer. Review, edit, and "Approve & send" here.
 * attempts, from the browser engine: status, evidence, and a private note.
 
-Filters narrow the list to starred applications, what needs you (To review),
-what is queued (Approved), what went out (Sent), and what stopped (Issues).
-The Sort menu orders the list; right-click a row to star it, mark it as sent
-(applied outside Starployment), or remove it from the list.
+Filters (each with its count) narrow the list to prepared applications that
+can be sent (Ready), ones still missing answers or stopped while preparing
+(Incomplete), what is queued (Approved), what went out (Sent), and what
+stopped (Issues); "Starred only" and "Hide rejections" combine with any of
+them. View switches between comfortable two-line rows and compact one-line
+rows for long lists. The Sort menu orders the list; right-click a row to star
+it, mark it as sent (applied outside Starployment), or remove it.
 
 Starred applications (priority companies are starred automatically) are
 prepared like any other but never sent by "Send ready" or automatic runs:
@@ -17,6 +20,7 @@ each one waits for its own Approve & send.
 """
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -68,12 +72,28 @@ NOTE_AUTOSAVE_MS = 900
 SOURCE_TEXT = {"saved": "Saved answer", "profile": "From your profile", "resume": "From your resume",
                "luna": "Drafted by Luna · review", "autofill": "AI Autofill · check", "you": "Your answer", "none": "Needs your answer",
                "declined": "Declined", "file": "Attached automatically"}
-FILTERS = (("All", "all"), ("Starred", "starred"), ("To review", "review"), ("Approved", "approved"),
+FILTERS = (("All", "all"), ("Ready", "ready"), ("Incomplete", "incomplete"), ("Approved", "approved"),
            ("Sent", "sent"), ("Issues", "issues"))
+VIEWS = (("Comfortable", "comfortable"), ("Compact", "compact"))
 SORTS = (("Recent activity", "recent"), ("Priority", "priority"), ("Newest posted", "posted"), ("Best match", "match"),
          ("Company A–Z", "company"), ("Status", "status"))
-BUCKET_ORDER = {"review": 0, "approved": 1, "issues": 2, "sent": 3}
+BUCKET_ORDER = {"incomplete": 0, "ready": 1, "approved": 2, "issues": 3, "sent": 4}
 OPEN_DRAFT = {"preparing", "ready", "needs_answers", "approved", "sending", "practice", "error"}
+
+
+def _saved_view() -> str:
+    from PySide6.QtCore import QSettings
+    if os.environ.get("JOBHUB_UI_PREFS") == "0":
+        return "comfortable"
+    value = QSettings("Starployment", "Starployment").value("applications/view", "comfortable")
+    return value if value in dict((v, t) for t, v in VIEWS) else "comfortable"
+
+
+def _save_view(value: str) -> None:
+    from PySide6.QtCore import QSettings
+    if os.environ.get("JOBHUB_UI_PREFS") == "0":
+        return
+    QSettings("Starployment", "Starployment").setValue("applications/view", value)
 
 
 def activity_time(record: dict) -> float:
@@ -130,7 +150,9 @@ def sort_records(records: list[dict], key: str) -> list[dict]:
 def bucket(record: dict) -> str:
     status = str(record.get("status") or "")
     if record.get("kind") == "draft":
-        return "approved" if status in ("approved", "sending") else "review"
+        if status in ("approved", "sending"):
+            return "approved"
+        return "ready" if status in ("ready", "practice") else "incomplete"
     if status == "applied" or record.get("submission_attempted"):
         return "sent"
     return "issues"
@@ -629,17 +651,32 @@ class ApplicationsView(QWidget):
         self.search.textChanged.connect(self._rebuild_list)
         toolbar.addWidget(self.search, 1)
         toolbar.addStretch(0)
+        self.starred_only = ToggleSwitch("Starred only")
+        self.starred_only.setToolTip("Show only starred applications; they are sent one by one")
+        self.starred_only.toggled.connect(self._rebuild_list)
+        self.starred_only.setMinimumWidth(self.starred_only.sizeHint().width())
+        toolbar.addWidget(self.starred_only)
         self.hide_rejected = ToggleSwitch("Hide rejections")
         self.hide_rejected.setToolTip("Leave out applications the employer rejected")
         self.hide_rejected.toggled.connect(self._rebuild_list)
         self.hide_rejected.setMinimumWidth(self.hide_rejected.sizeHint().width())   # the search field gives way first
         toolbar.addWidget(self.hide_rejected)
+        self.view = ChoiceButton("rows", "View")
+        for text, value in VIEWS:
+            self.view.add_option(text, value)
+        self.view.set_value(_saved_view())
+        self.view.changed.connect(self._view_changed)
+        toolbar.addWidget(self.view)
+        column.addLayout(toolbar)
+        filters = QHBoxLayout()
+        filters.setSpacing(10)
         self.filter = SegmentedControl(compact=True)
         for text, value in FILTERS:
             self.filter.addItem(text, value)
         self.filter.currentIndexChanged.connect(self._rebuild_list)
-        toolbar.addWidget(self.filter)
-        column.addLayout(toolbar)
+        filters.addWidget(self.filter)
+        filters.addStretch(1)
+        column.addLayout(filters)
 
         split = QSplitter(Qt.Orientation.Horizontal)
         split.setChildrenCollapsible(False)
@@ -666,7 +703,9 @@ class ApplicationsView(QWidget):
         self.list = QListWidget()
         self.list.setObjectName("applicationList")
         self.list.setAccessibleName("Applications")
-        self.list.setItemDelegate(ApplicationDelegate(self.list))
+        self.delegate = ApplicationDelegate(self.list)
+        self.delegate.compact = self.view.value() == "compact"
+        self.list.setItemDelegate(self.delegate)
         self.list.setMouseTracking(True)
         self.list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.list.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
@@ -893,10 +932,11 @@ class ApplicationsView(QWidget):
                 (q.get("answer") in (None, "", []) or q.get("rejected")) and q.get("kind") != "file"
                 for q in d.get("questions") or [])
             for d in self.drafts))
-        review = sum(1 for d in self.drafts if d.get("status") in ("ready", "needs_answers", "practice", "preparing"))
+        ready = sum(1 for d in self.drafts if d.get("status") in ("ready", "practice"))
+        incomplete = sum(1 for d in self.drafts if d.get("status") in ("needs_answers", "preparing", "error"))
         sent = sum(1 for a in self.applications if a.get("status") == "applied")
         self.header.set_subtitle(
-            f"{plural(review, 'application')} to review · {approved} approved · {sent} confirmed"
+            f"{ready} ready · {incomplete} incomplete · {approved} approved · {sent} confirmed"
             if self.drafts else "Review prepared applications, send them, and see every attempt.")
         self._rebuild_list()
 
@@ -905,17 +945,34 @@ class ApplicationsView(QWidget):
         query = self.search.text().casefold().strip()
         out = []
         hide_rejected = self.hide_rejected.isChecked()
+        counts = dict.fromkeys(BUCKET_ORDER, 0)
         for record in self.records:
             if hide_rejected and record.get("kind") != "draft" and record.get("stage") == "rejected":
                 continue
-            if wanted == "starred" and not record.get("_starred"):
-                continue
-            if wanted not in ("all", "starred") and bucket(record) != wanted:
+            if self.starred_only.isChecked() and not record.get("_starred"):
                 continue
             if query and query not in f"{record.get('company', '')} {record.get('title', '')}".casefold():
                 continue
+            counts[bucket(record)] += 1
+            if wanted != "all" and bucket(record) != wanted:
+                continue
             out.append(record)
+        self._set_filter_counts(counts)
         return sort_records(out, str(self.sort.value() or "recent"))
+
+    def _set_filter_counts(self, counts: dict[str, int]) -> None:
+        """Each filter shows how many rows it holds under the current search and switches."""
+        total = sum(counts.values())
+        for index, (text, value) in enumerate(FILTERS):
+            count = total if value == "all" else counts.get(value, 0)
+            self.filter.setItemText(index, f"{text} {count}" if count else text)
+
+    def _view_changed(self, *_args) -> None:
+        compact = self.view.value() == "compact"
+        _save_view(str(self.view.value()))
+        if self.delegate.compact != compact:
+            self.delegate.compact = compact
+            self._rebuild_list()
 
     def _rebuild_list(self, *_args) -> None:
         previous = self._selected_key()
@@ -930,7 +987,9 @@ class ApplicationsView(QWidget):
                 questions = record.get("questions") or []
                 open_count = sum(1 for q in questions if needs_attention(q))
                 luna = sum(1 for q in questions if q.get("source") in ("luna", "autofill") and not q.get("approved"))
-                hint = (f"{plural(open_count, 'answer')} needed" if open_count else
+                error = str(record.get("error") or "").strip()
+                hint = (error.splitlines()[0][:120] if record.get("status") == "error" and error else
+                        f"{plural(open_count, 'answer')} needed" if open_count else
                         f"Luna drafted {luna}" if luna else f"Match {float(record.get('score') or 0):.0f}")
                 when = relative_time(record.get("updated_at") or record.get("created_at"))
             else:
@@ -950,7 +1009,7 @@ class ApplicationsView(QWidget):
                             + ("\nDouble-click to open the email" if record.get("_email") else "")
                             + ("\nStarred" if record.get("_starred") else "")
                             + (f"\nPosted {local_time(record['posted_at'])}" if record.get("posted_at") else ""))
-            item.setSizeHint(QSize(0, ApplicationDelegate.HEIGHT))
+            item.setSizeHint(QSize(0, self.delegate.row_height()))
             self.list.addItem(item)
             if previous is not None and self._key(record) == previous:
                 restore = row
@@ -997,6 +1056,12 @@ class ApplicationsView(QWidget):
                 return
 
     def show_filter(self, value: str) -> None:
+        if value == "starred":
+            self.starred_only.setChecked(True)
+            value = "all"
+        elif value == "review":
+            # Freshly prepared work: what can be sent if any, else what still needs answers.
+            value = "ready" if any(bucket(r) == "ready" for r in self.records) else "incomplete"
         index = self.filter.findData(value)
         if index >= 0:
             self.filter.setCurrentIndex(index)

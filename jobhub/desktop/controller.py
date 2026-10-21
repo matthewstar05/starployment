@@ -1,8 +1,11 @@
 """Connect the native window to Starployment's durable discovery and apply pipeline."""
 from __future__ import annotations
 
+import os
 import queue
 import shutil
+import subprocess
+import sys
 import threading
 import time
 from collections import deque
@@ -14,7 +17,7 @@ from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from .. import config, db, email_tracker, prepare, scheduler
+from .. import config, db, email_tracker, governor, prepare, scheduler
 from ..setup import merge_resume_into_library, save_resume_library, save_setup
 from .ui import JobHubWindow, SetupWizard
 
@@ -179,6 +182,25 @@ class DesktopController(QObject):
             scheduler_enabled=self.scheduler_enabled,
             auto_apply=bool(settings.get("auto_apply")),
         )
+        self._keep_awake(self.scheduler_enabled and bool(settings.get("auto_apply")) and not self._stopping.is_set())
+
+    _caffeinate: subprocess.Popen | None = None
+
+    def _keep_awake(self, on: bool) -> None:
+        """While automatic applications are on, keep the Mac from idle-sleeping so scans and sends
+        keep running overnight. The display may still sleep; the assertion ends with the app."""
+        if sys.platform != "darwin" or QApplication.platformName() == "offscreen":
+            return
+        running = self._caffeinate is not None and self._caffeinate.poll() is None
+        if on and not running:
+            try:
+                self._caffeinate = subprocess.Popen(["/usr/bin/caffeinate", "-i", "-w", str(os.getpid())],
+                                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except OSError:
+                self._caffeinate = None
+        elif not on and running:
+            self._caffeinate.terminate()
+            self._caffeinate = None
 
     def _work(self) -> None:
         while not self._stopping.is_set():
@@ -550,6 +572,7 @@ class DesktopController(QObject):
 
     def stop(self) -> None:
         self._stopping.set()
+        self._keep_awake(False)
         self._send_queue.clear()
         self._prep_stop.set()
         scheduler.STATE.stop = True
@@ -1007,6 +1030,12 @@ class DesktopController(QObject):
         for draft_id in list(self._send_queue):
             if len(self._send_active) >= limit:
                 break
+            if self._send_active and governor.busy():
+                # The computer is busy: keep the sends already running and look again shortly.
+                if not self._pump_waiting:
+                    self._pump_waiting = True
+                    QTimer.singleShot(5000, self._repump)
+                break
             draft = db.get_draft(draft_id)
             company = str((draft or {}).get("company") or draft_id).strip().casefold()
             if company in busy:
@@ -1016,6 +1045,12 @@ class DesktopController(QObject):
             busy.add(company)
             threading.Thread(target=self._send_worker, args=(draft_id, limit), daemon=True,
                              name=f"starployment-send-{draft_id}").start()
+
+    _pump_waiting = False
+
+    def _repump(self) -> None:
+        self._pump_waiting = False
+        self._pump_sends()
 
     def _send_worker(self, draft_id: int, parallel: int) -> None:
         try:

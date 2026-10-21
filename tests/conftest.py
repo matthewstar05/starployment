@@ -9,6 +9,8 @@ import pytest
 # Human pacing (typing delays, time on page, off-screen headed browser) makes
 # real submissions look like a person; tests use local forms and run fast.
 os.environ.setdefault("JOBHUB_HUMAN_PACING", "0")
+os.environ.setdefault("JOBHUB_UI_PREFS", "0")        # never read or write the real app's view choices
+os.environ.setdefault("JOBHUB_GOVERNOR", "0")       # tests never wait on the machine's load
 
 from jobhub import config, db
 

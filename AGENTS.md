@@ -302,7 +302,12 @@ and runs Luna/AI Autofill `settings.parallel_prepare` at a time (Settings →
 Automation → Prepare applications N at once). AI Autofill splits one draft's
 questions across `settings.parallel_agent_calls` agent calls (one per long answer,
 short ones together; `luna._autofill_batches`), and `agents.MAX_AGENT_CALLS` caps
-agent processes alive at once. The Qt thread only reads SQLite (refresh
+agent processes alive at once. `governor.py` keeps the Mac responsive: past the
+first one, a send, an agent call, or a form read waits while the one-minute load
+exceeds 0.7 per performance core or macOS reports under 20% memory free
+(`JOBHUB_GOVERNOR=0` disables it; tests set that). While automatic applications are
+on, the controller holds `caffeinate -i -w <pid>` so scans and sends continue
+overnight. The Qt thread only reads SQLite (refresh
 every 15 s) and renders via window.set_data.
 ```
 
@@ -322,7 +327,8 @@ every 15 s) and renders via window.set_data.
 | `jobhub/profile.py` | Resume parsing (pdftotext/pypdf, optional LLM). |
 | `jobhub/tailor.py` | One-page resume builder (`plan_resume`, `build_resume`: rank saved content, resize body text from 11 to 10 points, then `shrink` and `compact`; final `KeepInFrame` scaling protects the one-page guarantee). Helvetica typography, centered name/contact, Education first, saved Summary if present, Projects above Experience, then Skills and Awards; thin section rules and dates flush right. Entries, bullets, education details, tools, and skills display by job relevance; pins and Luna selections protect inclusion without overriding display order. The target job title is never added as a headline. Also role types (`classify_role`), resume files (`choose_resume_file`), `resume_choice`. |
 | `jobhub/prepare.py` | Read Greenhouse/Lever/Ashby form definitions, answer from saved facts, Luna fill, `prepare_batch`, `approve_and_queue`, `send_draft`. |
-| `jobhub/agents.py` | Connections for Luna: Claude CLI, Codex CLI, Anthropic/OpenAI keys; CLI discovery beyond a GUI PATH, status, sign-in, tool-free `complete`. |
+| `jobhub/agents.py` | Connections for Luna: Claude CLI, Codex CLI, Antigravity CLI (agy), Anthropic/OpenAI keys; CLI discovery beyond a GUI PATH, status, sign-in, tool-free `complete`. agy runs with `HOME` set to `config.AGENT_HOME/agy`, which links only the candidate's agy sign-in, so none of the user's MCP servers start (≈40 s → ≈5 s per call); the user's own agy config is never changed. |
+| `jobhub/governor.py` | Load and free-memory checks that hold back extra parallel work while the computer is busy. |
 | `jobhub/luna.py` | Draft answers (`draftable`, `draft_answers`), resume selection, optional email second opinion; all output validated. |
 | `jobhub/email_tracker.py` | Provider presets, read-only IMAP, `classify`, `match_application`, `sync`. |
 | `jobhub/setup.py`, `readiness.py` | Saving setup and the resume library (`save_resume_library`, `merge_resume_into_library`); what is still missing before unattended work. |
@@ -371,7 +377,7 @@ Tests prove behavior; screenshots prove design. After any visual change:
 | `desktop/__main__.py` | Entry point and flags: `--no-scheduler`, `--setup`, `--smoke-test PNG`, `--browser-check`, `--dependency-check`. |
 | `desktop/controller.py` | `DesktopController`: signal wiring, worker thread, refresh loop, toasts, save handlers. The only place the UI talks to `db`/`scheduler`. |
 | `desktop/ui.py` | `JobHubWindow` shell: floating sidebar, page stack, toasts, keyboard shortcuts, macOS menu bar, theme crossfade, `set_data`, `set_scan_state`. Re-exports the views. |
-| `desktop/views/` | One module per sidebar page: `dashboard.py` (+ `ApplyHero`, `ApplyPlanSheet`), `jobs.py` (+ `AddPostingSheet`; Posted column, Posted window and Sort menus, header-click sorting run in SQL), `applications.py` (drafts and attempts; `DraftDetail`, `QuestionRow`; Starred filter, Sort menu with Priority (`format.priority_rank`: offers, interviews, assessments first, rejections last), Hide rejections, double-click or Open email for a stage's email (`format.email_link`), right-click star / mark as sent / remove), `tracker.py` (spreadsheet, `AddApplicationSheet`; Sort menu with Priority, which sorts the Stage column by `format.priority_rank`, and Hide rejections), `profile.py` (Details, Resume builder, Resume files, Answers), `settings.py`, `passwords.py` (saved Workday sign-ins, opened from Settings → Workday). Shared panels: `resume_builder.py`, `connections.py` (Luna and Email, also used by the wizard). |
+| `desktop/views/` | One module per sidebar page: `dashboard.py` (+ `ApplyHero`, `ApplyPlanSheet`), `jobs.py` (+ `AddPostingSheet`; Posted column, Posted window and Sort menus, header-click sorting run in SQL), `applications.py` (drafts and attempts; `DraftDetail`, `QuestionRow`; Starred filter, Sort menu with Priority (`format.priority_rank`: offers, interviews, assessments first, rejections last), Hide rejections, double-click or Open email for a stage's email (`format.email_link`), right-click star / mark as sent / remove), Ready / Incomplete / Approved / Sent / Issues filters with counts, Starred only, View: Comfortable or Compact rows (`ApplicationDelegate.compact`, remembered in QSettings unless `JOBHUB_UI_PREFS=0`), `tracker.py` (spreadsheet, `AddApplicationSheet`; Sort menu with Priority, which sorts the Stage column by `format.priority_rank`, and Hide rejections), `profile.py` (Details, Resume builder, Resume files, Answers), `settings.py`, `passwords.py` (saved Workday sign-ins, opened from Settings → Workday). Shared panels: `resume_builder.py`, `connections.py` (Luna and Email, also used by the wizard). |
 | `desktop/editors.py` | No-syntax editors: `TagEditor` (chips), `KeyValueEditor` (label/value rows), `BulletEditor`, `FlowLayout`, `yes_no_control`. They set `formExpand` so `FormGroup` rows give them full width. |
 | `desktop/wizard.py` | `SetupWizard`: step indicator, resume drop zone, grouped forms, answer bank. |
 | `desktop/widgets.py` | The design system: backdrop, glass, controls, motion, layout helpers. |

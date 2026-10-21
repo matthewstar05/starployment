@@ -863,11 +863,12 @@ def prepare_batch(count: int, min_score: float, one_per_company: bool = True, *,
                            exclude_starred=exclude_starred)
     workers = max(1, luna_workers or int(settings.get("parallel_prepare", 8) or 1))
     results: dict[int, int] = {}
-    failed = started = 0
+    failed = started = reading = 0
     counter = threading.Lock()
+    from .governor import wait_for_headroom
 
     def read(position: int, job: Job) -> None:
-        nonlocal failed, started
+        nonlocal failed, started, reading
         if stop is not None and stop.is_set():
             return
         with counter:
@@ -877,11 +878,17 @@ def prepare_batch(count: int, min_score: float, one_per_company: bool = True, *,
             progress(f"Preparing {job.company}", index, len(jobs))
         if exclude_starred and is_starred(db.get_job(job.id) or job, db.get_settings().get("priority_companies") or []):
             return  # the candidate may have starred it while an earlier form was being prepared
+        wait_for_headroom(lambda: reading, stop)
+        with counter:
+            reading += 1
         try:
             results[position] = prepare_job(job, profile, settings)
         except Exception:  # noqa: BLE001 - recorded on the draft
             with counter:
                 failed += 1
+        finally:
+            with counter:
+                reading -= 1
 
     # Forms are read side by side (settings.parallel_prepare); db writes are serialized by its lock.
     with ThreadPoolExecutor(max_workers=workers) as pool:

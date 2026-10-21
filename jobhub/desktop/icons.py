@@ -51,6 +51,7 @@ _ICON_FILES = {
     "code": "code.svg",
     "award": "award.svg",
     "sort": "arrow-up-down.svg",
+    "rows": "rows-3.svg",
 }
 _DEFAULT_COLOR = "#5b6573"
 
