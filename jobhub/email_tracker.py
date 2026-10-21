@@ -218,6 +218,14 @@ def _message_key(message, uid: bytes) -> str:
 _HEADER_BATCH = 200
 _RECONNECTS = 3
 _CONNECTION_ERRORS = (imaplib.IMAP4.abort, OSError)   # includes timeouts, SSL, DNS, and broken pipes
+# Bump when ``classify``, ``_RECRUITING_HINT`` or the Luna reading changes, so mail
+# already read and set aside (``db.mark_mail_seen``) is read again under the new rules.
+RULES_VERSION = 1
+OFFLINE = "Couldn't reach your mail server"
+
+
+class MailUnavailable(RuntimeError):
+    """The mail server could not be reached or stopped responding (offline, sleep, VPN changes)."""
 
 
 ARCHIVE_LABEL = "Starployment/Rejected"
@@ -311,17 +319,20 @@ class Mailbox:
                 return found.group("name")
         raise RuntimeError("This mailbox has no Archive folder, so rejections stay in the Inbox")
 
-    def recent(self, days: int, limit: int = 3000):
+    def recent(self, days: int, limit: int = 3000, skip=None):
         """Yield ``(uid, message, body)`` for recent mail, newest first.
 
         Headers are fetched in batches; only messages whose subject or sender
-        looks like recruiting mail are fetched in full (``body`` is None otherwise).
+        looks like recruiting mail are fetched in full (``body`` is None otherwise),
+        and not those whose key ``skip(key)`` says were already read.
         A dropped connection (timeouts, sleep, Wi-Fi changes) is reopened and the
-        read resumes after the last message already handed out."""
+        read resumes after the last message already handed out. The reconnect
+        budget is per stall: a read that keeps making progress keeps going."""
         since = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%d-%b-%Y")
         uids: list[bytes] | None = None
         done = 0
         reconnects = 0
+        progress = 0
         while True:
             mailbox = None
             try:
@@ -342,7 +353,8 @@ class Mailbox:
                     for uid in chunk:
                         message = BytesParser(policy=policy.default).parsebytes(headers.get(uid, b""))
                         body = None
-                        if _RECRUITING_HINT.search(f"{message.get('Subject', '')} {message.get('From', '')}"):
+                        if (_RECRUITING_HINT.search(f"{message.get('Subject', '')} {message.get('From', '')}")
+                                and not (skip and skip(_message_key(message, uid)))):
                             result, body_rows = mailbox.uid("FETCH", uid, "(BODY.PEEK[])")
                             raw = next((item[1] for item in body_rows or [] if isinstance(item, tuple)), b"")
                             message = BytesParser(policy=policy.default).parsebytes(raw[:400_000]) if raw else message
@@ -350,10 +362,12 @@ class Mailbox:
                         done += 1
                         yield uid, message, body
                 return
-            except _CONNECTION_ERRORS:
+            except _CONNECTION_ERRORS as error:
+                if done > progress:
+                    progress, reconnects = done, 0
                 reconnects += 1
                 if reconnects > _RECONNECTS:
-                    raise
+                    raise MailUnavailable(f"{OFFLINE} ({str(error)[:80] or type(error).__name__})") from error
                 time.sleep(min(10, 2 * reconnects))
             finally:
                 if mailbox is not None:
@@ -386,10 +400,27 @@ def sync(settings: dict | None = None, *, messages=None, archiver=None) -> SyncR
     applications = db.list_tracker()
     known = db.known_mail_keys()
     without_id = db.mail_keys_without_id()
+    rules = RULES_VERSION * 10 + bool(tracking.get("use_luna"))   # turning Luna on reads set-aside mail again
+    db.prune_mail_seen(rules, (datetime.now(timezone.utc) - timedelta(days=days + 2)).isoformat(timespec="seconds"))
+    seen = db.seen_mail_keys(rules)
     report = SyncReport()
     mailbox = None if messages is not None else Mailbox(settings.get("email_verification") or {})
-    source = messages if mailbox is None else mailbox.recent(days)
+    # Mail read before and set aside is not downloaded again; recorded mail is
+    # always re-read, since its application may have become tracked since.
+    source = messages if mailbox is None else mailbox.recent(days, skip=lambda key: key in seen and key not in known)
     rejections: list[tuple[bytes, str, int]] = []   # (uid, Message-ID, application id) still in the Inbox
+    set_aside: list[str] = []
+    try:
+        _read(source, report, tracking, settings, applications, known, without_id, rejections, seen, set_aside, rules)
+    finally:
+        db.mark_mail_seen(set_aside, rules)   # keep progress even when the connection drops
+    if tracking.get("archive_rejections") and rejections:
+        _archive_rejections(report, rejections, archiver or (mailbox.archive if mailbox else None))
+    return report
+
+
+def _read(source, report, tracking, settings, applications, known, without_id, rejections, seen, set_aside,
+          rules) -> None:
     for uid, message, body in source:
         report.scanned += 1
         if body is None:
@@ -414,6 +445,12 @@ def sync(settings: dict | None = None, *, messages=None, archiver=None) -> SyncR
             except Exception:  # noqa: BLE001 - optional second opinion
                 stage = None
         if stage is None:
+            if key not in seen and key not in known:
+                set_aside.append(key)
+                if len(set_aside) >= 100:
+                    db.mark_mail_seen(set_aside, rules)
+                    seen.update(set_aside)
+                    set_aside.clear()
             continue
         report.recruiting += 1
         try:
@@ -453,9 +490,6 @@ def sync(settings: dict | None = None, *, messages=None, archiver=None) -> SyncR
                                    "title": app.get("title"), "stage": stage})
             db.add_event(f"Inbox update: {app.get('company')} · {app.get('title')} → {stage}", "success"
                          if stage in ("interview", "offer", "assessment") else "info", app.get("job_id"))
-    if tracking.get("archive_rejections") and rejections:
-        _archive_rejections(report, rejections, archiver or (mailbox.archive if mailbox else None))
-    return report
 
 
 def _archive_rejections(report: SyncReport, rejections: list[tuple[bytes, str, int]], archiver) -> None:

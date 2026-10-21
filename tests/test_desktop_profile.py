@@ -164,3 +164,45 @@ def test_resume_bank_rename_persists_and_updates_automatic_role_without_changing
         controller.stop()
         window.close()
         window.deleteLater()
+
+
+def test_profile_preview_button_emits_and_opens_generated_resume(store, monkeypatch):
+    from pathlib import Path
+    from PySide6.QtWidgets import QApplication
+    from jobhub.desktop.controller import DesktopController
+    from jobhub.desktop.ui import JobHubWindow
+
+    db.save_profile(Profile(first_name="Ada", last_name="Lovelace", email="ada@example.test",
+                            headline="Computing Pioneer",
+                            skills=["Analytical Engine", "Mathematics"],
+                            experience=[Experience(company="Babbage Labs", title="Mathematician", bullets=["Created first algorithm"])]))
+    db.set_settings({"target_titles": ["Mathematician"], "setup_complete": True})
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    window = JobHubWindow()
+    controller = DesktopController(window, scheduler_enabled=False, show_setup_on_start=False)
+    opened = []
+    monkeypatch.setattr(controller, "open_resume", lambda path: opened.append(path))
+    try:
+        view = window.profile
+        assert view.preview_button.text() == "Preview resume"
+        assert view.preview_button.isEnabled()
+
+        # Preparation and Luna can hold both assist threads for minutes; a preview must not wait.
+        import threading
+        release = threading.Event()
+        for _ in range(2):
+            controller._assist.submit(release.wait)
+        view.preview_button.click()
+        controller._quick.shutdown(wait=True)
+        release.set()
+        app.processEvents()
+
+        assert len(opened) == 1
+        preview_path = Path(opened[0])
+        assert preview_path.is_file() and preview_path.name.endswith("_preview.pdf")
+        assert "Lovelace" in preview_path.name
+    finally:
+        controller.stop()
+        window.close()
+        window.deleteLater()
+

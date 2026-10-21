@@ -51,6 +51,9 @@ CREATE TABLE IF NOT EXISTS mail_events (
   subject TEXT, stage TEXT, application_id INTEGER, confidence REAL DEFAULT 0, created_at TEXT,
   dismissed INTEGER DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS mail_seen (
+  message_key TEXT PRIMARY KEY, rules INTEGER, seen_at TEXT
+);
 CREATE TABLE IF NOT EXISTS resume_files (
   id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT UNIQUE, label TEXT, category TEXT DEFAULT 'general',
   is_default INTEGER DEFAULT 0, added_at TEXT, enabled INTEGER DEFAULT 1, removed INTEGER DEFAULT 0
@@ -1170,6 +1173,30 @@ def mail_keys_without_id() -> set[str]:
     with conn() as c:
         return {r["message_key"] for r in
                 c.execute("SELECT message_key FROM mail_events WHERE COALESCE(message_id,'')=''").fetchall()}
+
+
+def seen_mail_keys(rules: int) -> set[str]:
+    """Messages already read under these classifier rules and found not to be about an application."""
+    with conn() as c:
+        return {r["message_key"] for r in
+                c.execute("SELECT message_key FROM mail_seen WHERE rules=?", (rules,)).fetchall()}
+
+
+def mark_mail_seen(keys: list[str], rules: int) -> None:
+    """Remember hashed message keys only; nothing about the message itself."""
+    if not keys:
+        return
+    stamp = now_iso()
+    with conn() as c:
+        c.executemany("INSERT INTO mail_seen(message_key, rules, seen_at) VALUES (?,?,?) ON CONFLICT(message_key) "
+                      "DO UPDATE SET rules=excluded.rules, seen_at=excluded.seen_at",
+                      [(key, rules, stamp) for key in keys])
+
+
+def prune_mail_seen(rules: int, before: str) -> None:
+    """Forget keys from older rules or older than the lookback window."""
+    with conn() as c:
+        c.execute("DELETE FROM mail_seen WHERE rules IS NOT ? OR seen_at < ?", (rules, before))
 
 
 def known_mail_keys() -> dict[str, tuple[str, int | None]]:

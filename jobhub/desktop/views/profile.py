@@ -11,6 +11,7 @@ from typing import Any
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QComboBox, QFrame, QLineEdit, QScrollArea, QStackedWidget, QTextEdit, QVBoxLayout, QWidget
 
+from ...models import Profile
 from ..editors import SUGGESTED_FACTS, SUGGESTED_QUESTIONS, KeyValueEditor, yes_no_control
 from ..widgets import DirtyTracker, FormGroup, PageHeader, SegmentedControl, button
 from .resume_builder import ResumeBuilder, ResumeFiles
@@ -89,10 +90,15 @@ class ProfileView(QWidget):
         column.setContentsMargins(30, 26, 30, 0)
         column.setSpacing(14)
         self.header = PageHeader("Profile", SUBTITLE)
+        self.preview_button = button("Preview resume", "secondary", icon="eye")
+        self.preview_button.setToolTip("Preview the auto-generated resume based on your profile")
+        self.preview_button.setAccessibleName("Preview resume")
+        self.preview_button.clicked.connect(self._preview)
         self.save_button = button("Save changes")
         self.save_button.setEnabled(False)
         self.save_button.setToolTip("Save profile changes (⌘S)")
         self.save_button.clicked.connect(self._save)
+        self.header.add_action(self.preview_button)
         self.header.add_action(self.save_button)
         column.addWidget(self.header)
         self.tracker.changed.connect(self._dirty_changed)
@@ -260,6 +266,25 @@ class ProfileView(QWidget):
         if self._answers.get("years_experience"):
             answers["years_experience"] = str(self._answers["years_experience"])
         return answers
+
+    def _preview(self) -> None:
+        self.preview_requested.emit("")
+
+    def current_profile(self, base: Profile | None = None) -> Profile:
+        """Return a Profile model populated with the current fields in this view."""
+        data = base.model_dump() if base else {}
+        for key, edit in self.fields.items():
+            data[key] = edit.text().strip()
+        data["summary"] = self.summary.toPlainText().strip()
+        data["custom_facts"] = self.custom_facts.values()
+        lib = self.builder.library()
+        for key in ("education", "experience", "projects", "skills", "awards"):
+            if key in lib:
+                data[key] = lib[key]
+        try:
+            return Profile.model_validate(data)
+        except Exception:
+            return base or Profile.model_validate({})
 
     def _save(self) -> None:
         profile = {key: edit.text().strip() for key, edit in self.fields.items()}

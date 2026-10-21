@@ -128,13 +128,18 @@ class SettingsView(QWidget):
         self.min_score = QSpinBox()
         self.min_score.setRange(0, 100)
         self.parallel_sends = QSpinBox()
-        self.parallel_sends.setRange(1, 8)
+        self.parallel_sends.setRange(1, 24)
         self.parallel_sends.setSuffix(" at once")
+        self.parallel_prepare = QSpinBox()
+        self.parallel_prepare.setRange(1, 32)
+        self.parallel_prepare.setSuffix(" at once")
         self.show_browser = ToggleSwitch()
         self.show_browser.setAccessibleName("Show the browser while sending")
         automation.add_row("Practice mode", self.dry_run, "Fill forms but never click Submit, even when you send.")
         automation.add_row("Send applications", Stepper(self.parallel_sends, width=112),
-                           "Each runs in its own background browser, one per employer at a time.")
+                           "Each runs in its own background browser (about 300 MB each), one per employer at a time.")
+        automation.add_row("Prepare applications", Stepper(self.parallel_prepare, width=112),
+                           "Forms read and Luna answers drafted side by side while preparing.")
         automation.add_row("Show the browser while sending", self.show_browser,
                            "Off sends quietly in the background. Turn on to watch a send.")
         automation.add_row("Automatic applications", self.auto_apply,
@@ -219,7 +224,7 @@ class SettingsView(QWidget):
 
         self.tracker.watch(
             self.auto_apply, self.dry_run, self.interval, self.max_apply, self.min_score, self.luna, self.email,
-            self.parallel_sends, self.show_browser, self.keychain_protection, self.workday_accounts, self.workday_send,
+            self.parallel_sends, self.parallel_prepare, self.show_browser, self.keychain_protection, self.workday_accounts, self.workday_send,
             self.target_titles, self.locations, self.exclude_words, self.remote_ok, self.include_internships,
             self.min_salary, self.years_experience, self.max_skills, self.greenhouse, self.lever,
             self.ashby, self.workday, self.search_terms, self.priority_companies, self.discover_boards,
@@ -287,6 +292,7 @@ class SettingsView(QWidget):
             self.max_apply.setValue(int(s.get("max_apply_per_run", 3)))
             self.min_score.setValue(int(s.get("min_score_to_apply", 60)))
             self.parallel_sends.setValue(int(s.get("parallel_sends", 4)))
+            self.parallel_prepare.setValue(int(s.get("parallel_prepare", 8)))
             self.show_browser.setChecked(bool(s.get("show_browser", False)))
             self.keychain_protection.setChecked(bool(s.get("keychain_protection", False)))
             workday = s.get("workday") or {}
@@ -328,6 +334,7 @@ class SettingsView(QWidget):
             "max_apply_per_run": self.max_apply.value(),
             "min_score_to_apply": float(self.min_score.value()),
             "parallel_sends": self.parallel_sends.value(),
+            "parallel_prepare": self.parallel_prepare.value(),
             "show_browser": self.show_browser.isChecked(),
             "keychain_protection": self.keychain_protection.isChecked(),
             "workday": {"create_accounts": self.workday_accounts.isChecked(), "send": self.workday_send.isChecked()},

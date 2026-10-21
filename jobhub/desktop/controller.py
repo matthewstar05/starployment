@@ -14,12 +14,17 @@ from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from .. import config, db, prepare, scheduler
+from .. import config, db, email_tracker, prepare, scheduler
 from ..setup import merge_resume_into_library, save_resume_library, save_setup
 from .ui import JobHubWindow, SetupWizard
 
 # Settings keys that change job rankings. Saving anything else skips the
 # full-catalog rescore, which can take seconds on a large job table.
+MAIL_RETRY_MS = 5 * 60_000   # after the mail server could not be reached
+# Short tasks the candidate is waiting on; they get their own thread so they
+# never queue behind preparation or Luna, which can hold the assist pool for minutes.
+QUICK_TASKS = frozenset({"preview", "vault_auth", "agent_status", "agent_test", "mail_test", "import_resume"})
+
 SCORING_KEYS = frozenset({
     "target_titles", "preferred_locations", "exclude_title_words", "include_internships",
     "remote_ok", "min_salary", "years_experience",
@@ -75,7 +80,8 @@ class DesktopController(QObject):
         self._worker.start()
         # Preparation, Luna, inbox checks, and connection tests never use the
         # browser, so they run beside it and never delay a send or a scan.
-        self._assist = ThreadPoolExecutor(max_workers=2, thread_name_prefix="starployment-assist")
+        self._assist = ThreadPoolExecutor(max_workers=4, thread_name_prefix="starployment-assist")
+        self._quick = ThreadPoolExecutor(max_workers=1, thread_name_prefix="starployment-quick")
         self._prep_stop = threading.Event()
         self._preparing = False
         self._preparing_jobs: set[str] = set()
@@ -86,6 +92,7 @@ class DesktopController(QObject):
         self._send_counts = {"sent": 0, "other": 0}
         self._mail_state: dict = {"last_checked": None, "unmatched": 0}
         self._mail_syncing = threading.Event()
+        self._mail_retry_pending = False
 
         window.scan_requested.connect(self.scan)
         window.apply_requested.connect(self.apply)
@@ -548,6 +555,7 @@ class DesktopController(QObject):
         scheduler.STATE.stop = True
         self._tasks.put(None)
         self._assist.shutdown(wait=False, cancel_futures=True)
+        self._quick.shutdown(wait=False, cancel_futures=True)
 
     # ------------------------------------------------------------------ assist worker
     _last_settings_signature: object = None
@@ -572,7 +580,7 @@ class DesktopController(QObject):
             else:
                 self.signals.assist_finished.emit(kind, context, result)
         try:
-            self._assist.submit(run)
+            (self._quick if kind in QUICK_TASKS else self._assist).submit(run)
         except RuntimeError:   # shut down between the check and the submit
             pass
 
@@ -731,6 +739,16 @@ class DesktopController(QObject):
         if kind == "agent_status" and context is not None:
             panel, backend = context
             panel.set_status(backend, False, "Could not check the connection", error[:200], "test")
+            return
+        if kind == "mail_sync" and error.startswith(email_tracker.OFFLINE):
+            # Offline, asleep, or a VPN change: not a fault. Try once more shortly instead of next cycle.
+            retry = not self._mail_retry_pending
+            self._mail_retry_pending = True
+            if retry:
+                QTimer.singleShot(MAIL_RETRY_MS, self._retry_mail_sync)
+            self._status(f"{error}. Your inbox will be checked again in a few minutes.", 10_000, "warning")
+            db.add_event(f"Inbox check postponed: {error}", "warn")
+            self.refresh()
             return
         label = {"plan": "Preparing applications", "prepare_one": "Preparing the application", "luna": "AI Autofill",
                  "mail_sync": "Inbox check", "preview": "Resume preview", "import_resume": "Resume import"}.get(kind, kind)
@@ -1140,6 +1158,11 @@ class DesktopController(QObject):
         finally:
             self._mail_syncing.clear()
 
+    def _retry_mail_sync(self) -> None:
+        self._mail_retry_pending = False
+        if db.get_settings().get("email_tracking", {}).get("enabled"):
+            self.sync_email()
+
     def sync_email(self, manual: bool = False) -> None:
         if not db.get_settings().get("email_tracking", {}).get("enabled"):
             self._status("Turn on reply tracking in Settings → Connections → Email", tone="info")
@@ -1161,18 +1184,28 @@ class DesktopController(QObject):
             return
         self._submit_assist("import_resume", merge_resume_into_library, None, path)
 
-    def preview_resume(self, job_id: str) -> None:
-        job, profile = db.get_job(job_id), db.get_profile()
-        if job is None or profile is None:
+    def preview_resume(self, job_id: str = "") -> None:
+        base_profile = db.get_profile()
+        profile = (self.window.profile.current_profile(base_profile)
+                   if hasattr(self.window, "profile") and hasattr(self.window.profile, "current_profile")
+                   else base_profile)
+        if profile is None or not (profile.full_name or profile.education or profile.experience or profile.projects or profile.skills):
+            self._status("Fill in your profile details first", tone="warning")
             return
-        if self.window.profile.dirty:
-            self._status("Previewing your saved library. Save changes to include them.", tone="info")
+        job = db.get_job(job_id) if job_id else None
+        if job_id and job is None:
+            self._status("Job not found for preview", tone="warning")
+            return
+        if hasattr(self.window, "profile") and self.window.profile.dirty:
+            self._status("Previewing with your unsaved edits. Save changes to keep them.", tone="info")
 
         def build() -> str:
-            from ..tailor import resume_choice
+            from ..tailor import profile_preview_resume, resume_choice
             settings = dict(db.get_settings(), resume_strategy="tailored")
-            path, _ = resume_choice(profile, job, settings, out_dir=config.TAILORED / "previews")
-            return path
+            if job is not None:
+                path, _ = resume_choice(profile, job, settings, out_dir=config.TAILORED / "previews")
+                return path
+            return str(profile_preview_resume(profile, settings))
 
         self._submit_assist("preview", build, None)
 

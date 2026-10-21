@@ -357,17 +357,27 @@ def _story(plan: ResumePlan, scale: float = 1.0) -> list:
         S.append(HRFlowable(width="100%", thickness=0.5, color=RULE,
                             spaceBefore=1 * scale, spaceAfter=3 * scale))
 
-    def row(left: str, right: str, sub: bool = False) -> None:
+    width = letter[0] - 2 * PAGE_MARGIN_X
+
+    def right_width(right: str, style: ParagraphStyle) -> float:
+        if not right:
+            return 0.0
+        return min(width * 0.48, max(0.9 * inch, stringWidth(right, style.fontName, style.fontSize) + 10 * scale))
+
+    def one_line(markup: str, style: ParagraphStyle, avail: float) -> bool:
+        para = Paragraph(markup, style)
+        para.wrap(avail, 10_000)
+        return len(para.blPara.lines) <= 1
+
+    def row(left: str, right: str, sub: bool = False, left_style: ParagraphStyle | None = None) -> None:
         """One line of an entry: markup on the left, a date or place flush right."""
-        left_style, right_style = (styles["sub"], styles["subright"]) if sub else (styles["item"], styles["right"])
+        default_left, right_style = (styles["sub"], styles["subright"]) if sub else (styles["item"], styles["right"])
+        left_style = left_style or default_left
         if not right:
             S.append(Paragraph(left, left_style))
             return
-        width = letter[0] - 2 * PAGE_MARGIN_X
-        right_width = min(width * 0.48, max(0.9 * inch,
-                          stringWidth(right, right_style.fontName, right_style.fontSize) + 10 * scale))
         table = Table([[Paragraph(left, left_style), Paragraph(_esc(right), right_style)]],
-                      colWidths=["*", right_width], hAlign="LEFT")
+                      colWidths=["*", right_width(right, right_style)], hAlign="LEFT")
         table.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
                                    ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
                                    ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0)]))
@@ -380,9 +390,32 @@ def _story(plan: ResumePlan, scale: float = 1.0) -> list:
     def gap() -> None:
         S.append(Spacer(1, 3.5 * scale))
 
-    def tech(values: list[str]) -> str:
-        ordered = sorted(values, key=lambda value: -_score_text(value, plan.weights))
-        return _esc(", ".join(ordered[:6]))
+    def tech(values: list[str]) -> list[str]:
+        return sorted(values, key=lambda value: -_score_text(value, plan.weights))[:6]
+
+    def entry(main: str, extra: str, right: str, details: list[str], sub_right: str = "",
+              sep: str = " · ") -> None:
+        """An entry's header, each line kept to one line. ``main`` (bold) and ``extra`` share
+        the first line with ``right``; when they don't fit, ``extra`` leads the italic line
+        below, and that line keeps only the most relevant ``details`` that fit."""
+        head_avail = width - right_width(right, styles["right"])
+        head, lead = _join(main, extra, sep=sep), ""
+        if extra and not one_line(head, styles["item"], head_avail):
+            head, lead = main, extra
+        head_style = styles["item"]
+        for shrink in (0.96, 0.92, 0.88):
+            if one_line(head, head_style, head_avail):
+                break
+            head_style = ParagraphStyle(f"item{shrink}", parent=styles["item"],
+                                        fontSize=styles["item"].fontSize * shrink)
+        row(head, right, left_style=head_style)
+        sub_avail = width - right_width(sub_right, styles["subright"])
+        shown = list(details)
+        while shown and not one_line(_join(lead, _esc(", ".join(shown))), styles["sub"], sub_avail):
+            shown.pop()
+        sub = _join(lead, _esc(", ".join(shown)))
+        if sub or sub_right:
+            row(sub, sub_right, sub=True)
 
     if plan.education:
         heading("Education")
@@ -418,28 +451,22 @@ def _story(plan: ResumePlan, scale: float = 1.0) -> list:
         heading("Summary")
         S.append(Paragraph(_esc(plan.summary), styles["body"]))
 
-    def emit(section: str, items: list[_Item], first, second) -> None:
+    def emit(section: str, items: list[_Item], parts, sep: str = " · ") -> None:
         if not items:
             return
         heading(section)
         for n, item in enumerate(items):
             if n:
                 gap()
-            x = item.source
-            left, right = first(x)
-            row(left, right)
-            left, right = second(x)
-            if left or right:
-                row(left, right, sub=True)
+            entry(*parts(item.source), sep=sep)
             bullets(item.bullets)
 
     emit("Projects", plan.projects,
-         lambda x: (_join(f"<b>{_esc(x.name)}</b>", _esc(x.role)), _short(x.link) or _dates(x.start, x.end)),
-         lambda x: (tech(x.tech), _dates(x.start, x.end) if x.link else ""))
+         lambda x: (f"<b>{_esc(x.name)}</b>", _esc(x.role), _short(x.link) or _dates(x.start, x.end),
+                    tech(x.tech), _dates(x.start, x.end) if x.link else ""))
     emit("Experience", plan.experience,
-         lambda x: (_join(_join(f"<b>{_esc(x.title)}</b>" if x.title else "", _esc(x.company), sep=", "),
-                          _esc(x.location), sep=" - "), _dates(x.start, x.end)),
-         lambda x: (tech(x.tech), ""))
+         lambda x: (_join(f"<b>{_esc(x.title)}</b>" if x.title else "", _esc(x.company), sep=", "),
+                    _esc(x.location), _dates(x.start, x.end), tech(x.tech), ""), sep=" - ")
     if plan.skills:
         heading("Skills")
         S.append(Paragraph(_esc(", ".join(plan.skills)), styles["body"]))
@@ -743,6 +770,27 @@ def snapshot_resume_for_application(resume_path: str, application_id: int) -> st
 
 def _safe(s: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "", s)[:24] or "x"
+
+
+def profile_preview_resume(profile: Profile, settings: dict | None = None, out_path: Path | None = None) -> Path:
+    """Build a one-page preview PDF generated directly from the candidate's profile."""
+    settings = settings or {}
+    targets = [t for t in (settings.get("target_titles") or []) if t and str(t).strip()]
+    title = " / ".join(targets) if targets else (profile.headline or "Profile Preview")
+    job = Job(
+        id="preview",
+        source="profile",
+        company="Profile Preview",
+        title=title,
+        url="https://starployment.local/preview",
+        description=" ".join(targets),
+    )
+    if out_path is None:
+        out_dir = config.TAILORED / "previews"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        name = _safe(profile.last_name or profile.first_name or "resume")
+        out_path = out_dir / f"{name}_preview.pdf"
+    return build_resume(profile, job, out_path, use_llm=False, settings=settings)
 
 
 def cover_letter_pdf(profile: Profile, job: Job, settings: dict | None = None) -> str:

@@ -1,7 +1,14 @@
 from pypdf import PdfReader
 
 from jobhub.models import Education, Experience, Job, Profile, Project
-from jobhub.tailor import ResumePlan, _story, build_resume, tailored_headline, tailored_summary
+from jobhub.tailor import (
+    ResumePlan,
+    _story,
+    build_resume,
+    profile_preview_resume,
+    tailored_headline,
+    tailored_summary,
+)
 
 
 def sample_profile():
@@ -241,3 +248,35 @@ def test_every_education_detail_prints_and_is_trimmed_last():
     assert plan.compact()
     assert len(plan.education[0].details) == 2
     assert "Relevant Coursework: Databases, Statistics" in plan.education[0].details
+
+
+def test_profile_preview_resume_generates_one_page_pdf_from_profile(tmp_path):
+    p = sample_profile()
+    out = tmp_path / "custom_preview.pdf"
+    path = profile_preview_resume(p, {"target_titles": ["Data Engineer"]}, out_path=out)
+    assert path.is_file() and path == out
+    reader = PdfReader(str(path))
+    assert len(reader.pages) == 1
+    text = "\n".join(page.extract_text() for page in reader.pages)
+    assert "Casey Example" in text
+    assert "Example University" in text
+    assert "Campus Database" in text
+
+
+
+def test_long_entry_header_moves_role_to_its_own_line():
+    from reportlab.platypus import Paragraph, Table
+
+    profile = sample_profile()
+    profile.projects = [
+        Project(name="Homeostatic Agent-based Economic Sandbox - Aequitas",
+                role="Quantitative Developer & Software Engineer", start="Jul 2026", end="Present",
+                tech=["C++", "Vulkan"], bullets=["Built a sandbox."]),
+        Project(name="Tiny", role="Dev", start="2022", end="2023", bullets=["Short."]),
+    ]
+    rows = [[c.text for c in e._cellvalues[0]] if isinstance(e, Table) else [e.text]
+            for e in _story(ResumePlan(profile, job("SWE", "C++"))) if isinstance(e, (Table, Paragraph))]
+    assert ["<b>Homeostatic Agent-based Economic Sandbox - Aequitas</b>", "Jul 2026 – Present"] in rows
+    long_sub = next(r for r in rows if r and r[0].startswith("Quantitative Developer"))
+    assert long_sub[0].startswith("Quantitative Developer &amp; Software Engineer · ")
+    assert ["<b>Tiny</b> · Dev", "2022 – 2023"] in rows

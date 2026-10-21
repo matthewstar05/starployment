@@ -348,3 +348,94 @@ def test_other_servers_move_to_their_own_archive_folder_or_stop(monkeypatch):
     bare = _WritableIMAP(gmail=False, folders=[b'(\\HasNoChildren) "/" "INBOX"'])
     with pytest.raises(RuntimeError, match="no Archive folder"):
         _archiving_box(monkeypatch, bare).archive([(b"7", "reject@x")])
+
+
+class _Inbox:
+    """A fake read-only IMAP session over a few fictional emails that counts full downloads."""
+    bodies: list[bytes] = []
+
+    def __init__(self, mails):
+        self.mails = mails
+
+    def uid(self, command, *args):
+        if command == "SEARCH":
+            return "OK", [b" ".join(self.mails)]
+        uids, what = args[0].split(b","), args[1]
+        if what == "(BODY.PEEK[])":
+            type(self).bodies.append(uids[0])
+            return "OK", [(b"%s (UID %s BODY[] {1}" % (uids[0], uids[0]), self.mails[uids[0]].as_bytes())]
+        rows = [(b"%s (UID %s BODY[HEADER.FIELDS] {1}" % (u, u),
+                 b"".join(b"%s: %s\r\n" % (k.encode(), str(v).encode()) for k, v in self.mails[u].items()) + b"\r\n")
+                for u in uids]
+        return "OK", rows
+
+    def logout(self):
+        pass
+
+
+def test_mail_read_and_set_aside_is_not_downloaded_again(store, monkeypatch):
+    northwind = submitted("Northwind Labs", "Software Engineer", "https://job-boards.greenhouse.io/nw/jobs/1")
+    news = message("Example Weekly <news@example.test>", "Product update from Example Weekly",
+                   "Our newest features this month.", "<n@x>")
+    rejection = message("Northwind Labs <talent@northwindlabs.com>", "Update on your Northwind Labs application",
+                        "Unfortunately, we have decided not to move forward.", "<r@x>")
+    mails = {b"1": news, b"2": rejection}
+    box = email_tracker.Mailbox.__new__(email_tracker.Mailbox)
+    monkeypatch.setattr(box, "open", lambda: _Inbox(mails), raising=False)
+    monkeypatch.setattr(email_tracker, "Mailbox", lambda _settings: box)
+    settings = {"email_tracking": {"lookback_days": 30}}
+
+    _Inbox.bodies = []
+    report = email_tracker.sync(settings)
+    assert sorted(_Inbox.bodies) == [b"1", b"2"] and report.scanned == 2
+    assert {row["id"]: row["stage"] for row in db.list_tracker()}[northwind] == "rejected"
+
+    _Inbox.bodies = []
+    email_tracker.sync(settings)
+    assert _Inbox.bodies == [b"2"]   # the newsletter is skipped; recorded mail is always read again
+
+    _Inbox.bodies = []
+    email_tracker.sync({"email_tracking": {"lookback_days": 30, "use_luna": False}})
+    assert _Inbox.bodies == [b"2"]
+    monkeypatch.setattr(email_tracker, "RULES_VERSION", email_tracker.RULES_VERSION + 1)
+    _Inbox.bodies = []
+    email_tracker.sync(settings)
+    assert sorted(_Inbox.bodies) == [b"1", b"2"]   # new rules read everything again
+
+
+class _StallingIMAP(_FlakyIMAP):
+    """Every connection drops after one more header batch; or, with ``stuck``, before any."""
+    stuck = False
+
+    def __init__(self, total):
+        super().__init__(total)
+        self.batches = 0
+
+    def uid(self, command, *args):
+        if command != "SEARCH":
+            if type(self).stuck or self.batches:
+                raise TimeoutError("The read operation timed out")
+            self.batches += 1
+        self.flaky = False
+        return super().uid(command, *args)
+
+
+def test_a_slow_read_that_keeps_making_progress_is_not_given_up(monkeypatch):
+    monkeypatch.setattr(email_tracker, "_HEADER_BATCH", 2)
+    monkeypatch.setattr(email_tracker.time, "sleep", lambda _: None)
+    _StallingIMAP.opened, _StallingIMAP.stuck = 0, False
+    box = email_tracker.Mailbox.__new__(email_tracker.Mailbox)
+    monkeypatch.setattr(box, "open", lambda: _StallingIMAP(10), raising=False)
+    assert len(list(box.recent(30))) == 10   # five drops, more than the per-stall budget of three
+    assert _StallingIMAP.opened > email_tracker._RECONNECTS + 1
+
+
+def test_an_unreachable_mail_server_is_reported_as_offline(monkeypatch):
+    monkeypatch.setattr(email_tracker.time, "sleep", lambda _: None)
+    _StallingIMAP.opened, _StallingIMAP.stuck = 0, True
+    box = email_tracker.Mailbox.__new__(email_tracker.Mailbox)
+    monkeypatch.setattr(box, "open", lambda: _StallingIMAP(4), raising=False)
+    with pytest.raises(email_tracker.MailUnavailable) as raised:
+        list(box.recent(30))
+    assert str(raised.value).startswith(email_tracker.OFFLINE)
+    assert _StallingIMAP.opened == email_tracker._RECONNECTS + 1

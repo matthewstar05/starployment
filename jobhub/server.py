@@ -235,6 +235,16 @@ async def upload_resume(file: UploadFile, use_llm: bool = True):
     return p.model_dump(exclude={"raw_text"})
 
 
+@app.get("/api/profile/preview-resume")
+async def preview_profile_resume():
+    from .tailor import profile_preview_resume
+    p = db.get_profile()
+    if not p:
+        raise HTTPException(404, "Profile not found")
+    path = await asyncio.to_thread(profile_preview_resume, p, db.get_settings())
+    return FileResponse(str(path), media_type="application/pdf", filename=f"{p.last_name or 'resume'}_preview.pdf")
+
+
 @app.get("/api/settings")
 def settings():
     return db.get_settings()

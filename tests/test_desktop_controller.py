@@ -96,3 +96,26 @@ def test_status_messages_use_toasts_with_tones(controller):
     controller._status("Could not refresh", tone="error")
     assert controller.window.sidebar.console.last_text == "Could not refresh"
     assert controller.window.sidebar.console.last_tone == "error"
+
+
+def test_an_unreachable_mail_server_postpones_the_inbox_check_once(controller, monkeypatch):
+    from jobhub import db, email_tracker
+    from jobhub.desktop import controller as module
+
+    scheduled = []
+    monkeypatch.setattr(module.QTimer, "singleShot", lambda ms, fn: scheduled.append((ms, fn)))
+    offline = f"{email_tracker.OFFLINE} (The read operation timed out)"
+    controller._assist_failed("mail_sync", False, offline)
+    controller._assist_failed("mail_sync", False, offline)
+    assert [ms for ms, _ in scheduled] == [module.MAIL_RETRY_MS]   # one retry, however many failures
+    assert controller.window.sidebar.console.last_tone == "warning"
+    assert not any(e["level"] == "error" for e in db.list_events(10))
+
+    checks = []
+    monkeypatch.setattr(controller, "sync_email", lambda manual=False: checks.append(manual))
+    db.set_settings({"email_tracking": {"enabled": True}})
+    scheduled[0][1]()
+    assert checks == [False] and not controller._mail_retry_pending
+
+    controller._assist_failed("mail_sync", False, "The mail server rejected the sign-in")
+    assert controller.window.sidebar.console.last_tone == "error"

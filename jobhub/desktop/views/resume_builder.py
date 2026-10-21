@@ -374,14 +374,14 @@ class ResumeBuilder(QWidget):
 
     def set_preview_jobs(self, jobs: list[tuple[str, str]]) -> None:
         self._preview_jobs = list(jobs)
-        self.preview_button.setEnabled(bool(jobs))
 
     def _preview_menu(self) -> None:
         menu = QMenu(self)
-        for job_id, text in self._preview_jobs[:12]:
-            menu.addAction(text, lambda jid=job_id: self.preview_requested.emit(jid))
-        if menu.isEmpty():
-            menu.addAction("Run a scan to find matches first").setEnabled(False)
+        menu.addAction("General profile resume", lambda: self.preview_requested.emit(""))
+        if self._preview_jobs:
+            menu.addSeparator()
+            for job_id, text in self._preview_jobs[:12]:
+                menu.addAction(text, lambda jid=job_id: self.preview_requested.emit(jid))
         menu.exec(self.preview_button.mapToGlobal(self.preview_button.rect().bottomLeft()))
 
     def _choose_import(self) -> None:

@@ -253,11 +253,12 @@ def test_settings_save_parallel_sends_and_the_browser_choice(controller):
     view = controller.window.settings
     view.set_settings(db.get_settings())
     assert view.parallel_sends.value() == 3 and not view.show_browser.isChecked()
-    view.parallel_sends.setValue(6)
+    view.parallel_sends.setValue(16)
+    view.parallel_prepare.setValue(12)
     view.show_browser.setChecked(True)
     patches = []
     view.save_requested.connect(patches.append)
     view._save()
-    assert patches[-1]["parallel_sends"] == 6 and patches[-1]["show_browser"] is True
+    assert patches[-1]["parallel_sends"] == 16 and patches[-1]["parallel_prepare"] == 12 and patches[-1]["show_browser"] is True
     with pytest.raises(ValidationError):
         db.set_settings({"parallel_sends": 50})

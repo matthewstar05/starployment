@@ -20,7 +20,7 @@ from .tailor import resume_for_job, snapshot_resume_for_application
 
 # Applications may run side by side, each in its own browser (see engine.browser_profile_slot).
 # The candidate's "parallel_sends" setting decides how many; this is the hard ceiling.
-MAX_PARALLEL_SENDS = 8
+MAX_PARALLEL_SENDS = 24
 _apply_slots = threading.BoundedSemaphore(MAX_PARALLEL_SENDS)
 _scan_lock = threading.Lock()
 

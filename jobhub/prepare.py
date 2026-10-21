@@ -642,23 +642,27 @@ def autofill(draft_id: int, settings: dict | None = None) -> int:
     return len(filled)
 
 
-def autofill_all(progress: Callable[[str, int, int], None] | None = None, workers: int = 3) -> dict:
+def autofill_all(progress: Callable[[str, int, int], None] | None = None, workers: int | None = None) -> dict:
     """AI Autofill every open prepared application that still has unanswered questions."""
     settings = db.get_settings()
+    workers = workers or int(settings.get("parallel_prepare", 8) or 1)
     targets = [d["id"] for d in db.list_drafts(("ready", "needs_answers", "practice", "error"))
                if any(_open(q) for q in d["questions"])]
     done = filled = failed = 0
+    counter = threading.Lock()
 
     def run(draft_id: int) -> int:
         nonlocal done, failed
         try:
             return autofill(draft_id, settings)
         except Exception as error:  # noqa: BLE001
-            failed += 1
+            with counter:
+                failed += 1
             db.update_draft(draft_id, error=f"AI Autofill failed: {str(error)[:200]}")
             return 0
         finally:
-            done += 1
+            with counter:
+                done += 1
             if progress:
                 progress("AI Autofill", done, len(targets))
 
@@ -840,7 +844,7 @@ def prepare_job(job: Job, profile: Profile, settings: dict) -> int:
 
 def prepare_batch(count: int, min_score: float, one_per_company: bool = True, *,
                   use_luna: bool | None = None, progress: Callable[[str, int, int], None] | None = None,
-                  stop: threading.Event | None = None, luna_workers: int = 3,
+                  stop: threading.Event | None = None, luna_workers: int | None = None,
                   posted_within_hours: int = 0, order: str = "match",
                   exclude_starred: bool | None = None) -> dict:
     """Prepare up to ``count`` applications. Luna drafts run after every form is read.
@@ -857,19 +861,32 @@ def prepare_batch(count: int, min_score: float, one_per_company: bool = True, *,
         exclude_starred = bool((settings.get("apply_plan") or {}).get("exclude_starred", True))
     jobs = plan_candidates(count, min_score, one_per_company, posted_within_hours=posted_within_hours, order=order,
                            exclude_starred=exclude_starred)
-    prepared: list[int] = []
-    failed = 0
-    for index, job in enumerate(jobs, 1):
+    workers = max(1, luna_workers or int(settings.get("parallel_prepare", 8) or 1))
+    results: dict[int, int] = {}
+    failed = started = 0
+    counter = threading.Lock()
+
+    def read(position: int, job: Job) -> None:
+        nonlocal failed, started
         if stop is not None and stop.is_set():
-            break
+            return
+        with counter:
+            started += 1
+            index = started
         if progress:
             progress(f"Preparing {job.company}", index, len(jobs))
         if exclude_starred and is_starred(db.get_job(job.id) or job, db.get_settings().get("priority_companies") or []):
-            continue  # the candidate may have starred it while an earlier form was being prepared
+            return  # the candidate may have starred it while an earlier form was being prepared
         try:
-            prepared.append(prepare_job(job, profile, settings))
+            results[position] = prepare_job(job, profile, settings)
         except Exception:  # noqa: BLE001 - recorded on the draft
-            failed += 1
+            with counter:
+                failed += 1
+
+    # Forms are read side by side (settings.parallel_prepare); db writes are serialized by its lock.
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        list(pool.map(read, range(len(jobs)), jobs))
+    prepared = [results[position] for position in sorted(results)]
     drafted = fill_failed = 0
     use_luna = luna_ready(settings) if use_luna is None else use_luna and luna_ready(settings)
     fill = autofill if (settings.get("luna") or {}).get("autofill_on_prepare", True) else luna_fill
@@ -887,15 +904,17 @@ def prepare_batch(count: int, min_score: float, one_per_company: bool = True, *,
             try:
                 return fill(draft_id, settings)
             except Exception as error:  # noqa: BLE001
-                fill_failed += 1
+                with counter:
+                    fill_failed += 1
                 db.update_draft(draft_id, error=f"Luna could not draft answers: {str(error)[:200]}")
                 return 0
             finally:
-                done += 1
+                with counter:
+                    done += 1
                 if progress:
                     progress("Luna is drafting answers", done, len(needing))
 
-        with ThreadPoolExecutor(max_workers=max(1, luna_workers)) as pool:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
             drafted = sum(pool.map(run, needing))
     db.add_event(f"Prepared {len(prepared)} application(s) for review" + (f"; Luna drafted {drafted} answers" if drafted else ""),
                  "success" if prepared else "warn")

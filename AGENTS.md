@@ -177,7 +177,9 @@ them to make a feature easier.
 11. **The inbox is read-only and minimal.** `email_tracker` opens INBOX
    read-only, keeps only sender, subject, date, Message-ID (so the candidate
    can open that email from Applications), and the inferred stage
-   (`mail_events`), and only advances a stage
+   (`mail_events`), plus hashed keys of mail it read and set aside
+   (`mail_seen`, so later checks skip downloading it; bump
+   `email_tracker.RULES_VERSION` when classification changes), and only advances a stage
    (`db.set_application_stage(..., "email")`); it never reopens an offer or a
    closed application or undoes a manual choice. Uncertain matches are left
    for the candidate. The one write is opt-in **Archive rejections**
@@ -292,8 +294,12 @@ email_tracker.sync ──► db.set_application_stage ──► Tracker ◄─�
 
 desktop/controller.py: one worker thread runs scans, retries, and imports; a
 send pool runs approved applications side by side (Settings → Automation →
-Send applications N at once), each in a background browser; a two-thread
-"assist" pool runs preparation, Luna, inbox checks, and connection tests. The Qt thread only reads SQLite (refresh
+Send applications N at once, up to 24), each in a background browser; a four-thread
+"assist" pool runs preparation, Luna, inbox checks, and connection tests, and a
+one-thread "quick" pool (`controller.QUICK_TASKS`) runs resume previews, Touch ID,
+connection checks, and imports so they never wait behind it. Preparation reads forms
+and runs Luna/AI Autofill `settings.parallel_prepare` at a time (Settings →
+Automation → Prepare applications N at once). The Qt thread only reads SQLite (refresh
 every 15 s) and renders via window.set_data.
 ```
 

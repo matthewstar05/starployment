@@ -120,3 +120,30 @@ def test_jobs_button_and_main_menu_open_the_shared_plan_and_persist_toggle(app, 
     finally:
         controller.stop()
         scheduler.STATE.stop = False
+
+
+def test_bulk_preparation_reads_forms_side_by_side(store, make_pdf, monkeypatch):
+    import threading
+    import time
+
+    rows = postings(monkeypatch)
+    resume = make_pdf(store / "resume.pdf", ["Alex Example", "Analyst"])
+    db.save_profile(Profile(first_name="Alex", last_name="Example", resume_path=str(resume)))
+    db.set_settings({"parallel_prepare": 3})
+    active, peak, lock = 0, 0, threading.Lock()
+
+    def slow_prepare(job, profile, settings):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.2)
+        with lock:
+            active -= 1
+        return db.upsert_draft(job.id, status="ready")
+
+    monkeypatch.setattr(prepare, "prepare_job", slow_prepare)
+    report = prepare.prepare_batch(3, 0, use_luna=False)
+    assert report["prepared"] == 3 and peak == 3
+    with pytest.raises(ValidationError):
+        db.set_settings({"parallel_prepare": 0})
