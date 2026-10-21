@@ -10,6 +10,7 @@ real option exactly, and resume selections must point at existing entries.
 from __future__ import annotations
 
 import re
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from .agents import AgentError, complete
@@ -337,29 +338,31 @@ def _question_type(question: dict) -> str:
     return str(question.get("kind") or "text")
 
 
-def autofill_answers(job: Job, profile: Profile, settings: dict, questions: list[dict]) -> dict[str, dict]:
-    """Realistic answers for every open question. Returns ``{id: {"answer", "note"}}``."""
+_LONG_ANSWER_RE = re.compile(r"^\s*(why|describe|tell|how|what (?:excites|interests|motivates)|share|explain)\b", re.I)
+
+
+def _long_answer(question: dict) -> bool:
+    """A free-text question whose answer is written, not looked up (these are the slow ones)."""
+    if question.get("options") or question.get("format"):
+        return False
+    if question.get("kind") == "textarea":
+        return True
+    return question.get("kind") == "text" and (len(question.get("label") or "") > 60
+                                               or bool(_LONG_ANSWER_RE.search(question.get("label") or "")))
+
+
+def _autofill_batches(asked: list[dict], by_id: dict, calls: int) -> list[list[dict]]:
+    """Split the questions for parallel agent calls: one per long answer, short ones together."""
+    if calls <= 1 or len(asked) <= 1:
+        return [asked]
+    long = [[entry] for entry in asked if _long_answer(by_id.get(entry["id"], {}))]
+    short = [entry for entry in asked if not _long_answer(by_id.get(entry["id"], {}))]
+    return long + ([short] if short else [])
+
+
+def _autofill_prompt(job: Job, profile: Profile, settings: dict, batch: list[dict]) -> str:
     import json
-    out: dict[str, dict] = {}
-    asked = []
-    for q in questions:
-        if q.get("kind") == "file" or not str(q.get("label") or "").strip():
-            continue
-        if _acknowledgement(q):
-            pass   # "I acknowledge" boxes may mention race or gender; they are not self-identification
-        elif DEMOGRAPHIC_RE.search(q["label"]) and q.get("options"):
-            declined = pick_option(list(q["options"]), "decline")
-            if declined:
-                out[q["id"]] = {"answer": declined, "note": "Declined: demographic questions are optional"}
-            continue
-        if DEMOGRAPHIC_RE.search(q["label"]) and not _acknowledgement(q):
-            continue
-        entry = _question_entry(q, profile, job)
-        entry["required"] = bool(q.get("required"))
-        asked.append(entry)
-    if not asked:
-        return out
-    prompt = f"""You are Luna, filling out a job application on behalf of one candidate with AI Autofill.
+    return f"""You are Luna, filling out a job application on behalf of one candidate with AI Autofill.
 The candidate explicitly asked you to answer every question with a realistic, plausible answer, and will review
 every answer before anything is submitted.
 
@@ -391,12 +394,56 @@ JOB POSTING
 {_job_block(job)}
 
 QUESTIONS
-{json.dumps(asked, ensure_ascii=False, indent=1)}
+{json.dumps(batch, ensure_ascii=False, indent=1)}
 """
-    data = extract_json(complete(prompt, settings, timeout=240))
-    rows = data.get("answers") if isinstance(data, dict) else data
+
+
+def autofill_answers(job: Job, profile: Profile, settings: dict, questions: list[dict]) -> dict[str, dict]:
+    """Realistic answers for every open question. Returns ``{id: {"answer", "note"}}``."""
+    out: dict[str, dict] = {}
+    asked = []
+    for q in questions:
+        if q.get("kind") == "file" or not str(q.get("label") or "").strip():
+            continue
+        if _acknowledgement(q):
+            pass   # "I acknowledge" boxes may mention race or gender; they are not self-identification
+        elif DEMOGRAPHIC_RE.search(q["label"]) and q.get("options"):
+            declined = pick_option(list(q["options"]), "decline")
+            if declined:
+                out[q["id"]] = {"answer": declined, "note": "Declined: demographic questions are optional"}
+            continue
+        if DEMOGRAPHIC_RE.search(q["label"]) and not _acknowledgement(q):
+            continue
+        entry = _question_entry(q, profile, job)
+        entry["required"] = bool(q.get("required"))
+        asked.append(entry)
+    if not asked:
+        return out
     by_id = {q["id"]: q for q in questions}
-    for row in rows if isinstance(rows, list) else []:
+    calls = max(1, int(settings.get("parallel_agent_calls", 4) or 1))
+    batches = _autofill_batches(asked, by_id, calls)
+
+    def ask(batch: list[dict]) -> list:
+        data = extract_json(complete(_autofill_prompt(job, profile, settings, batch), settings, timeout=240))
+        rows = data.get("answers") if isinstance(data, dict) else data
+        wanted = {entry["id"] for entry in batch}
+        return [row for row in (rows if isinstance(rows, list) else [])
+                if isinstance(row, dict) and row.get("id") in wanted]
+
+    # Each long answer gets its own agent call and the short ones share one; the calls run
+    # side by side (settings.parallel_agent_calls), so one application no longer waits on
+    # a single long reply. A failed call loses only its own questions.
+    rows: list = []
+    errors: list[Exception] = []
+    with ThreadPoolExecutor(max_workers=min(calls, len(batches))) as pool:
+        for future in [pool.submit(ask, batch) for batch in batches]:
+            try:
+                rows.extend(future.result())
+            except Exception as error:  # noqa: BLE001
+                errors.append(error)
+    if errors and not rows:
+        raise errors[0]
+    for row in rows:
         if not isinstance(row, dict) or row.get("id") not in by_id or row["id"] in out:
             continue
         question = by_id[row["id"]]

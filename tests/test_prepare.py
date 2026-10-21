@@ -642,3 +642,42 @@ def test_a_form_that_asked_for_corrections_after_submit_can_be_fixed_and_sent_ag
     assert next(q for q in after["questions"] if q["id"] == "q2")["answer"] == "The mission."   # answers kept
     assert db.get_application(record["id"])["submission_attempted"] == 0
     assert db.get_job(rows[0].id).status == "prepared"
+
+
+def test_ai_autofill_splits_long_answers_across_parallel_agent_calls(candidate, monkeypatch):
+    import re
+    import threading
+    import time
+    from jobhub import luna
+
+    questions = [{"id": "q1", "label": "Why do you want to work at Acme?", "kind": "textarea", "required": True},
+                 {"id": "q2", "label": "Describe a project you are proud of.", "kind": "textarea", "required": True},
+                 {"id": "q3", "label": "Have you applied before?", "kind": "select", "options": ["Yes", "No"],
+                  "required": True},
+                 {"id": "q4", "label": "Preferred first name", "kind": "text", "required": False}]
+    settings = dict(db.get_settings(), parallel_agent_calls=4, agent={"backend": "claude_cli", "model": ""})
+    active, peak, lock, batches = 0, 0, threading.Lock(), []
+    replies = {"q1": "I admire Acme's work.", "q2": "I built a trading sandbox.", "q3": "No", "q4": "Alex"}
+
+    def fake(prompt, settings, timeout=0):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        asked = sorted(set(re.findall(r'"id": "(q\d)"', prompt.split("QUESTIONS")[-1])))
+        batches.append(asked)
+        time.sleep(0.2)
+        with lock:
+            active -= 1
+        if asked == ["q2"]:
+            raise luna.AgentError("timed out")     # a failed call loses only its own question
+        return json.dumps({"answers": [{"id": qid, "answer": replies[qid]} for qid in asked]})
+
+    monkeypatch.setattr("jobhub.luna.complete", fake)
+    out = luna.autofill_answers(jobs(1)[0], db.get_profile() or Profile(), settings, questions)
+    assert sorted(batches) == [["q1"], ["q2"], ["q3", "q4"]] and peak == 3
+    assert {k: v["answer"] for k, v in out.items()} == {"q1": "I admire Acme's work.", "q3": "No", "q4": "Alex"}
+
+    batches.clear()
+    luna.autofill_answers(jobs(1)[0], db.get_profile() or Profile(), dict(settings, parallel_agent_calls=1), questions)
+    assert batches == [["q1", "q2", "q3", "q4"]]

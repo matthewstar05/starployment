@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from functools import lru_cache
@@ -302,8 +303,19 @@ def _scratch() -> Path:
     return Path(tempfile.mkdtemp(prefix="run-", dir=directory))
 
 
+# Preparation and AI Autofill fan out (parallel_prepare x parallel_agent_calls); this
+# ceiling keeps the number of agent processes alive at once bounded.
+MAX_AGENT_CALLS = 24
+_call_slots = threading.BoundedSemaphore(MAX_AGENT_CALLS)
+
+
 def complete(prompt: str, settings: dict, *, timeout: int = 120) -> str:
     """Send one prompt to the connected agent and return its text reply."""
+    with _call_slots:
+        return _complete(prompt, settings, timeout)
+
+
+def _complete(prompt: str, settings: dict, timeout: int) -> str:
     agent = settings.get("agent") or {}
     backend = agent.get("backend", "none")
     model = (agent.get("model") or "").strip() or BACKENDS.get(backend, Backend("", "", "")).default_model

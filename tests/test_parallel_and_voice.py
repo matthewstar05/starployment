@@ -90,10 +90,11 @@ def test_luna_is_asked_for_a_human_voice_and_gets_the_relevant_skills(store, mon
     questions = [prepare._question(1, "What tools do you use?", "textarea", [], True),
                  prepare._question(2, "What frameworks/libraries are you most proficient in?", "textarea", [], True)]
     out = luna.autofill_answers(posting(), profile, db.get_settings(), questions)
-    prompt = prompts[0]
-    assert "VOICE" in prompt and "Never list every skill" in prompt and "I am passionate about" in prompt
-    asked = json.loads(prompt.split("QUESTIONS")[-1])
-    assert asked[1]["relevant_skills"][0] == "React" and len(asked[1]["relevant_skills"]) <= 4
+    assert len(prompts) == 2                                            # each long answer gets its own call
+    for prompt in prompts:
+        assert "VOICE" in prompt and "Never list every skill" in prompt and "I am passionate about" in prompt
+    asked = {entry["id"]: entry for prompt in prompts for entry in json.loads(prompt.split("QUESTIONS")[-1])}
+    assert asked["q2"]["relevant_skills"][0] == "React" and len(asked["q2"]["relevant_skills"]) <= 4
     assert "trim to the few this role uses" in out["q1"]["note"]       # a skill dump is flagged for review
     assert "trim" not in out["q2"]["note"]
 

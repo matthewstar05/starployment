@@ -229,6 +229,7 @@ DEFAULT_SETTINGS: dict = {
     # --- sending: applications sent side by side, each in its own background browser ---
     "parallel_sends": 4,
     "parallel_prepare": 8,         # forms read and Luna/AI Autofill drafts run at once while preparing
+    "parallel_agent_calls": 4,     # agent calls one AI Autofill splits its questions across
     "show_browser": False,         # True opens a visible browser window while sending
     # --- priority employers: starred, prepared, never sent automatically ---
     "priority_companies": PRIORITY_COMPANIES,
@@ -447,6 +448,7 @@ def validate_settings(settings: dict) -> dict:
         max_apply_per_run: StrictInt = Field(ge=1, le=25)
         parallel_sends: StrictInt = Field(ge=1, le=24)
         parallel_prepare: StrictInt = Field(ge=1, le=32)
+        parallel_agent_calls: StrictInt = Field(ge=1, le=16)
         show_browser: StrictBool
         min_score_to_apply: float = Field(ge=0, le=100, allow_inf_nan=False, strict=True)
         priority_companies: list[StrictStr] = Field(max_length=300)

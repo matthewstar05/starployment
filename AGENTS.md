@@ -299,7 +299,10 @@ Send applications N at once, up to 24), each in a background browser; a four-thr
 one-thread "quick" pool (`controller.QUICK_TASKS`) runs resume previews, Touch ID,
 connection checks, and imports so they never wait behind it. Preparation reads forms
 and runs Luna/AI Autofill `settings.parallel_prepare` at a time (Settings →
-Automation → Prepare applications N at once). The Qt thread only reads SQLite (refresh
+Automation → Prepare applications N at once). AI Autofill splits one draft's
+questions across `settings.parallel_agent_calls` agent calls (one per long answer,
+short ones together; `luna._autofill_batches`), and `agents.MAX_AGENT_CALLS` caps
+agent processes alive at once. The Qt thread only reads SQLite (refresh
 every 15 s) and renders via window.set_data.
 ```
 
