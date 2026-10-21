@@ -43,6 +43,23 @@ class PostingRefreshError(RuntimeError):
     """The current public ATS posting could not be verified safely."""
 
 
+class PostingGone(PostingRefreshError):
+    """Before anything was sent, the posting turned out closed (404/410) or no longer eligible.
+
+    Automatic runs skip these quietly instead of leaving an attempt for the candidate to review."""
+
+
+def _closed_posting(error: BaseException) -> bool:
+    """True when the ATS answered that the posting no longer exists (404/410, or Ashby's empty listing)."""
+    seen = error
+    while seen is not None:
+        response = getattr(seen, "response", None)
+        if getattr(response, "status_code", None) in (404, 410) or "Public posting was not found" in str(seen):
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
+
+
 # Discovered company boards read per provider in one scan. Boards rotate, least
 # recently read first, so every discovered board is read every few scans.
 DISCOVERED_BOARDS_PER_SCAN = 120
@@ -114,6 +131,8 @@ def enrich_job(job: Job) -> Job:
         db.add_event(f"Current posting refresh failed: {error}", "warn", job.id)
         if isinstance(error, PostingRefreshError):
             raise
+        if _closed_posting(error):
+            raise PostingGone("The employer has closed this posting.") from error
         raise PostingRefreshError("Could not verify the current public posting. Review the listing before continuing.") from error
 
 
@@ -232,6 +251,7 @@ def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | No
         STATE.running_apply = job_id
         STATE.running_applies.add(job_id)
         resume = ""
+        skipped = False
         try:
             job = db.get_job(job_id)
             profile = db.get_profile()
@@ -252,7 +272,7 @@ def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | No
                 min_score = float(settings.get("min_score_to_apply", 60))
                 if (job.score_json.get("auto_apply_eligible") is not True or job.score < min_score
                         or not settings.get("auto_apply") or not settings.get("setup_complete")):
-                    raise PostingRefreshError(
+                    raise PostingGone(
                         "The current posting no longer meets your automatic application criteria. "
                         "Review the refreshed role before applying."
                     )
@@ -271,7 +291,13 @@ def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | No
             if result.status not in ("applied", "dry_run", "needs_human", "failed"):
                 raise ValueError(f"Unknown application outcome: {result.status}")
         except Exception as error:  # noqa: BLE001
-            if isinstance(error, PostingRefreshError):
+            if isinstance(error, PostingGone) and require_eligible:
+                # Nothing was sent (the refresh runs before the submit boundary): an automatic
+                # run skips a closed or no-longer-eligible posting instead of asking for a review.
+                gone = str(error)
+                result = ApplyResult(status="failed", message=gone, resume_path=resume, log=[gone])
+                skipped = True
+            elif isinstance(error, PostingRefreshError):
                 result = ApplyResult(status="needs_human", message=str(error), resume_path=resume,
                                      log=[traceback.format_exc()[-2000:]])
             else:
@@ -300,6 +326,11 @@ def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | No
                                   "" if result.status in ("applied", "dry_run") else result.message,
                                   result.resume_path or resume or None, result.submission_attempted,
                                   questions=result.questions)
+            if skipped and not result.submission_attempted:
+                db.hide_application(application_id)
+                db.set_job_status(job_id, "skipped")
+                db.add_event(f"Skipped: {result.message}", "info", job_id)
+                return {"application_id": application_id, **result.model_dump(), "status": "skipped"}
             level = {"applied": "success", "dry_run": "info", "needs_human": "warn", "failed": "error"}[result.status]
             db.add_event(f"{result.status}: {job_id}: {result.message}", level, job_id)
             return {"application_id": application_id, **result.model_dump()}
@@ -366,6 +397,8 @@ def auto_apply_batch() -> list[dict]:
                      job.id, ", ".join(readiness.missing))
             continue
         result = apply_one(job.id, require_eligible=True)
+        if result.get("status") == "skipped":
+            continue   # a closed posting uses neither this run's budget nor the employer's turn
         results.append(result)
         if company_key:
             attempted_companies.add(company_key)

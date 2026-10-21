@@ -784,6 +784,11 @@ contrast) and look at the screenshots.
   the reliable sources. Source failures are reported, never fatal.
 - LLMs are optional. `codex exec -m gpt-5.5` works on the original developer
   machine where the codex default model is rejected; `claude -p` needs a logged-in CLI.
+- An automatic run whose posting refresh finds it closed (404/410, Ashby's "Public posting
+  was not found") or no longer eligible raises `scheduler.PostingGone` before the
+  submit boundary: the job becomes Skipped, the attempt is hidden, and it uses no run
+  budget. `db.hide_closed_posting_attempts` (run at startup) tidies attempts older runs
+  left as "needs review". Transient network errors still stop for review.
 - `db.set_job_status` refuses to reset a job with a submission record. The
   Jobs context menu surfaces that refusal as a warning toast.
 - Qt stylesheet `rgba()` accepts fractional alpha, but CSS border triangles

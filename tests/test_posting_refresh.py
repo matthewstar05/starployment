@@ -111,13 +111,60 @@ def test_unattended_apply_rechecks_eligibility_after_stale_new_grad_becomes_seni
 
     results = scheduler.auto_apply_batch()
 
-    assert len(results) == 1
-    assert results[0]["status"] == "needs_human"
-    assert results[0]["submission_attempted"] is False
-    assert "automatic application criteria" in results[0]["message"]
+    # Nothing was sent: the run skips the role quietly instead of leaving it for review.
+    assert results == []
     assert db.get_job(stale.id).title == "Senior Staff Software Engineer"
     assert db.get_job(stale.id).score_json["auto_apply_eligible"] is False
-    assert db.get_application(results[0]["application_id"])["submission_attempted"] == 0
+    assert db.get_job(stale.id).status == "skipped"
+    record = db.list_applications()[0]
+    assert record["submission_attempted"] == 0 and record["hidden"] == 1
+    assert "automatic application criteria" in record["error"]
+
+
+def test_automatic_run_skips_a_closed_posting_without_using_its_budget(monkeypatch):
+    import httpx
+    from jobhub.readiness import Readiness
+    from jobhub.sources.import_job import JobImportError
+
+    resume = config.RESUMES / "candidate.pdf"
+    resume.write_bytes(b"%PDF-1.7\nfictional fixture")
+    db.save_profile(Profile(first_name="Ada", last_name="Lovelace", email="ada@example.test", resume_path=str(resume)))
+    db.set_settings({"auto_apply": True, "setup_complete": True, "min_score_to_apply": 60, "max_apply_per_run": 1})
+    closed = singlestore_posting(score=95, score_json={"auto_apply_eligible": True})
+    open_ = singlestore_posting(company="Open Example", score=90, score_json={"auto_apply_eligible": True},
+                                url="https://job-boards.greenhouse.io/openexample/jobs/1",
+                                apply_url="https://job-boards.greenhouse.io/openexample/jobs/1",
+                                raw={"gh_id": 1, "slug": "openexample"})
+    db.upsert_jobs([closed, open_])
+
+    def fetch(url):
+        if "singlestore" in url:
+            request = httpx.Request("GET", url)
+            response = httpx.Response(404, request=request)
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as error:
+                raise JobImportError(f"Could not fetch public posting: {error}") from error
+        return db.get_job(open_.id)
+
+    monkeypatch.setattr("jobhub.sources.import_job.fetch_job", fetch)
+    monkeypatch.setattr(scheduler, "score_all", lambda jobs, *args: {
+        job.id: (95.0, {"auto_apply_eligible": True}) for job in jobs})
+    monkeypatch.setattr(scheduler, "rescore", lambda: None)
+    monkeypatch.setattr(scheduler, "preflight_job", lambda *args: Readiness("ready"))
+    monkeypatch.setattr(scheduler, "resume_for_job", lambda *args: str(resume))
+    monkeypatch.setattr(scheduler, "snapshot_resume_for_application", lambda path, app_id: path)
+    sent = []
+    monkeypatch.setattr(scheduler, "apply_to_job", lambda job, *args, **kwargs: sent.append(job.company) or
+                        __import__("jobhub.models", fromlist=["ApplyResult"]).ApplyResult(status="needs_human",
+                                                                                         message="fixture stop"))
+
+    results = scheduler.auto_apply_batch()
+
+    assert sent == ["Open Example"] and len(results) == 1          # the closed posting used no budget
+    assert db.get_job(closed.id).status == "skipped"
+    hidden = [a for a in db.list_applications() if a["job_id"] == closed.id]
+    assert hidden and hidden[0]["hidden"] == 1 and "closed this posting" in hidden[0]["error"]
 
 
 def test_mismatched_public_vacancy_is_rejected_without_overwriting_row(monkeypatch):
@@ -161,3 +208,28 @@ def test_tailor_api_uses_refreshed_metadata(monkeypatch):
 
     assert response.status_code == 200, response.text
     assert seen == ["Helios New Grad 2027"]
+
+
+def test_repair_hides_attempts_stopped_by_closed_postings_only():
+    rows = [singlestore_posting(company=f"Example {i}", url=f"https://job-boards.greenhouse.io/ex{i}/jobs/{i}",
+                                apply_url=f"https://job-boards.greenhouse.io/ex{i}/jobs/{i}",
+                                raw={"gh_id": i, "slug": f"ex{i}"}) for i in range(4)]
+    db.upsert_jobs(rows)
+    outcomes = [("Could not verify the current public posting. Review the listing before continuing.",
+                 ["JobImportError: Could not fetch public posting: Client error '404 Not Found'"]),
+                ("Could not verify the current public posting. Review the listing before continuing.",
+                 ["JobImportError: Public posting was not found"]),
+                ("Could not verify the current public posting. Review the listing before continuing.",
+                 ["ConnectError: Server disconnected without sending a response."]),        # transient: kept
+                ("Required fields: Preferred Name", ["fixture"])]                           # real question: kept
+    ids = []
+    for job, (message, log) in zip(rows, outcomes):
+        app_id = db.reserve_application(job.id)
+        db.start_application(app_id, job.id)
+        db.finish_application(app_id, "needs_human", log, [], [], message)
+        ids.append(app_id)
+
+    assert db.hide_closed_posting_attempts() == 2
+    hidden = {a["id"]: a["hidden"] for a in db.list_applications()}
+    assert [hidden[i] for i in ids] == [1, 1, 0, 0]
+    assert [db.get_job(job.id).status for job in rows] == ["skipped", "skipped", "needs_human", "needs_human"]

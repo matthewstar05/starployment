@@ -57,6 +57,7 @@ class DesktopController(QObject):
         try:
             prepare.repair_drafts()   # drafts from earlier versions may repeat checkbox options
             db.hide_superseded_attempts()   # earlier attempts of postings that were since sent
+            db.hide_closed_posting_attempts()   # automatic attempts stopped by a closed posting
         except Exception as exc:  # noqa: BLE001 - never block startup on a cleanup
             db.add_event(f"Could not tidy prepared applications: {exc}", "warn")
         app = QApplication.instance()

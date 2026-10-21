@@ -694,6 +694,28 @@ def hide_superseded_attempts() -> int:
     return hidden
 
 
+def hide_closed_posting_attempts() -> int:
+    """Repair: hide automatic attempts that stopped before anything was sent because the posting
+    was closed (404/410) or no longer met the automatic criteria, and skip their jobs.
+
+    Newer runs skip these at the source (``scheduler.PostingGone``); earlier runs left them as
+    "needs your review" with nothing the candidate could do."""
+    hidden = 0
+    with conn() as c:
+        rows = c.execute(
+            "SELECT a.id, a.job_id, a.error, a.log FROM applications a WHERE a.status='needs_human' "
+            "AND a.submission_attempted=0 AND a.hidden=0 AND (a.error LIKE '%no longer meets your automatic%' "
+            "OR (a.error LIKE 'Could not verify the current public posting%' "
+            "    AND (a.log LIKE '%404 Not Found%' OR a.log LIKE '%410 Gone%' "
+            "         OR a.log LIKE '%Public posting was not found%')))").fetchall()
+        for row in rows:
+            c.execute("UPDATE applications SET hidden=1 WHERE id=?", (row["id"],))
+            c.execute("UPDATE jobs SET status='skipped', updated_at=? WHERE id=? AND status='needs_human'",
+                      (now_iso(), row["job_id"]))
+            hidden += 1
+    return hidden
+
+
 # The newest inbox email that set an application's current stage (an assessment, an interview).
 _STAGE_MAIL = ("(SELECT m.{column} FROM mail_events m WHERE m.application_id=a.id AND m.stage=a.stage "
                "AND m.dismissed=0 ORDER BY m.received_at DESC LIMIT 1)")
