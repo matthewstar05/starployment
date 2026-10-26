@@ -122,3 +122,18 @@ def test_luna_connection_model_dropdown_for_all_providers():
     conn.close()
     conn.deleteLater()
 
+
+
+def test_jarvis_modes_round_trip_and_mark_settings_dirty(app):
+    from jobhub.config import DEFAULT_SETTINGS, merge_settings, validate_settings
+    from jobhub.desktop.views.settings import SettingsView
+    view = SettingsView()
+    emitted = []
+    view.save_requested.connect(emitted.append)
+    for mode in ("off", "new", "all"):
+        view.set_settings(merge_settings(DEFAULT_SETTINGS, {"jarvis_mode": mode}))
+        assert view.jarvis_mode.currentData() == mode
+        view._save()
+        assert validate_settings(merge_settings(DEFAULT_SETTINGS, emitted[-1]))["jarvis_mode"] == mode
+    view.jarvis_mode.setCurrentIndex(0)
+    assert view.dirty

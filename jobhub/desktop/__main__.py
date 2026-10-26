@@ -27,6 +27,37 @@ def quit_on_termination(app: QApplication) -> None:
     wake.start(500)
 
 
+def sending_now() -> bool:
+    """Whether an application is queued or being sent, read on a connection of its own
+    (the shared one may be held by a worker thread that is still running)."""
+    import sqlite3
+    from .. import config
+    try:
+        con = sqlite3.connect(f"file:{config.DB_PATH}?mode=ro", uri=True, timeout=2)
+        try:
+            return con.execute("SELECT 1 FROM applications WHERE status IN ('queued','running') LIMIT 1"
+                               ).fetchone() is not None
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return True     # unsure: let the send finish
+
+
+def exit_promptly(code: int) -> int:
+    """End the process once the window has quit, unless an application is being sent.
+
+    Python waits for every background thread at exit, so a scan, an inbox check, or
+    agent calls kept a quitting app alive for minutes (and made the installer give
+    up). Interrupted scans roll back, and unfinished drafts are recovered at the next
+    start (db.recover_drafts). A send in progress still finishes, as before.
+    """
+    if sending_now():
+        return code
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="starployment")
     parser.add_argument("--no-scheduler", action="store_true", help="open the desktop app without background scans")
@@ -107,7 +138,8 @@ def main(argv: list[str] | None = None) -> int:
             window.grab().save(str(path), "PNG")
             app.quit()
         QTimer.singleShot(500, finish)
-    return int(app.exec())
+        return int(app.exec())
+    return exit_promptly(int(app.exec()))
 
 
 if __name__ == "__main__":

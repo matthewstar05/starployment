@@ -205,6 +205,32 @@ def test_acknowledgements_advance_only_on_a_real_invitation(subject, body, stage
     assert email_tracker.classify(subject, body)[0] == stage
 
 
+@pytest.mark.parametrize("subject, body, stage", [
+    # Akuna-style acknowledgements (2026-10) name HackerRank while describing the process.
+    ("Thank you for applying to Northwind Capital!",
+     "Thank you for applying to Northwind Capital! We have received your application for Software Engineer. "
+     "Our team will review it. Many of our roles include a HackerRank coding challenge as part of the process.",
+     "applied"),
+    ("Thank you for your interest in Northwind Capital!",
+     "Thank you for your interest in Northwind Capital. As part of our process, you will receive a HackerRank "
+     "coding challenge by email within 48 hours.", "applied"),
+    ("Thank you for applying to Northwind Capital!",
+     "We received your application. Candidates who advance complete a CodeSignal assessment.", "applied"),
+    # The invitation itself, from the testing platform or the employer.
+    ("Your HackerRank 2026 - 2027 Quant Coding Challenge (Python) Invitation",
+     "Northwind Capital has invited you to take the Quant Coding Challenge. Click the link below to begin.",
+     "assessment"),
+    ("Next Steps with Northwind Capital: HackerRank Coding Challenge",
+     "Thank you for your interest in Northwind Capital! We'd like to invite you to complete our HackerRank coding "
+     "challenge. You will receive a separate email from HackerRank with your link.", "assessment"),
+    # Future tense never hides a rejection or an offer.
+    ("Your application", "Thank you for applying. Unfortunately, you will not be moving forward in our process.",
+     "rejected"),
+])
+def test_platform_names_in_acknowledgements_are_not_invitations(subject, body, stage):
+    assert email_tracker.classify(subject, body)[0] == stage
+
+
 def test_a_stage_email_can_be_opened_from_its_application(store):
     from jobhub.desktop.format import email_link
     app_id = submitted("Northwind Labs", "Software Engineer", "https://job-boards.greenhouse.io/nw/jobs/1")

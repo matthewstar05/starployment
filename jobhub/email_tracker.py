@@ -74,10 +74,24 @@ _RECRUITING_HINT = re.compile(
 _CONDITIONAL_CLAUSE = re.compile(r"\b(?:if|should|whether|in case|once|when)\b[^.!?\n]{0,160}")
 # What an actual invitation asks the candidate to do. An acknowledgement ("thanks for applying")
 # moves an application forward only with one of these, not by describing later stages.
+_PLATFORMS = r"(?:hackerrank|codesignal|codility|hirevue|karat|testgorilla|coderpad|qualified\.io)"
+# Describing an assessment that may come later ("you will receive a HackerRank challenge",
+# "our process includes a coding test") is not an invitation to one. Read only for the
+# assessment stage: "you'll receive an offer letter" is still an offer.
+_PROSPECTIVE_CLAUSE = re.compile(
+    r"\b(?:you(?:'ll| will| may| might| could| can expect to| would)(?! not)(?!n't)|candidates (?:will|may|who)|"
+    r"(?:may|might|will) be (?:asked|invited|required|sent)|"
+    r"(?:our|the|this) (?:recruiting|hiring|interview|selection|application) process (?:includes|consists|involves|"
+    r"may include|typically|usually|will)|(?:roles|positions) (?:include|typically include|may include)|"
+    r"next steps? (?:will |may |could |might )?(?:include|involve|consist))[^.!?\n]{0,200}")
 _INVITATION = {
-    "assessment": re.compile(r"hackerrank|codesignal|codility|hirevue|karat|testgorilla|coderpad|qualified\.io|"
+    # A platform's name alone is not an invitation: Akuna's acknowledgements (2026-10) name
+    # HackerRank while describing their process. An invitation links to, or invites to, the test.
+    "assessment": re.compile(_PLATFORMS + r"[^.\n]{0,60}(?:invit|link|click|deadline|expire|due)|"
+                             r"(?:invit|link|click)[^.\n]{0,60}" + _PLATFORMS + r"|"
                              r"(?:complete|start|take|begin|access)\s+(?:the|this|your|an?|our)\s[^.\n]{0,40}"
-                             r"(?:assessment|challenge|test|exercise)|(?:assessment|challenge) link|invited to (?:complete|take)"),
+                             r"(?:assessment|challenge|test|exercise)|(?:assessment|challenge) link|"
+                             r"invited? (?:you )?to (?:complete|take)"),
     "interview": re.compile(r"schedule (?:a|an|your|some) (?:time|call|interview|chat)|phone screen|calendly\.com|"
                             r"goodtime\.io|availability for|invite you to|\bsuperday\b|book (?:a|your) (?:time|slot)"),
     "offer": re.compile(r"offer letter|pleased to (?:extend|offer)|extend (?:you )?an offer|offer of employment"),
@@ -90,7 +104,9 @@ def classify(subject: str, body: str) -> tuple[str | None, float]:
     # Conditional clauses ("If we decide not to move forward, we'll let you know") are not news;
     # only the acknowledgement itself is read from the full text.
     settled = _CONDITIONAL_CLAUSE.sub(" ", text)
-    scores = {stage: sum(weight for pattern, weight in rules if re.search(pattern, text if stage == "applied" else settled))
+    current = _PROSPECTIVE_CLAUSE.sub(" ", settled)
+    source = {"applied": text, "assessment": current}
+    scores = {stage: sum(weight for pattern, weight in rules if re.search(pattern, source.get(stage, settled)))
               for stage, rules in _SIGNALS.items()}
     # A rejection or offer usually thanks the candidate too; that is not a new application.
     if scores["rejected"] >= 3 or scores["offer"] >= 4:
@@ -102,7 +118,7 @@ def classify(subject: str, body: str) -> tuple[str | None, float]:
     # One that also invites the candidate to the next step is that step.
     if scores["applied"] >= 2.4:
         for stage, invitation in _INVITATION.items():
-            if not invitation.search(settled):
+            if not invitation.search(current if stage == "assessment" else settled):
                 scores[stage] = 0
         if any(scores[stage] >= 2.4 for stage in _INVITATION):
             scores["applied"] = 0
@@ -220,7 +236,7 @@ _RECONNECTS = 3
 _CONNECTION_ERRORS = (imaplib.IMAP4.abort, OSError)   # includes timeouts, SSL, DNS, and broken pipes
 # Bump when ``classify``, ``_RECRUITING_HINT`` or the Luna reading changes, so mail
 # already read and set aside (``db.mark_mail_seen``) is read again under the new rules.
-RULES_VERSION = 1
+RULES_VERSION = 2
 OFFLINE = "Couldn't reach your mail server"
 
 

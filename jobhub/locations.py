@@ -525,6 +525,14 @@ def _classify_location(
             score=score, review_reason=None,
         )
 
+    # "United States" among the places: anywhere in the US is a preferred location.
+    if has_us and any(u in prefs for u in ("united states", "usa", "us")):
+        return LocationResult(
+            is_favorite=False, is_preferred=True, is_us=True,
+            is_approved_intl=has_approved_intl, is_disallowed=False, is_remote=is_remote,
+            score=8.0, review_reason=None,
+        )
+
     # General domestic US location (not in candidate's preferred list)
     if has_us:
         return LocationResult(

@@ -332,6 +332,9 @@ def _browser_user_agent(playwright, channel: str) -> str:
 
 def show_browser(settings: dict | None = None) -> bool:
     """Whether sending opens a visible browser window (Settings, or ``JOBHUB_HEADLESS=0``)."""
+    from ..jarvis import active
+    if active(settings or {}):
+        return False
     return bool((settings or {}).get("show_browser")) or not config.HEADLESS
 
 

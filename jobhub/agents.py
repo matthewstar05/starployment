@@ -309,6 +309,7 @@ MAX_AGENT_CALLS = 8
 _call_slots = threading.BoundedSemaphore(MAX_AGENT_CALLS)
 _calls_running = 0
 _calls_lock = threading.Lock()
+_calls_changed = threading.Condition(_calls_lock)
 
 
 def complete(prompt: str, settings: dict, *, timeout: int = 120) -> str:
@@ -318,13 +319,21 @@ def complete(prompt: str, settings: dict, *, timeout: int = 120) -> str:
     with _call_slots:
         # Past the first call, wait while the computer is busy so it stays responsive.
         wait_for_headroom(lambda: _calls_running, max_wait=300)
-        with _calls_lock:
+        from .jarvis import active
+        limit = MAX_AGENT_CALLS // 2 if active(settings) else MAX_AGENT_CALLS
+        with _calls_changed:
+            while _calls_running >= limit:
+                _calls_changed.wait(timeout=1)
             _calls_running += 1
         try:
+            from .governor import busy
+            if active(settings) and busy():
+                raise AgentError("JARVIS deferred this AI call while the computer is busy")
             return _complete(prompt, settings, timeout)
         finally:
-            with _calls_lock:
+            with _calls_changed:
                 _calls_running -= 1
+                _calls_changed.notify_all()
 
 
 def _complete(prompt: str, settings: dict, timeout: int) -> str:

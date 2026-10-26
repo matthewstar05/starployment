@@ -68,6 +68,20 @@ CREATE TABLE IF NOT EXISTS boards (
   ats TEXT, slug TEXT, discovered_at TEXT, last_scanned_at TEXT, last_ok_at TEXT,
   failures INTEGER DEFAULT 0, jobs_found INTEGER DEFAULT 0, PRIMARY KEY (ats, slug)
 );
+-- When a scan last found each posting still listed (UTC seconds). Kept out of jobs so
+-- marking thousands of postings seen does not bump jobs_version or rewrite job rows.
+CREATE TABLE IF NOT EXISTS job_seen (id TEXT PRIMARY KEY, seen_at REAL);
+-- Change counters for the desktop refresh: unchanged tables are not read again.
+CREATE TABLE IF NOT EXISTS table_versions (name TEXT PRIMARY KEY, n INTEGER);
+INSERT OR IGNORE INTO table_versions(name, n) VALUES ('applications', 0), ('drafts', 0), ('mail_events', 0);
+CREATE TRIGGER IF NOT EXISTS applications_version_insert AFTER INSERT ON applications BEGIN UPDATE table_versions SET n = n + 1 WHERE name = 'applications'; END;
+CREATE TRIGGER IF NOT EXISTS applications_version_update AFTER UPDATE ON applications BEGIN UPDATE table_versions SET n = n + 1 WHERE name = 'applications'; END;
+CREATE TRIGGER IF NOT EXISTS applications_version_delete AFTER DELETE ON applications BEGIN UPDATE table_versions SET n = n + 1 WHERE name = 'applications'; END;
+CREATE TRIGGER IF NOT EXISTS drafts_version_insert AFTER INSERT ON drafts BEGIN UPDATE table_versions SET n = n + 1 WHERE name = 'drafts'; END;
+CREATE TRIGGER IF NOT EXISTS drafts_version_update AFTER UPDATE ON drafts BEGIN UPDATE table_versions SET n = n + 1 WHERE name = 'drafts'; END;
+CREATE TRIGGER IF NOT EXISTS drafts_version_delete AFTER DELETE ON drafts BEGIN UPDATE table_versions SET n = n + 1 WHERE name = 'drafts'; END;
+CREATE TRIGGER IF NOT EXISTS mail_events_version_insert AFTER INSERT ON mail_events BEGIN UPDATE table_versions SET n = n + 1 WHERE name = 'mail_events'; END;
+CREATE TRIGGER IF NOT EXISTS mail_events_version_update AFTER UPDATE ON mail_events BEGIN UPDATE table_versions SET n = n + 1 WHERE name = 'mail_events'; END;
 """
 
 # Preserve every historical ID/application while presenting one vacancy per ATS posting.
@@ -125,6 +139,39 @@ def conn() -> Iterator[sqlite3.Connection]:
             raise
 
 
+_reader_con: sqlite3.Connection | None = None
+_reader_path = None
+_reader_lock = threading.RLock()
+
+
+@contextmanager
+def reader() -> Iterator[sqlite3.Connection]:
+    """A connection for read-only queries.
+
+    On the main (Qt) thread this is a second connection: in WAL mode readers never
+    wait for writers, so a scan's upsert or a rescore on a worker thread cannot
+    stall the window behind the shared connection's lock. Other threads share
+    ``conn()``. Never use it for writes, or for reads that must see the caller's
+    own uncommitted changes.
+    """
+    global _reader_con, _reader_path
+    if threading.current_thread() is not threading.main_thread():
+        with conn() as c:
+            yield c
+        return
+    with _reader_lock:
+        if _reader_con is not None and _reader_path != config.DB_PATH:
+            _reader_con.close()
+            _reader_con = None
+        if _reader_con is None:
+            if _con is None or _con_path != config.DB_PATH:
+                with conn():
+                    pass   # creates the file and schema (only before anything else opened it)
+            _reader_con = _connect()
+            _reader_path = config.DB_PATH
+        yield _reader_con
+
+
 def init() -> None:
     with conn() as c:
         c.executescript(SCHEMA)
@@ -155,6 +202,7 @@ def init() -> None:
         c.executemany("UPDATE jobs SET posted_ts=? WHERE id=?",
                       [(posted_epoch(r["posted_at"]), r["id"]) for r in rows if posted_epoch(r["posted_at"]) is not None])
         c.execute("CREATE INDEX IF NOT EXISTS idx_jobs_posted ON jobs(posted_ts)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_jobs_updated ON jobs(updated_at)")
         # Listing columns without descriptions: deduplication, filters, and sorts
         # read this instead of walking every long description.
         c.execute("CREATE INDEX IF NOT EXISTS idx_jobs_listing ON jobs(status, score, discovered_at, id, canonical_key, "
@@ -167,6 +215,14 @@ def init() -> None:
             # One-time: learn company boards from postings found before discovery existed.
             _insert_boards(c, (board for r in c.execute("SELECT url, apply_url FROM jobs").fetchall()
                                for board in (board_of(r["apply_url"]), board_of(r["url"])) if board))
+        # Postings stored before liveness tracking: board postings count as seen at upgrade
+        # time (the next read of their board settles it); aggregator postings, which cannot
+        # be checked one by one, start from the latest date known for them.
+        c.execute("INSERT OR IGNORE INTO job_seen(id, seen_at) SELECT id, CASE WHEN ats IN "
+                  "('greenhouse','lever','ashby','workday','workable','rippling') THEN ? ELSE "
+                  "MAX(COALESCE(CAST(strftime('%s', discovered_at) AS REAL), 0), "
+                  "COALESCE(CAST(strftime('%s', updated_at) AS REAL), 0), COALESCE(posted_ts, 0)) END FROM jobs",
+                  (time.time(),))
         _upgrade_settings(c)
     seed_settings()
 
@@ -212,11 +268,15 @@ def _upgrade_settings(c: sqlite3.Connection) -> None:
 
 def close() -> None:
     """Close the shared connection, also useful for isolated tests."""
-    global _con, _con_path
+    global _con, _con_path, _reader_con, _reader_path
     with _lock:
         if _con is not None:
             _con.close()
         _con = _con_path = None
+    with _reader_lock:
+        if _reader_con is not None:
+            _reader_con.close()
+        _reader_con = _reader_path = None
 
 
 def _row(r: sqlite3.Row | None) -> dict | None:
@@ -231,7 +291,7 @@ def seed_settings() -> None:
 
 
 def get_settings() -> dict[str, Any]:
-    with conn() as c:
+    with reader() as c:
         rows = c.execute("SELECT key, value FROM settings").fetchall()
     s = config.merge_settings(config.DEFAULT_SETTINGS, {})
     for r in rows:
@@ -259,7 +319,7 @@ def save_profile(p: Profile) -> None:
 
 
 def get_profile() -> Profile | None:
-    with conn() as c:
+    with reader() as c:
         r = c.execute("SELECT data FROM profile WHERE id = 1").fetchone()
     return Profile.model_validate_json(r["data"]) if r else None
 
@@ -308,6 +368,8 @@ def upsert_jobs(jobs: list[Job]) -> int:
                  j.salary_max, j.url, j.apply_url, j.description, j.posted_at, j.discovered_at, j.score,
                  json.dumps(j.score_json), j.status, json.dumps(j.raw), now_iso()))
             c.execute("UPDATE jobs SET canonical_key=?, posted_ts=? WHERE id=?", (key, posted_epoch(j.posted_at), j.id))
+            # Just found, so listed now (scans refresh this for every posting they find).
+            c.execute("INSERT OR REPLACE INTO job_seen(id, seen_at) VALUES (?, ?)", (j.id, time.time()))
     return new
 
 
@@ -354,6 +416,28 @@ def refresh_job_metadata(job_id: str, fresh: Job) -> Job:
              fresh.posted_at, posted_epoch(fresh.posted_at), json.dumps(fresh.raw), now_iso(), job_id),
         )
     return get_job(job_id)
+
+
+def jobs_changed_since(stamp: str) -> list[Job]:
+    """Postings inserted or changed (``updated_at``) at or after ``stamp``, for incremental scoring."""
+    with reader() as c:
+        rows = c.execute("SELECT * FROM jobs WHERE updated_at >= ?", (stamp,)).fetchall()
+    return [_job_from_row(r) for r in rows]
+
+
+def recent_company_attempts(days: float) -> dict[str, int]:
+    """Attempts that reached an employer (submitted or confirmed) in the last ``days`` days,
+    by normalized company name (see priority.normalize_company)."""
+    from .priority import normalize_company
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+    counts: dict[str, int] = {}
+    with reader() as c:
+        for row in c.execute("SELECT j.company FROM applications a JOIN jobs j ON j.id=a.job_id "
+                             "WHERE (a.submission_attempted=1 OR a.status='applied') AND a.started_at >= ?", (since,)):
+            name = normalize_company(row[0] or "")
+            if name:
+                counts[name] = counts.get(name, 0) + 1
+    return counts
 
 
 def update_scores(scores: dict[str, tuple[float, dict]]) -> None:
@@ -431,7 +515,7 @@ def list_jobs(status: str | None = None, q: str | None = None, limit: int = 200,
         raise ValueError(f"Unknown job order: {order}")
     sql += " ORDER BY " + JOB_ORDERS[order].format(d="DESC" if descending else "ASC") + ", id LIMIT ? OFFSET ?"
     args.extend((limit, max(0, offset)))
-    with conn() as c:
+    with reader() as c:
         if exclude_starred:
             _register_star_filter(c)
         ids = [r[0] for r in c.execute(sql, args).fetchall()]
@@ -461,7 +545,7 @@ def count_jobs(status: str | None = None, q: str | None = None, posted_within_ho
         args.append(cutoff)
     if exclude_starred:
         sql += " AND NOT job_is_starred(company, starred)"
-    with conn() as c:
+    with reader() as c:
         if exclude_starred:
             _register_star_filter(c)
         return int(c.execute(sql, args).fetchone()[0])
@@ -482,7 +566,7 @@ def fresh_counts(*, exclude_starred: bool = False) -> dict[str, int]:
     for hours in FRESH_WINDOWS:
         columns.append(f"SUM(ats IN ('greenhouse','lever','ashby','workable','rippling','workday') AND posted_ts >= ?) AS preparable_{hours}")
         args.append(now - hours * 3600)
-    with conn() as c:
+    with reader() as c:
         if exclude_starred:
             _register_star_filter(c)
         star_filter = " AND NOT job_is_starred(company, starred)" if exclude_starred else ""
@@ -503,7 +587,7 @@ def set_job_star(job_id: str, starred: bool | None) -> None:
 
 
 def get_job(job_id: str) -> Job | None:
-    with conn() as c:
+    with reader() as c:
         r = c.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
     return _job_from_row(r) if r else None
 
@@ -545,13 +629,110 @@ def requeue_preflight_needs_human() -> int:
 
 def jobs_version() -> int:
     """Changes whenever any job row is inserted, updated, or deleted (by any process)."""
-    with conn() as c:
+    with reader() as c:
         row = c.execute("SELECT n FROM jobs_version WHERE id=1").fetchone()
     return int(row[0]) if row else 0
 
 
-def job_stats() -> dict[str, int]:
+def table_version(name: str) -> int:
+    """Change counter for ``applications``, ``drafts``, or ``mail_events`` (any process)."""
+    with reader() as c:
+        row = c.execute("SELECT n FROM table_versions WHERE name=?", (name,)).fetchone()
+    return int(row[0]) if row else 0
+
+
+# ---------------- liveness and pruning ----------------
+# A posting nobody has touched (status New, no star of the candidate's own, no draft,
+# no application) can be deleted safely: if it is still listed, the next scan adds it back.
+_UNTOUCHED = ("status='new' AND starred IS NULL "
+              "AND NOT EXISTS (SELECT 1 FROM applications a WHERE a.job_id=jobs.id) "
+              "AND NOT EXISTS (SELECT 1 FROM drafts d WHERE d.job_id=jobs.id)")
+# Board feeds that list every open posting (Workday is read a page window at a time, so
+# a posting missing from it may simply be older than the window).
+FULL_LISTING_ATS = ("greenhouse", "lever", "ashby")
+
+
+def mark_seen(job_ids, at: float | None = None) -> None:
+    """Record that a scan found these postings still listed."""
+    stamp = time.time() if at is None else at
+    ids = list(dict.fromkeys(i for i in job_ids if i))
+    if not ids:
+        return
     with conn() as c:
+        c.executemany("INSERT INTO job_seen(id, seen_at) VALUES (?, ?) "
+                      "ON CONFLICT(id) DO UPDATE SET seen_at=excluded.seen_at", [(i, stamp) for i in ids])
+
+
+def last_seen(job_ids) -> dict[str, float]:
+    ids = list(job_ids)
+    found: dict[str, float] = {}
+    with reader() as c:
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            found.update((r[0], r[1]) for r in c.execute(
+                f"SELECT id, seen_at FROM job_seen WHERE id IN ({','.join('?' * len(chunk))})", chunk))
+    return found
+
+
+def prune_jobs(settings: dict, *, boards_read: dict[str, set[str]] | None = None,
+               scan_started: float | None = None) -> dict[str, int]:
+    """Delete untouched postings that are no longer hiring.
+
+    ``closed``: its Greenhouse, Lever, or Ashby board was read successfully in this
+    scan (``boards_read`` maps ats to slugs) and no longer lists it, while its title
+    still matches the candidate's targets (otherwise the scan would not have looked
+    for it). ``stale``: no scan has found it for ``prune.unseen_days`` days, which
+    covers aggregators whose postings cannot be checked one by one.
+    """
+    from .sources.base import title_relevant
+    policy = settings.get("prune") or {}
+    if not policy.get("enabled", True):
+        return {"closed": 0, "stale": 0}
+    closed: list[str] = []
+    wanted = {ats: {slug.casefold() for slug in slugs} for ats, slugs in (boards_read or {}).items() if slugs}
+    with reader() as c:
+        if wanted and scan_started is not None:
+            rows = c.execute(
+                "SELECT jobs.id, jobs.ats, jobs.url, jobs.apply_url, jobs.title, job_seen.seen_at FROM jobs "
+                "LEFT JOIN job_seen ON job_seen.id = jobs.id WHERE " + _UNTOUCHED + " AND jobs.ats IN "
+                f"({','.join('?' * len(FULL_LISTING_ATS))}) AND COALESCE(job_seen.seen_at, 0) < ?",
+                (*FULL_LISTING_ATS, scan_started)).fetchall()
+            for row in rows:
+                boards = {board_of(row["apply_url"]), board_of(row["url"])} - {None}
+                if any(ats == row["ats"] and slug.casefold() in wanted.get(ats, ()) for ats, slug in boards) \
+                        and title_relevant(row["title"] or "", settings):
+                    closed.append(row["id"])
+    cutoff = time.time() - float(policy.get("unseen_days", 21)) * 86400
+    with conn() as c:
+        for start in range(0, len(closed), 500):
+            chunk = closed[start:start + 500]
+            c.execute(f"DELETE FROM jobs WHERE id IN ({','.join('?' * len(chunk))}) AND " + _UNTOUCHED, chunk)
+        stale = c.execute("DELETE FROM jobs WHERE " + _UNTOUCHED + " AND id IN "
+                          "(SELECT id FROM job_seen WHERE seen_at < ?)", (cutoff,)).rowcount
+        c.execute("DELETE FROM job_seen WHERE id NOT IN (SELECT id FROM jobs)")
+    return {"closed": len(closed), "stale": max(0, stale)}
+
+
+def compact(min_free_ratio: float = 0.25) -> bool:
+    """Fold the write-ahead log back into the database, and reclaim space after a large prune.
+
+    A long WAL makes every read slower. VACUUM rewrites the file, so it runs only
+    when at least ``min_free_ratio`` of the pages are free.
+    """
+    with conn() as c:
+        c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        pages = c.execute("PRAGMA page_count").fetchone()[0]
+        free = c.execute("PRAGMA freelist_count").fetchone()[0]
+        if not pages or free / pages < min_free_ratio:
+            return False
+        c.commit()
+        c.execute("VACUUM")
+        c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    return True
+
+
+def job_stats() -> dict[str, int]:
+    with reader() as c:
         rows = c.execute(DEDUPED_JOBS + " SELECT status, COUNT(*) n FROM ranked_jobs WHERE posting_rank=1 GROUP BY status").fetchall()
     d = {r["status"]: r["n"] for r in rows}
     d["total"] = sum(d.values())
@@ -729,7 +910,7 @@ _APPLICATION_SELECT = (
 
 def list_applications(limit: int = 100) -> list[dict]:
     """Newest attempts first, including ones hidden from the Applications list (``hidden`` = 1)."""
-    with conn() as c:
+    with reader() as c:
         rows = c.execute(_APPLICATION_SELECT + " ORDER BY a.id DESC LIMIT ?", (limit,)).fetchall()
     return [_application_dict(r) for r in rows]
 
@@ -745,7 +926,7 @@ def _application_dict(row: sqlite3.Row) -> dict:
 
 
 def get_application(app_id: int) -> dict | None:
-    with conn() as c:
+    with reader() as c:
         row = c.execute(_APPLICATION_SELECT + " WHERE a.id=?", (app_id,)).fetchone()
     return _application_dict(row) if row else None
 
@@ -811,7 +992,7 @@ def set_application_note(app_id: int, note: str) -> None:
 
 
 def application_stats() -> dict[str, int]:
-    with conn() as c:
+    with reader() as c:
         rows = c.execute("SELECT status, COUNT(*) n FROM applications GROUP BY status").fetchall()
     return {r["status"]: r["n"] for r in rows}
 
@@ -830,7 +1011,7 @@ def finish_run(run_id: int, found: int, new_jobs: int, applied: int, status: str
 
 
 def list_runs(limit: int = 20) -> list[dict]:
-    with conn() as c:
+    with reader() as c:
         rows = c.execute("SELECT * FROM runs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
     out = []
     for r in rows:
@@ -845,7 +1026,7 @@ def add_event(msg: str, level: str = "info", job_id: str | None = None) -> None:
 
 
 def list_events(limit: int = 200) -> list[dict]:
-    with conn() as c:
+    with reader() as c:
         return [dict(r) for r in c.execute("SELECT * FROM events ORDER BY id DESC LIMIT ?", (limit,)).fetchall()]
 
 
@@ -902,13 +1083,13 @@ def upsert_draft(job_id: str, *, status: str, resume_path: str = "", resume_note
 
 
 def get_draft(draft_id: int) -> dict | None:
-    with conn() as c:
+    with reader() as c:
         row = c.execute(_DRAFT_SELECT + " WHERE d.id=?", (draft_id,)).fetchone()
     return _draft_dict(row) if row else None
 
 
 def draft_for_job(job_id: str) -> dict | None:
-    with conn() as c:
+    with reader() as c:
         row = c.execute(_DRAFT_SELECT + " WHERE d.job_id=?", (job_id,)).fetchone()
     return _draft_dict(row) if row else None
 
@@ -920,7 +1101,7 @@ def list_drafts(statuses: tuple[str, ...] | None = None, limit: int = 1000) -> l
         args.extend(statuses)
     sql += " ORDER BY COALESCE(j.score, 0) DESC, d.id LIMIT ?"
     args.append(limit)
-    with conn() as c:
+    with reader() as c:
         return [_draft_dict(r) for r in c.execute(sql, args).fetchall()]
 
 
@@ -944,7 +1125,7 @@ def update_draft(draft_id: int, **fields: Any) -> None:
 
 
 def draft_counts() -> dict[str, int]:
-    with conn() as c:
+    with reader() as c:
         rows = c.execute("SELECT status, COUNT(*) n FROM drafts GROUP BY status").fetchall()
     return {r["status"]: r["n"] for r in rows}
 
@@ -1078,7 +1259,7 @@ STAGE_RANK = {"": 0, "applied": 1, "assessment": 2, "interview": 3, "offer": 4, 
 
 def list_tracker(limit: int = 5000) -> list[dict]:
     """One row per vacancy with a submitted (or attempted) application, newest first."""
-    with conn() as c:
+    with reader() as c:
         rows = c.execute(
             "SELECT a.id, a.job_id, a.status, a.method, a.started_at, a.finished_at, a.submission_attempted, "
             "a.stage, a.stage_source, a.stage_updated_at, a.candidate_note, a.resume_path, "
@@ -1229,7 +1410,7 @@ def known_mail_keys() -> dict[str, tuple[str, int | None]]:
 
 
 def list_mail_events(limit: int = 200) -> list[dict]:
-    with conn() as c:
+    with reader() as c:
         rows = c.execute(
             "SELECT m.*, j.company, j.title FROM mail_events m LEFT JOIN applications a ON a.id=m.application_id "
             "LEFT JOIN jobs j ON j.id=a.job_id WHERE m.dismissed=0 ORDER BY m.received_at DESC LIMIT ?", (limit,)).fetchall()
@@ -1289,7 +1470,7 @@ def record_board_scans(ats: str, results: dict[str, int | None]) -> None:
 
 def board_counts() -> dict[str, int]:
     """Discovered boards that are still being read, per job-board provider."""
-    with conn() as c:
+    with reader() as c:
         rows = c.execute("SELECT ats, COUNT(*) n FROM boards WHERE failures < 3 GROUP BY ats").fetchall()
     return {r["ats"]: r["n"] for r in rows}
 

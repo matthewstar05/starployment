@@ -60,6 +60,29 @@ def _title_match(title: str, targets: list[str]) -> float:
     return best
 
 
+# Words too generic to show a title is the same kind of work as a target on their own:
+# "Talent Acquisition Associate" shares only "associate" with "research associate", and
+# "Technical Recruiter" only "technical" with "technical accounting".
+GENERIC_ROLE_WORDS = frozenset("""associate associates analyst analysts consultant specialist coordinator
+    representative assistant partner technical senior junior program programs operations team member staff
+    level ii iii""".split())
+PART_TIME_RE = re.compile(r"\b(?:part[- ]time|contract(?:or)?|temporary|temp|seasonal|per diem|freelance)\b", re.I)
+
+
+def _occupational_match(title: str, targets: list[str]) -> bool:
+    """A target fits when it appears in the title, or the title shares at least half of its words
+    including one that names the work, not only a generic role word."""
+    title_tokens = _tokens(title)
+    for target in targets:
+        if target in title:
+            return True
+        sought = _tokens(target)
+        shared = sought & title_tokens
+        if sought and len(shared) / len(sought) >= 0.5 and shared - GENERIC_ROLE_WORDS:
+            return True
+    return False
+
+
 def _role_level(title: str) -> str | None:
     match = ROLE_LEVEL_RE.search(title)
     if not match:
@@ -257,8 +280,10 @@ def score_job(job: Job, profile: Profile | None, settings: dict) -> tuple[float,
     reasons = []
     if not title_wanted(job.title, settings): reasons.append("Title excluded by your preferences")
     occupational_targets = [t for t in targets if _tokens(t) - CAREER_STAGE_WORDS]
-    if _title_match(title, occupational_targets) < 0.6:
+    if not _occupational_match(title, occupational_targets):
         reasons.append("Weak match to your target titles")
+    if minsal >= 50_000 and PART_TIME_RE.search(job.title):
+        reasons.append("Part-time, contract, or temporary role")
     if IT_SUPPORT_TITLE_RE.search(job.title) and not any(
         IT_SUPPORT_TARGET_RE.search(t) and _title_match(title, [t]) >= 0.6
         for t in occupational_targets

@@ -645,7 +645,9 @@ def autofill(draft_id: int, settings: dict | None = None) -> int:
 def autofill_all(progress: Callable[[str, int, int], None] | None = None, workers: int | None = None) -> dict:
     """AI Autofill every open prepared application that still has unanswered questions."""
     settings = db.get_settings()
-    workers = workers or int(settings.get("parallel_prepare", 8) or 1)
+    from .jarvis import parallel
+    limit = parallel(settings, "parallel_prepare", 8)
+    workers = min(workers or limit, limit)
     targets = [d["id"] for d in db.list_drafts(("ready", "needs_answers", "practice", "error"))
                if any(_open(q) for q in d["questions"])]
     done = filled = failed = 0
@@ -861,7 +863,9 @@ def prepare_batch(count: int, min_score: float, one_per_company: bool = True, *,
         exclude_starred = bool((settings.get("apply_plan") or {}).get("exclude_starred", True))
     jobs = plan_candidates(count, min_score, one_per_company, posted_within_hours=posted_within_hours, order=order,
                            exclude_starred=exclude_starred)
-    workers = max(1, luna_workers or int(settings.get("parallel_prepare", 8) or 1))
+    from .jarvis import parallel
+    limit = parallel(settings, "parallel_prepare", 8)
+    workers = max(1, min(luna_workers or limit, limit))
     results: dict[int, int] = {}
     failed = started = reading = 0
     counter = threading.Lock()
@@ -984,7 +988,7 @@ def approve_and_queue(draft_id: int, edits: dict[str, object] | None = None) -> 
     return db.get_draft(draft_id)
 
 
-def send_draft(draft_id: int, parallel: int = 1, assist: bool = False) -> dict:
+def send_draft(draft_id: int, parallel: int = 1, assist: bool = False, *, unattended: bool = False) -> dict:
     """Send one approved draft through the browser engine and record the outcome.
 
     ``parallel`` is how many applications may be in flight at once. When every
@@ -1040,11 +1044,12 @@ def send_draft(draft_id: int, parallel: int = 1, assist: bool = False) -> dict:
         return {"status": "blocked", "error": str(error), "draft_id": draft_id}
     db.update_draft(draft_id, status="sending", application_id=application_id, error="")
     result = scheduler.apply_one(job.id, application_id=application_id, extra_answers=extra,
-                                 resume_override=draft.get("resume_path") or None, assist=assist)
+                                 resume_override=draft.get("resume_path") or None, assist=assist, require_eligible=unattended,
+                                 required_jarvis_mode="all" if unattended else None)
     status = str(result.get("status"))
     if status == "applied":
         db.update_draft(draft_id, status="sent")
-        if remember and (settings.get("luna") or {}).get("remember_approved", True):
+        if remember and not unattended and (settings.get("luna") or {}).get("remember_approved", True):
             answers = dict(settings.get("answers") or {})
             bank = dict(answers.get("field_answers") or {})
             for label, value in remember.items():

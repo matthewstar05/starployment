@@ -17,7 +17,7 @@ from PySide6.QtCore import QObject, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from .. import config, db, email_tracker, governor, prepare, scheduler
+from .. import config, db, email_tracker, governor, jarvis, prepare, scheduler
 from ..setup import merge_resume_into_library, save_resume_library, save_setup
 from .ui import JobHubWindow, SetupWizard
 
@@ -44,6 +44,7 @@ class WorkerSignals(QObject):
 
 
 class DesktopController(QObject):
+    jobs_loaded = Signal(object, object)      # (cache key, job data) from the background loader
     """Scans, imports, and retries run on one worker; approved applications are sent by a
     small pool of background browsers (Settings → Automation → Send at once). Nothing
     blocks Qt's UI thread."""
@@ -86,6 +87,11 @@ class DesktopController(QObject):
         # browser, so they run beside it and never delay a send or a scan.
         self._assist = ThreadPoolExecutor(max_workers=4, thread_name_prefix="starployment-assist")
         self._quick = ThreadPoolExecutor(max_workers=1, thread_name_prefix="starployment-quick")
+        # Reloads the job library's page and counts after background changes, so the
+        # window never waits on those whole-library queries while scans and sends run.
+        self._job_loader = ThreadPoolExecutor(max_workers=1, thread_name_prefix="starployment-jobs")
+        self._job_loading: object = None
+        self.jobs_loaded.connect(self._jobs_ready)
         self._prep_stop = threading.Event()
         self._preparing = False
         self._preparing_jobs: set[str] = set()
@@ -104,6 +110,7 @@ class DesktopController(QObject):
         window.import_requested.connect(self.import_job)
         window.save_profile_requested.connect(self.save_profile)
         window.save_settings_requested.connect(self.save_settings)
+        window.jarvis_mode_requested.connect(self.set_jarvis_mode)
         window.appearance_requested.connect(self.set_appearance)
         window.typeface_requested.connect(self.set_typeface)
         window.setup_requested.connect(self.open_setup)
@@ -160,7 +167,7 @@ class DesktopController(QObject):
         self.refresh(include_account=True)
 
         self._refresh_timer = QTimer(self)
-        self._refresh_timer.timeout.connect(self.refresh)
+        self._refresh_timer.timeout.connect(lambda: self.refresh(wait=False))
         self._refresh_timer.start(15_000)
         self._cycle_timer = QTimer(self)
         self._cycle_timer.timeout.connect(self._cycle_due)
@@ -181,9 +188,9 @@ class DesktopController(QObject):
             next_scan_at=self._next_cycle_at or None,
             setup_complete=bool(settings.get("setup_complete")),
             scheduler_enabled=self.scheduler_enabled,
-            auto_apply=bool(settings.get("auto_apply")),
+            auto_apply=jarvis.automatic(settings),
         )
-        self._keep_awake(self.scheduler_enabled and bool(settings.get("auto_apply")) and not self._stopping.is_set())
+        self._keep_awake(self.scheduler_enabled and jarvis.automatic(settings) and not self._stopping.is_set())
 
     _caffeinate: subprocess.Popen | None = None
 
@@ -254,7 +261,7 @@ class DesktopController(QObject):
             return
         self._pending_scan = True
         started = time.time()
-        interval = max(5, int(settings.get("scan_interval_min", 60))) * 60
+        interval = jarvis.interval_minutes(settings) * 60
         self._next_cycle_at = started + interval
         scheduler.STATE.next_scan_at = str(int(self._next_cycle_at))
         self._tasks.put(("cycle", None))
@@ -322,13 +329,16 @@ class DesktopController(QObject):
             summary = f"Found {int(scan.get('found', 0) or 0):,} jobs, {new:,} new"
             if attempts:
                 summary += f", {attempts} application attempt{'s' if attempts != 1 else ''}"
+            if scan.get("status") == "deferred":
+                self._next_cycle_at = time.time() + 60
             partial = scan.get("status") == "partial"
-            self._status(summary + (" · some sources had issues" if partial else ""),
+            self._status("JARVIS is waiting for your Mac to have more headroom" if scan.get("status") == "deferred"
+                         else summary + (" · some sources had issues" if partial else ""),
                          tone="warning" if partial else "success")
             # After a long scan or wake from sleep, start one fresh interval
             # instead of trying to replay every missed hourly cycle.
             if time.time() >= self._next_cycle_at:
-                self._next_cycle_at = time.time() + max(5, int(db.get_settings().get("scan_interval_min", 60))) * 60
+                self._next_cycle_at = time.time() + jarvis.interval_minutes(db.get_settings()) * 60
         elif kind == "import":
             result = result if isinstance(result, dict) else {}
             self._status(f"Added {result.get('company', '')} · {result.get('title', '')}", tone="success")
@@ -341,16 +351,16 @@ class DesktopController(QObject):
             label = {"applied": "Application confirmed", "dry_run": "Practice run finished",
                      "needs_human": "Application needs your review", "failed": "Application issue"}.get(status, f"Application {status}")
             self._status(label + (f" · {detail}" if detail else ""), 9000, tone)
-        self.refresh()
+        self.refresh(wait=False)
 
     def _task_failed(self, kind: str, error: str) -> None:
         if kind == "cycle":
             self._pending_scan = False
         self._status(f"{kind.title()} failed: {error}", 15_000, "error")
         db.add_event(f"Desktop {kind} failed: {error}", "error")
-        self.refresh()
+        self.refresh(wait=False)
 
-    def _job_data(self, settings: dict) -> dict:
+    def _job_data(self, settings: dict, wait: bool = True) -> dict:
         """The job library's page, counts, and stats; reused while no job changed.
 
         These queries read the whole library, so repeating them on every
@@ -368,40 +378,89 @@ class DesktopController(QObject):
         cached = getattr(self, "_job_cache", None)
         if cached is not None and cached[0] == key:
             return cached[1]
+        if not wait and cached is not None and cached[0][2:] == key[2:] and not self._stopping.is_set():
+            # Only the library changed (a scan, a send, a status): keep showing the current
+            # page and reload it in the background. View changes still load at once below.
+            if self._job_loading != key:
+                self._job_loading = key
+                try:
+                    self._job_loader.submit(lambda: self.jobs_loaded.emit(key, self._load_job_data(key)))
+                except RuntimeError:   # shutting down
+                    pass
+            return cached[1]
+        data = self._load_job_data(key)
+        self._job_cache = (key, data)
+        return data
+
+    @staticmethod
+    def _load_job_data(key: tuple) -> dict:
+        _version, _bucket, job_status, job_query, posted_hours, exclude_starred, sort_key, descending, \
+            page_size, page, _priority = key
         total_jobs = db.count_jobs(status=job_status, q=job_query, posted_within_hours=posted_hours,
-                                   exclude_starred=jobs_view.exclude_starred)
-        page = min(jobs_view.page, max(0, (total_jobs - 1) // page_size))
-        data = {
+                                   exclude_starred=exclude_starred)
+        page = min(page, max(0, (total_jobs - 1) // page_size))
+        return {
             "page": page,
             "total_jobs": total_jobs,
             "jobs": db.list_jobs(status=job_status, q=job_query, limit=page_size, offset=page * page_size,
-                                 posted_within_hours=posted_hours, order=jobs_view.sort_key,
-                                 descending=jobs_view.sort_descending, exclude_starred=jobs_view.exclude_starred),
+                                 posted_within_hours=posted_hours, order=sort_key,
+                                 descending=descending, exclude_starred=exclude_starred),
             "top_jobs": db.list_jobs(status="new", limit=5),
             "stats": {**db.job_stats(), **db.fresh_counts(),
                       **{"unstarred_" + name: value for name, value in db.fresh_counts(exclude_starred=True).items()
                          if name.startswith("preparable_")}},
         }
-        self._job_cache = (key, data)
-        return data
 
-    def refresh(self, *, include_account: bool = False) -> None:
+    def _jobs_ready(self, key: tuple, data: dict) -> None:
+        if self._job_loading == key:
+            self._job_loading = None
+        cached = getattr(self, "_job_cache", None)
+        # A view change since the load started already read its own data.
+        if cached is not None and cached[0][2:] == key[2:] and not self._stopping.is_set():
+            self._job_cache = (key, data)
+            self.refresh(wait=False)
+
+    def _changed(self, name: str, key: tuple, load):
+        """``load()`` when ``key`` differs from the last refresh's, else None (the view keeps its data).
+
+        Applications, drafts, and the Tracker parse every row's JSON; reading them
+        again on every 15-second refresh while nothing changed kept the window busy.
+        """
+        cache = self.__dict__.setdefault("_refresh_keys", {})
+        if cache.get(name) == key:
+            return None
+        value = load()
+        cache[name] = key
+        return value
+
+    def refresh(self, *, include_account: bool = False, wait: bool = True) -> None:
+        """Feed the window fresh data. ``wait=False`` (timer and background completions) lets
+        the job library reload off the Qt thread while the current page stays on screen."""
         try:
             settings = db.get_settings()
-            job_data = self._job_data(settings)
+            job_data = self._job_data(settings, wait)
             self.window.jobs.page = job_data["page"]
             self.window.apps.set_sending(self._sending)
+            jobs_version = db.jobs_version()
+            apps_version, drafts_version = db.table_version("applications"), db.table_version("drafts")
+            if include_account:
+                self.__dict__["_refresh_keys"] = {}
+            applications = self._changed("applications", (apps_version, jobs_version),
+                                         lambda: db.list_applications(limit=300))
+            drafts = self._changed("drafts", (drafts_version, jobs_version), db.list_drafts)
+            if drafts is not None and applications is None:
+                applications = db.list_applications(limit=300)   # the Applications list shows both together
             self.window.set_data(
                 profile=db.get_profile() if include_account else None,
                 settings=settings if include_account or self._settings_changed(settings) else None,
                 jobs=job_data["jobs"],
                 total_jobs=job_data["total_jobs"],
                 top_jobs=job_data["top_jobs"],
-                applications=db.list_applications(limit=300),
+                applications=applications,
                 stats=dict(job_data["stats"]),
                 events=db.list_events(limit=60),
-                drafts=db.list_drafts(),
-                tracker=db.list_tracker(),
+                drafts=drafts,
+                tracker=self._changed("tracker", (apps_version, jobs_version), db.list_tracker),
                 resume_files=db.list_resume_files(),
                 mail=self._mail_state,
             )
@@ -542,10 +601,19 @@ class DesktopController(QObject):
                 prepare.reanswer_open_drafts()
             self.refresh(include_account=True)
             self._status("Settings saved", tone="success")
-            if settings.get("setup_complete") and self.scheduler_enabled and not self._next_cycle_at:
+            if (settings.get("setup_complete") and self.scheduler_enabled
+                    and (not self._next_cycle_at or settings.get("jarvis_mode") != previous.get("jarvis_mode"))):
                 self._next_cycle_at = time.time() + 2
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self.window, "Could not save settings", str(exc))
+
+    def set_jarvis_mode(self, mode: str) -> None:
+        """The sidebar's JARVIS menu: save only the mode, leaving other unsaved Settings edits alone."""
+        self.save_settings({"jarvis_mode": mode})
+        label = {"off": "JARVIS is off", "new": "JARVIS NEW is on: recent postings with saved answers",
+                 "all": "JARVIS ALL is on: new and older open postings, sent without review"}.get(mode, "")
+        if label:
+            self._status(label, tone="success" if mode != "off" else "info")
 
     def _rescore_in_background(self) -> None:
         """Re-rank every saved job off the UI thread (thousands of jobs take seconds)."""
@@ -580,6 +648,7 @@ class DesktopController(QObject):
         self._tasks.put(None)
         self._assist.shutdown(wait=False, cancel_futures=True)
         self._quick.shutdown(wait=False, cancel_futures=True)
+        self._job_loader.shutdown(wait=False, cancel_futures=True)
 
     # ------------------------------------------------------------------ assist worker
     _last_settings_signature: object = None
@@ -772,13 +841,13 @@ class DesktopController(QObject):
                 QTimer.singleShot(MAIL_RETRY_MS, self._retry_mail_sync)
             self._status(f"{error}. Your inbox will be checked again in a few minutes.", 10_000, "warning")
             db.add_event(f"Inbox check postponed: {error}", "warn")
-            self.refresh()
+            self.refresh(wait=False)
             return
         label = {"plan": "Preparing applications", "prepare_one": "Preparing the application", "luna": "AI Autofill",
                  "mail_sync": "Inbox check", "preview": "Resume preview", "import_resume": "Resume import"}.get(kind, kind)
         self._status(f"{label} failed: {error}", 15_000, "error")
         db.add_event(f"Desktop {kind} failed: {error}", "error")
-        self.refresh()
+        self.refresh(wait=False)
 
     def _prep_progress(self, text: str, done: int, total: int) -> None:
         self._status(f"{text} · {done} of {total}", 0, "busy")
@@ -1020,7 +1089,7 @@ class DesktopController(QObject):
 
     @staticmethod
     def _parallel_sends(settings: dict) -> int:
-        return max(1, min(int(settings.get("parallel_sends", 1) or 1), scheduler.MAX_PARALLEL_SENDS))
+        return jarvis.parallel(settings, "parallel_sends", 1, scheduler.MAX_PARALLEL_SENDS)
 
     def _pump_sends(self) -> None:
         """Start queued sends while browser slots are free, never two to one employer at once."""
@@ -1091,7 +1160,7 @@ class DesktopController(QObject):
             tone = "success" if done["other"] == 0 else "warning"
             self._status(summary, 9000, tone)
         self._pump_sends()
-        self.refresh()
+        self.refresh(wait=False)
 
     def luna_draft(self, draft_id: int) -> None:
         settings = db.get_settings()

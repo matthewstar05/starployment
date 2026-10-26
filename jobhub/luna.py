@@ -420,7 +420,8 @@ def autofill_answers(job: Job, profile: Profile, settings: dict, questions: list
     if not asked:
         return out
     by_id = {q["id"]: q for q in questions}
-    calls = max(1, int(settings.get("parallel_agent_calls", 4) or 1))
+    from .jarvis import parallel
+    calls = parallel(settings, "parallel_agent_calls", 4, 16)
     batches = _autofill_batches(asked, by_id, calls)
 
     def ask(batch: list[dict]) -> list:

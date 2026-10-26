@@ -138,7 +138,11 @@ them to make a feature easier.
    `settings.parallel_sends` (its `limit`; default 1 for every other caller),
    each in its own browser profile slot (`engine.browser_profile_slot`); the
    desktop send pool never runs two to one employer at once. Automatic runs
-   are capped per run and at one attempt per employer per cycle.
+   are capped per run, at one attempt per employer per cycle, and at
+   `company_cap.count` attempts per employer in `company_cap.days`
+   (`jarvis.diversify`, default 3 in 30 days); with `mix_role_families` they
+   alternate role families (`families.py`: software, data, quant, finance,
+   accounting, business, risk, economics) so one kind of role cannot take every send.
 5. **Automation is opt-in.** `auto_apply` defaults to off; practice mode
    (`dry_run`) fills forms without clicking Submit.
 6. **User data never ships.** `data/`, `.env`, resumes, screenshots, and the
@@ -170,6 +174,13 @@ them to make a feature easier.
    with an open draft has status `prepared`, which keeps automatic runs away.
    "Remove" on an attempt only sets `applications.hidden` (the Applications list
    skips it; the Tracker and duplicate checks still see it).
+   **Pruning** (`db.prune_jobs`, after every scan; Settings → Company job boards →
+   Remove closed postings) deletes only *untouched* postings: status New, no star of
+   the candidate's own, no draft, no application. A posting is closed when its
+   Greenhouse, Lever, or Ashby board was read in full this scan
+   (`SourceJobs.boards_read`) and no longer lists it while its title still matches the
+   targets, or stale when no scan has found it (`job_seen`) for `prune.unseen_days`.
+   Workday is never judged closed by absence (its feed is read a page window at a time).
    **Mark as sent** (`db.mark_application_sent`) is the candidate's own record
    of an application they sent outside Starployment, like
    `db.add_manual_application`: `method='manual'`, never a browser submission.
@@ -316,6 +327,8 @@ every 15 s) and renders via window.set_data.
 | `jobhub/config.py` | Paths, env vars, default settings, settings validation (`validate_settings`, `merge_settings`). |
 | `jobhub/models.py` | Pydantic `Job`, `Profile`, `ApplyResult`; canonical URLs and job IDs; `posted_epoch` (posting dates to UTC seconds) and `board_of` (the public board behind a posting URL). |
 | `jobhub/db.py` | SQLite schema, dedup view (`DEDUPED_JOBS`), jobs (`posted_ts` for posting-window filters and `JOB_ORDERS` sorting; `starred`), applications (`hidden`), runs, events, settings (and the one-time `_upgrade_settings` catalog upgrade), profile, discovered `boards`. |
+| `jobhub/families.py` | Role families by title (`family`) and round-robin `interleave`, for variety in automatic runs. Pure functions. |
+| `jobhub/jarvis.py` | JARVIS policy: modes, halved concurrency, eligibility, `rank`, `still_listed` (ALL takes older postings only while scans still find them), and `diversify` (employer cap, role families). |
 | `jobhub/priority.py` | Priority-company matching (`normalize_company`, `is_priority`), the effective star (`is_starred`), and the holds for bulk sends and automation. Pure functions. |
 | `jobhub/sources/` | One module per source; `import_job.py` validates and imports a single posting URL. `base.fetch_boards` reads configured boards plus the scan's discovered boards (quietly, reporting `board_results`). Greenhouse reads the light listing and fetches descriptions only for undescribed matches. `workday.py` reads public Workday boards (`tenant.wdN/site`, Workday's job-search JSON), US postings only when the board offers that filter, descriptions for matching titles only; discovered Workday boards are read `DISCOVERED_WORKDAY_PER_SCAN` at a time. |
 | `jobhub/scoring.py` | Deterministic, explainable 0–100 match score and auto-apply eligibility. Settings that affect it are listed in `controller.SCORING_KEYS`. |
@@ -336,6 +349,7 @@ every 15 s) and renders via window.set_data.
 | `jobhub/server.py`, `web/` | Legacy FastAPI JSON API and static web UI (no build step). |
 | `jobhub/desktop/` | The native app. See §5. |
 | `packaging/` | PyInstaller spec, runtime hook, icon builder, build and smoke scripts, source exporter. |
+| `config.ROLE_PRESETS` | Title lists per role family, added from Settings → What to look for → Add a role family. |
 | `scripts/render_screenshots.py` | Headless screenshots of every desktop view with synthetic data. |
 | `tests/` | Pytest suite; files are named by area (`test_apply_engine.py`, `test_desktop_theme.py`, …). |
 
@@ -532,7 +546,18 @@ Buttons: `button(text, role, icon=..., trailing=...)` where role is `primary`
   `update_scores` skip rows that would not change, so an unchanged scan keeps
   that cache valid. Queries over all jobs rank ids in `DEDUPED_JOBS` and read
   `idx_jobs_listing`; never sort or scan whole rows (descriptions sit before
-  `score`/`status` in each record). Scoring memoizes description signals per
+  `score`/`status` in each record). The timer and background completions call
+  `refresh(wait=False)`: when only the library changed, the current page stays on
+  screen and `_load_job_data` runs on the `starployment-jobs` thread
+  (`jobs_loaded`); view changes (filter, sort, search, page) still load at once.
+  Applications, drafts, and the Tracker are re-read only when
+  `db.table_version` (trigger-maintained) or `jobs_version` changed.
+- Read-only `db` functions use `db.reader()`: on the Qt thread a second
+  connection, so a worker holding the shared connection (an upsert, a rescore)
+  never stalls the window; WAL readers do not wait for writers. Never write
+  through it. `scheduler.rescore` is incremental: postings changed since the last
+  pass (`jobs_changed_since`, `idx_jobs_updated`), with a full pass after a scoring
+  preference or the profile changes, or every six hours. Scoring memoizes description signals per
   job (`scoring._description_signals`) and location results.
 - Profile and Settings use `DirtyTracker`; `set_data` skips a dirty page so a
   refresh never overwrites typing. Application notes autosave 900ms after typing
@@ -611,6 +636,12 @@ native views. `_WindowMaterials.__init__` must never raise: return with
 `active=False` instead. Verify on a Mac with a temporary data dir by comparing
 each surface's native frame with `visible_rect` after resizes, tab switches,
 and scrolling.
+
+The sidebar is resizable (drag `SidebarHandle`, 200–460px, remembered in QSettings
+unless `JOBHUB_UI_PREFS=0`) and can be hidden (⌘\\, View → Hide Sidebar, double-click
+or drag the handle narrow); a chevron button in a left gutter brings it back. The
+JARVIS badge (`JarvisPill`) opens a mode menu; ALL asks for confirmation, and only
+`jarvis_mode` is saved (`controller.set_jarvis_mode`), never other unsaved edits.
 
 Shortcuts: ⌘1–⌘6 pages (Overview, Jobs, Applications, Tracker, Profile,
 Settings), ⌘⇧A Apply…, ⌘R refresh, ⌘N add posting, ⌘F find jobs, ⌘S save the

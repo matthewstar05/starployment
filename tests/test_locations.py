@@ -97,6 +97,18 @@ def test_non_preferred_domestic_us_location_receives_neutral_score():
     assert is_location_acceptable("Denver, CO") is True
 
 
+def test_united_states_in_places_prefers_every_us_location():
+    settings = DEFAULT_SETTINGS | {"preferred_locations": ["New York", "United States"]}
+    for location in ("Denver, CO", "Hawthorne, CA", "United States", "Boston, Massachusetts, United States"):
+        score, details = score_job(_make_job(location), Profile(), settings)
+        assert details["location"] == 8.0, location
+        assert "Location outside your preferences" not in details["review_reasons"]
+    score, details = score_job(_make_job("New York, NY"), Profile(), settings)
+    assert details["location"] == 10.0
+    score, details = score_job(_make_job("London, UK"), Profile(), settings)
+    assert "Location outside your preferences" in details["review_reasons"]
+
+
 @pytest.mark.parametrize("location", [
     "London, UK",
     "London, England, United Kingdom",

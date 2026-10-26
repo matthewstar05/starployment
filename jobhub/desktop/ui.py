@@ -9,18 +9,21 @@ that import from ``jobhub.desktop.ui``.
 """
 from __future__ import annotations
 
+import os
 import sys
 import time
 from typing import Any
 
 import shiboken6
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, Qt, Signal
-from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QPixmap
+from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QSettings, Qt, QVariantAnimation, Signal
+from PySide6.QtGui import QAction, QColor, QGuiApplication, QKeySequence, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QMenu,
+    QMessageBox,
     QVBoxLayout,
     QWidget,
 )
@@ -36,15 +39,19 @@ from .views.jobs import JobsView
 from .views.profile import ProfileView
 from .views.settings import SettingsView
 from .views.tracker import TrackerView
+from .theme import current_colors
 from .widgets import (
     AmbientBackdrop,
+    CapsuleButton,
     FadeStack,
     GlassNavList,
     GlassPanel,
     Motion,
+    StatusPill,
     Toast,
     button,
     label,
+    qcolor,
     reduced_motion,
 )
 from .console import ActivityConsole
@@ -91,10 +98,110 @@ class ShellBackdrop(AmbientBackdrop):
         super().mouseDoubleClickEvent(event)
 
 
+def _ui_pref(key: str, default):
+    """A remembered window choice (sidebar width...). Tests set JOBHUB_UI_PREFS=0."""
+    if os.environ.get("JOBHUB_UI_PREFS") == "0":
+        return default
+    return QSettings("Starployment", "Starployment").value(key, default)
+
+
+def _save_ui_pref(key: str, value) -> None:
+    if os.environ.get("JOBHUB_UI_PREFS") != "0":
+        QSettings("Starployment", "Starployment").setValue(key, value)
+
+
+class JarvisPill(StatusPill):
+    """The sidebar's JARVIS status. Clicking it opens the mode menu."""
+
+    clicked = Signal()
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.position().toPoint()):
+            self.clicked.emit()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key.Key_Space, Qt.Key.Key_Return, Qt.Key.Key_Enter):
+            self.clicked.emit()
+            return
+        super().keyPressEvent(event)
+
+
+class SidebarHandle(QWidget):
+    """The strip between the sidebar and the page: drag to resize, double-click to hide.
+
+    Like Spotify's library pane, dragging it far enough left hides the sidebar.
+    """
+
+    resized = Signal(int)          # live width while dragging
+    released = Signal(int)         # width at release
+    toggled = Signal()
+
+    def __init__(self, sidebar: "Sidebar", parent: QWidget | None = None):
+        super().__init__(parent)
+        self._sidebar = sidebar
+        self._start: tuple[float, int] | None = None
+        self._hover = False
+        self.setFixedWidth(8)
+        self.setCursor(Qt.CursorShape.SplitHCursor)
+        self.setToolTip("Drag to resize the sidebar · double-click to hide it (⌘\\)")
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._start = (event.globalPosition().x(), self._sidebar.width())
+            event.accept()
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._start is not None:
+            origin, width = self._start
+            self.resized.emit(int(width + event.globalPosition().x() - origin))
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._start is not None:
+            origin, width = self._start
+            self._start = None
+            self.released.emit(int(width + event.globalPosition().x() - origin))
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        self._start = None
+        self.toggled.emit()
+
+    def enterEvent(self, event) -> None:
+        self._hover = True
+        self.update()
+
+    def leaveEvent(self, event) -> None:
+        self._hover = False
+        self.update()
+
+    def paintEvent(self, event) -> None:
+        if not (self._hover or self._start is not None):
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = QColor(qcolor(current_colors().get("accent", "#B8860B")))
+        color.setAlphaF(0.55)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(color)
+        height = min(64, self.height() - 24)
+        painter.drawRoundedRect((self.width() - 3) / 2, (self.height() - height) / 2, 3, height, 1.5, 1.5)
+        painter.end()
+
+
 class Sidebar(GlassPanel):
     """Floating glass sidebar: brand, navigation, and background-scan status."""
 
-    WIDTH = 236
+    WIDTH = 236        # default
+    MIN_WIDTH = 200
+    MAX_WIDTH = 460
+    COLLAPSE_AT = 150  # dragging narrower than this hides the sidebar
 
     def __init__(self, native_titlebar: bool, parent: QWidget | None = None):
         super().__init__(parent, radius=22, material="sidebar")
@@ -122,6 +229,14 @@ class Sidebar(GlassPanel):
         self.nav.setFixedHeight(self.nav.sizeHintForRow(0) * len(PAGES) + 8)
         column.addWidget(self.nav)
         column.addSpacing(6)
+        self.jarvis_status = JarvisPill()
+        self.jarvis_status.setObjectName("jarvisStatus")
+        self.jarvis_status.set_status("", "JARVIS · OFF  ▾")
+        jarvis_row = QHBoxLayout()
+        jarvis_row.setContentsMargins(14, 0, 14, 4)
+        jarvis_row.addWidget(self.jarvis_status)
+        jarvis_row.addStretch()
+        column.addLayout(jarvis_row)
         # A terminal-style log replaces pop-up notices: scans, inbox checks,
         # applications sent, Luna, and errors, with the scan status on top.
         self.console = ActivityConsole()
@@ -169,6 +284,7 @@ class JobHubWindow(QMainWindow):
     setup_requested = Signal()
     answer_questions_requested = Signal(list)
     open_url_requested = Signal(str)
+    jarvis_mode_requested = Signal(str)
 
     def __init__(self, parent: QWidget | None = None):
         super().__init__(parent)
@@ -179,6 +295,9 @@ class JobHubWindow(QMainWindow):
         self._native_chrome = configure_window_chrome(self)
         self._setup_complete = True
         self._auto_apply = False
+        self._jarvis_mode = "off"
+        self._jarvis_practice = False
+        self._scheduler_enabled = True
         self._crossfade: QPropertyAnimation | None = None
 
         root = ShellBackdrop(self._native_chrome)
@@ -186,13 +305,28 @@ class JobHubWindow(QMainWindow):
         self.setCentralWidget(root)
         outer = QHBoxLayout(root)
         outer.setContentsMargins(8, 8, 0, 8) if self._native_chrome else outer.setContentsMargins(10, 10, 0, 10)
-        outer.setSpacing(4)
+        outer.setSpacing(0)
         self.sidebar = Sidebar(self._native_chrome)
         root.add_shadow_target(self.sidebar, self.sidebar.radius)
         outer.addWidget(self.sidebar)
+        self.sidebar_handle = SidebarHandle(self.sidebar)
+        outer.addWidget(self.sidebar_handle)
+        self._outer = outer
+        self._sidebar_width = self._clamp_sidebar(int(_ui_pref("sidebar/width", Sidebar.WIDTH) or Sidebar.WIDTH))
+        self._sidebar_anim: QVariantAnimation | None = None
+        self.sidebar_handle.resized.connect(self._drag_sidebar)
+        self.sidebar_handle.released.connect(self._drop_sidebar)
+        self.sidebar_handle.toggled.connect(self.toggle_sidebar)
+        # Shown at the left edge while the sidebar is hidden.
+        self.sidebar_reveal = CapsuleButton("", "secondary", "chevron-right", root)
+        self.sidebar_reveal.setToolTip("Show the sidebar (⌘\\)")
+        self.sidebar_reveal.setAccessibleName("Show the sidebar")
+        self.sidebar_reveal.clicked.connect(self.toggle_sidebar)
+        self.sidebar_reveal.hide()
         self.nav = self.sidebar.nav
         self.scan = self.sidebar.scan
         self.scan.clicked.connect(self.scan_requested)
+        self.sidebar.jarvis_status.clicked.connect(self._jarvis_menu)
 
         self.stack = FadeStack(mode="rise")
         outer.addWidget(self.stack, 1)
@@ -243,6 +377,131 @@ class JobHubWindow(QMainWindow):
         self.settings.typeface_changed.connect(self.typeface_requested)
         self._install_actions()
         self.set_scan_state(scanning=False, next_scan_at=None, setup_complete=True, scheduler_enabled=True)
+        self.sidebar.setFixedWidth(self._sidebar_width)
+        if str(_ui_pref("sidebar/hidden", "0")) in ("1", "true"):
+            self.set_sidebar_hidden(True, animate=False)
+
+    # ------------------------------------------------------------ sidebar
+    @property
+    def sidebar_hidden(self) -> bool:
+        return not self.sidebar.isVisible() if self.isVisible() else self.sidebar.isHidden()
+
+    def _clamp_sidebar(self, width: int) -> int:
+        return max(Sidebar.MIN_WIDTH, min(Sidebar.MAX_WIDTH, int(width)))
+
+    def _drag_sidebar(self, width: int) -> None:
+        if self.sidebar.isHidden():
+            if width < Sidebar.COLLAPSE_AT:
+                return
+            self.set_sidebar_hidden(False, animate=False)
+        self.sidebar.setFixedWidth(self._clamp_sidebar(width))
+
+    def _drop_sidebar(self, width: int) -> None:
+        if width < Sidebar.COLLAPSE_AT:
+            self.set_sidebar_hidden(True)
+            return
+        self._sidebar_width = self._clamp_sidebar(width)
+        self.sidebar.setFixedWidth(self._sidebar_width)
+        _save_ui_pref("sidebar/width", self._sidebar_width)
+
+    def toggle_sidebar(self) -> None:
+        self.set_sidebar_hidden(not self.sidebar.isHidden())
+
+    def set_sidebar_hidden(self, hidden: bool, animate: bool = True) -> None:
+        """Hide the sidebar so the current page takes the whole window, or bring it back."""
+        if self._sidebar_anim is not None:
+            self._sidebar_anim.stop()
+            self._sidebar_anim = None
+        _save_ui_pref("sidebar/hidden", "1" if hidden else "0")
+        if hasattr(self, "toggle_sidebar_action"):
+            self.toggle_sidebar_action.setText("Show Sidebar" if hidden else "Hide Sidebar")
+        start = self.sidebar.width() if self.sidebar.isVisible() else 0
+        end = 0 if hidden else self._sidebar_width
+
+        def finish() -> None:
+            self._sidebar_anim = None
+            self.sidebar.setVisible(not hidden)
+            self.sidebar_handle.setVisible(not hidden)
+            self.sidebar.setFixedWidth(self._sidebar_width)
+            # Hidden, a narrow gutter holds the button that brings the sidebar back.
+            edge = 8 if self._native_chrome else 10
+            self._outer.setContentsMargins(46 if hidden else edge, edge, 0, edge)
+            self._place_reveal()
+
+        if not animate or reduced_motion() or not self.isVisible():
+            finish()
+            return
+        self.sidebar.show()
+        self.sidebar.setFixedWidth(max(1, start))
+        animation = QVariantAnimation(self)
+        animation.setDuration(Motion.BASE)
+        animation.setStartValue(max(1, start))
+        animation.setEndValue(max(1, end))
+        animation.setEasingCurve(QEasingCurve.Type.OutCubic)
+        animation.valueChanged.connect(lambda value: self.sidebar.setFixedWidth(max(1, int(value))))
+        animation.finished.connect(finish)
+        self._sidebar_anim = animation
+        animation.start()
+
+    def _place_reveal(self) -> None:
+        hidden = self.sidebar.isHidden()
+        self.sidebar_reveal.setVisible(hidden)
+        if hidden:
+            top = (TITLE_BAR_HEIGHT if self._native_chrome else 12) + 6
+            self.sidebar_reveal.adjustSize()
+            self.sidebar_reveal.setFixedSize(32, 32)
+            self.sidebar_reveal.move(8, top)
+            self.sidebar_reveal.raise_()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self.sidebar.isHidden():
+            self._place_reveal()
+
+    # ------------------------------------------------------------ JARVIS
+    JARVIS_MODES = (
+        ("off", "Off", "Your ordinary automation settings"),
+        ("new", "New", "Postings from the last 24 hours, saved answers only"),
+        ("all", "All", "New and older open postings, AI Autofill sent without review"),
+    )
+
+    def _jarvis_menu(self) -> None:
+        pill = self.sidebar.jarvis_status
+        menu = QMenu(self)
+        for value, title, note in self.JARVIS_MODES:
+            action = menu.addAction(f"{title}  ·  {note}")
+            action.setCheckable(True)
+            action.setChecked(value == self._jarvis_mode)
+            action.triggered.connect(lambda _checked=False, value=value: self.choose_jarvis_mode(value))
+        menu.addSeparator()
+        menu.addAction("JARVIS settings…").triggered.connect(self.show_jarvis_settings)
+        menu.exec(pill.mapToGlobal(pill.rect().bottomLeft()))
+
+    def _confirm_jarvis_all(self) -> bool:
+        answer = QMessageBox.question(
+            self, "Turn on JARVIS ALL?",
+            "JARVIS ALL prepares applications, fills open questions with AI Autofill (including labeled "
+            "assumptions), and sends them without asking you first. Starred roles, priority companies, and "
+            "Workday still wait for you.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Cancel)
+        return answer == QMessageBox.StandardButton.Yes
+
+    def choose_jarvis_mode(self, mode: str) -> None:
+        """Change JARVIS from the sidebar. ALL asks once, since it sends without review."""
+        if mode not in ("off", "new", "all") or mode == self._jarvis_mode:
+            return
+        if mode == "all" and not self._confirm_jarvis_all():
+            return
+        self._jarvis_mode = mode
+        self._update_jarvis_status()
+        control = self.settings.jarvis_mode
+        with self.settings.tracker.suspended():
+            control.setCurrentIndex(max(0, control.findData(mode)))
+        self.jarvis_mode_requested.emit(mode)
+
+    def show_jarvis_settings(self) -> None:
+        self.nav.setCurrentRow(SETTINGS)
+        self.settings.show_jarvis()
 
     # ------------------------------------------------------------ chrome
     def showEvent(self, event) -> None:
@@ -270,6 +529,7 @@ class JobHubWindow(QMainWindow):
         self.preferences_action = action("Settings…", QKeySequence.StandardKey.Preferences,
                                          lambda: self.nav.setCurrentRow(SETTINGS),
                                          QAction.MenuRole.PreferencesRole)
+        self.toggle_sidebar_action = action("Hide Sidebar", "Ctrl+\\", self.toggle_sidebar)
         self.page_actions = [
             action(title, f"Ctrl+{index + 1}", lambda _=False, row=index: self.nav.setCurrentRow(row))
             for index, (title, _) in enumerate(PAGES)
@@ -284,6 +544,8 @@ class JobHubWindow(QMainWindow):
             edit_menu = bar.addMenu("Edit")
             edit_menu.addAction(self.find_action)
             view_menu = bar.addMenu("View")
+            view_menu.addAction(self.toggle_sidebar_action)
+            view_menu.addSeparator()
             for item in self.page_actions:
                 view_menu.addAction(item)
             bar.addMenu("Window")
@@ -403,7 +665,10 @@ class JobHubWindow(QMainWindow):
             self._setup_complete = setup_complete
         if auto_apply is not None:
             self._auto_apply = auto_apply
-        automation = "Auto-apply on" if self._auto_apply else "Auto-apply off"
+        self._scheduler_enabled = scheduler_enabled
+        self._update_jarvis_status()
+        automation = (f"JARVIS {self._jarvis_mode.upper()} on" if self._jarvis_mode in ("new", "all")
+                      else "Auto-apply on" if self._auto_apply else "Auto-apply off")
         self.scan.setEnabled(not scanning)
         self.scan.setText("Scanning…" if scanning else "Refresh jobs")
         if scanning:
@@ -416,6 +681,32 @@ class JobHubWindow(QMainWindow):
             self.sidebar.set_status(f"Next scan {countdown(next_scan_at - time.time())}", automation, "green", False)
         else:
             self.sidebar.set_status("Ready", automation, "green", False)
+
+    def _update_jarvis_status(self) -> None:
+        """Keep the saved JARVIS mode visible independently of page and scan activity."""
+        mode = self._jarvis_mode
+        text = f"JARVIS · {mode.upper()}"
+        status = ""
+        if mode == "off":
+            detail = "JARVIS is off. Ordinary automatic applications follow your saved settings."
+        else:
+            detail = ("Recent postings using saved answers." if mode == "new" else
+                      "Recent postings and strong matches, including automatic AI Autofill and sending.")
+            status = "applied"
+            if not self._scheduler_enabled or not self._setup_complete:
+                text += " · Paused"
+                status = "needs_human"
+                detail += " Background work is paused until scheduled scans and setup are enabled."
+            elif self._jarvis_practice:
+                text += " · Practice"
+                status = "dry_run"
+                detail += " Practice mode prevents submission."
+        text += "  ▾"
+        pill = self.sidebar.jarvis_status
+        if pill.text() != text or pill.property("jarvisTone") != status:
+            pill.set_status(status, text)
+            pill.setProperty("jarvisTone", status)
+        pill.setToolTip(detail + " Click to change the mode.")
 
     # -------------------------------------------------------------- data
     def set_data(
@@ -434,6 +725,10 @@ class JobHubWindow(QMainWindow):
                 self.profile.set_settings(settings)
             self._setup_complete = bool(settings.get("setup_complete"))
             self._auto_apply = bool(settings.get("auto_apply"))
+            mode = settings.get("jarvis_mode", "off")
+            self._jarvis_mode = mode if mode in ("new", "all") else "off"
+            self._jarvis_practice = bool(settings.get("dry_run"))
+            self._update_jarvis_status()
             self.dashboard.set_setup_complete(self._setup_complete)
             self.dashboard.set_settings(settings)
             backend = (settings.get("agent") or {}).get("backend", "none")
@@ -450,7 +745,10 @@ class JobHubWindow(QMainWindow):
             self.profile.files.set_files(resume_files)
         if top_jobs is not None:
             self.profile.builder.set_preview_jobs([(job.id, f"{job.company} · {job.title}") for job in top_jobs])
-        retryable = self._retryable(applications or [])
+        if applications is not None:
+            self._applications = applications
+        known_applications = getattr(self, "_applications", None) or []
+        retryable = self._retryable(known_applications)
         if jobs is not None:
             self.jobs.set_jobs(jobs, retryable, total_count=total_jobs)
         if top_jobs is not None:
@@ -482,8 +780,8 @@ class JobHubWindow(QMainWindow):
             if counts is not None:
                 self.dashboard.set_pipeline(counts, focus)
         if events is not None:
-            self.dashboard.set_events(events, applications)
-            self.sidebar.console.add_events(events, applications)
+            self.dashboard.set_events(events, known_applications)
+            self.sidebar.console.add_events(events, known_applications)
 
     @staticmethod
     def _retryable(applications: list[dict[str, Any]]) -> set[str]:

@@ -33,6 +33,9 @@ class SourceJobs(list):
         self.warnings = list(warnings)
         self.notices = list(notices)
         self.board_results: dict[str, int | None] = {}
+        # Every board (configured or discovered) whose listing was read in full;
+        # a posting missing from one of these has closed (db.prune_jobs).
+        self.boards_read: set[str] = set()
 
 
 def discovered_boards(settings: dict, source: str) -> list[str]:
@@ -80,10 +83,13 @@ def fetch_boards(slugs: list[str], fetch_one, settings: dict, *, source: str | N
     missing: list[str] = []
     cached = 0
     successful = 0
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        for jobs, warning, absent, was_cached, ok in executor.map(attempt, unique_slugs):
+    from ..jarvis import parallel
+    with ThreadPoolExecutor(max_workers=parallel(settings, "_board_workers", 8, 8)) as executor:
+        for slug, (jobs, warning, absent, was_cached, ok) in zip(unique_slugs, executor.map(attempt, unique_slugs)):
             result.extend(jobs)
             successful += ok
+            if ok:
+                result.boards_read.add(slug)
             cached += was_cached
             if warning:
                 result.warnings.append(warning)
@@ -93,6 +99,7 @@ def fetch_boards(slugs: list[str], fetch_one, settings: dict, *, source: str | N
             result.board_results[slug] = None if jobs is None else len(jobs)
             if jobs is not None:
                 result.extend(jobs)
+                result.boards_read.add(slug)
                 successful += 1
     if missing:
         names = ', '.join(missing[:5])

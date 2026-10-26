@@ -6,9 +6,10 @@ Save, tracked by ``DirtyTracker`` so a refresh never overwrites edits.
 from __future__ import annotations
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QFrame, QLabel, QLineEdit, QScrollArea, QSpinBox, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QLabel, QLineEdit, QMenu, QScrollArea, QSpinBox, QVBoxLayout, QWidget
 
-from ...config import ASHBY_COMPANIES, GREENHOUSE_COMPANIES, LEVER_COMPANIES, PRIORITY_COMPANIES, WORKDAY_COMPANIES
+from ...config import (ASHBY_COMPANIES, GREENHOUSE_COMPANIES, LEVER_COMPANIES, PRIORITY_COMPANIES, ROLE_PRESETS,
+                       WORKDAY_COMPANIES)
 from .. import fonts
 from ..editors import TagEditor
 from ..widgets import DirtyTracker, FormGroup, PageHeader, SegmentedControl, Stepper, ToggleSwitch, button
@@ -27,7 +28,7 @@ TITLE_SUGGESTIONS = ["Software Engineer", "Software Developer", "Backend Enginee
                      "Full Stack Engineer", "Data Scientist", "Data Analyst", "Data Engineer", "Machine Learning Engineer",
                      "Quantitative Developer", "Quantitative Researcher", "Research Engineer", "Product Manager",
                      "New Grad", "Entry Level", "Site Reliability Engineer", "Security Engineer", "Mobile Engineer"]
-PLACE_SUGGESTIONS = ["Remote", "San Francisco", "New York", "Seattle", "Los Angeles", "Chicago", "Boston", "Austin",
+PLACE_SUGGESTIONS = ["United States", "Remote", "San Francisco", "New York", "Seattle", "Los Angeles", "Chicago", "Boston", "Austin",
                      "Denver", "Washington, DC", "Atlanta", "San Diego", "Toronto", "London"]
 
 
@@ -80,6 +81,23 @@ class SettingsView(QWidget):
         appearance.add_row("Font", self.typeface, TYPEFACE_NOTE if fonts.claude_available()
                            else TYPEFACE_MISSING)
         groups.addWidget(appearance)
+
+        jarvis_group = FormGroup("JARVIS", "Quiet background applications while you work or sleep.")
+        self.jarvis_mode = SegmentedControl()
+        for title, value in (("OFF", "off"), ("NEW", "new"), ("ALL", "all")):
+            self.jarvis_mode.addItem(title, value)
+        self.jarvis_mode.setAccessibleName("JARVIS mode")
+        jarvis_group.add_row("Mode", self.jarvis_mode,
+                           "NEW sends suitable postings from the last 24 hours using saved answers. "
+                           "ALL also works through older postings that scans still find listed, prepares "
+                           "applications, and sends AI Autofill answers (assumptions labeled) without review. "
+                           "Starred roles, priority companies, and Workday wait for you. Change it from the "
+                           "JARVIS badge in the sidebar too.")
+        jarvis_group.add_row("Performance", QLabel(""),
+                             "Half your saved concurrency, scans twice as often, and backs off under load. "
+                             "OFF restores your ordinary automation settings. Keep the app open; the display may sleep.")
+        groups.addWidget(jarvis_group)
+        self.jarvis_group = jarvis_group
 
         # Connections -----------------------------------------------------------
         self.luna = LunaConnection()
@@ -153,6 +171,17 @@ class SettingsView(QWidget):
         automation.add_row("Scan every", Stepper(self.interval, width=104))
         automation.add_row("Applications per run", Stepper(self.max_apply), "At most one per employer each run.")
         automation.add_row("Minimum match score", Stepper(self.min_score), "Automatic runs only apply at or above this.")
+        self.company_cap = QSpinBox()
+        self.company_cap.setRange(0, 100)
+        self.company_cap.setSpecialValueText("No limit")
+        self.company_cap.setSuffix(" per employer")
+        automation.add_row("Employer limit", Stepper(self.company_cap, width=150),
+                           "Automatic runs stop sending to an employer after this many applications in 30 days.")
+        self.mix_families = ToggleSwitch()
+        self.mix_families.setAccessibleName("Mix role types")
+        automation.add_row("Mix role types", self.mix_families,
+                           "Alternate software, data, quant, finance, accounting, and other roles you target, "
+                           "so one kind of role does not take every automatic send.")
         groups.addWidget(automation)
 
         # Priority companies ---------------------------------------------------
@@ -183,7 +212,11 @@ class SettingsView(QWidget):
         self.years_experience.setRange(0, 80)
         self.years_experience.setSuffix(" years")
         search.add_row("Job titles", self.target_titles)
-        search.add_row("Places", self.locations)
+        presets = button("Add a role family", "quiet", icon="plus")
+        presets.setToolTip("Add a starting list of titles for a kind of role")
+        presets.clicked.connect(lambda: self._preset_menu(presets))
+        search.add_row("", presets)
+        search.add_row("Places", self.locations, "Add United States to count every US city as preferred.")
         search.add_row("Leave out titles with", self.exclude_words)
         search.add_row("Include remote roles", self.remote_ok)
         search.add_row("Include internships", self.include_internships)
@@ -224,13 +257,19 @@ class SettingsView(QWidget):
         self.discover_boards = ToggleSwitch()
         self.discover_boards.setAccessibleName("Discover more company boards")
         self._discover_row = sources.add_row("Discover more boards", self.discover_boards, DISCOVER_NOTE)
+        self.prune = ToggleSwitch()
+        self.prune.setAccessibleName("Remove closed postings")
+        sources.add_row("Remove closed postings", self.prune,
+                        "Delete postings you never touched once their board stops listing them, or no scan has "
+                        "found them in three weeks. Starred, prepared, and sent roles always stay.")
         groups.addWidget(sources)
         groups.addStretch(1)
 
         self.tracker.watch(
-            self.auto_apply, self.dry_run, self.interval, self.max_apply, self.min_score, self.luna, self.email,
+            self.jarvis_mode, self.auto_apply, self.dry_run, self.interval, self.max_apply, self.min_score, self.luna, self.email,
             self.parallel_sends, self.parallel_prepare, self.parallel_agent_calls,
             self.show_browser, self.keychain_protection, self.workday_accounts, self.workday_send,
+            self.company_cap, self.mix_families, self.prune,
             self.target_titles, self.locations, self.exclude_words, self.remote_ok, self.include_internships,
             self.min_salary, self.years_experience, self.max_skills, self.greenhouse, self.lever,
             self.ashby, self.workday, self.search_terms, self.priority_companies, self.discover_boards,
@@ -273,12 +312,32 @@ class SettingsView(QWidget):
         self.save_button.setEnabled(dirty)
         self.header.set_subtitle("You have unsaved changes." if dirty else DEFAULT_SUBTITLE)
 
+    def show_jarvis(self) -> None:
+        self.scroll.ensureWidgetVisible(self.jarvis_group, 0, 0)
+
     def show_connections(self) -> None:
         self.scroll.ensureWidgetVisible(self.luna, 0, 0)
 
     def _restore_priority(self) -> None:
         self.priority_companies.set_values(list(PRIORITY_COMPANIES))
         self.priority_companies.changed.emit()
+
+    def _preset_menu(self, anchor: QWidget) -> None:
+        menu = QMenu(self)
+        current = {title.casefold() for title in self.target_titles.values()}
+        for name, titles in ROLE_PRESETS.items():
+            missing = [title for title in titles if title.casefold() not in current]
+            action = menu.addAction(f"{name} ({len(missing)} new)" if missing else f"{name} (added)")
+            action.setEnabled(bool(missing))
+            action.triggered.connect(lambda _checked=False, name=name: self.add_role_family(name))
+        menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+
+    def add_role_family(self, name: str) -> None:
+        """Append a role family's titles to Job titles (unsaved until Save)."""
+        current = self.target_titles.values()
+        known = {title.casefold() for title in current}
+        self.target_titles.set_values(current + [t for t in ROLE_PRESETS.get(name, []) if t.casefold() not in known])
+        self.target_titles.changed.emit()
 
     def set_board_count(self, count: int) -> None:
         """Show how many discovered boards scans are reading."""
@@ -292,11 +351,15 @@ class SettingsView(QWidget):
             self.appearance.setCurrentIndex(max(0, self.appearance.findData(appearance)))
             typeface = str(s.get("font", "Claude")).title()
             self.typeface.setCurrentIndex(max(0, self.typeface.findData(typeface)))
+            self.jarvis_mode.setCurrentIndex(max(0, self.jarvis_mode.findData(s.get("jarvis_mode", "off"))))
             self.auto_apply.setChecked(bool(s.get("auto_apply", False)))
             self.dry_run.setChecked(bool(s.get("dry_run", False)))
             self.interval.setValue(int(s.get("scan_interval_min", 60)))
             self.max_apply.setValue(int(s.get("max_apply_per_run", 3)))
             self.min_score.setValue(int(s.get("min_score_to_apply", 60)))
+            self.company_cap.setValue(int((s.get("company_cap") or {}).get("count", 3)))
+            self.mix_families.setChecked(bool(s.get("mix_role_families", True)))
+            self.prune.setChecked(bool((s.get("prune") or {}).get("enabled", True)))
             self.parallel_sends.setValue(int(s.get("parallel_sends", 4)))
             self.parallel_prepare.setValue(int(s.get("parallel_prepare", 8)))
             self.parallel_agent_calls.setValue(int(s.get("parallel_agent_calls", 4)))
@@ -335,11 +398,15 @@ class SettingsView(QWidget):
         patch = {
             "appearance": self.appearance.currentData(),
             "font": self.typeface.currentData(),
+            "jarvis_mode": self.jarvis_mode.currentData(),
             "auto_apply": self.auto_apply.isChecked(),
             "dry_run": self.dry_run.isChecked(),
             "scan_interval_min": self.interval.value(),
             "max_apply_per_run": self.max_apply.value(),
             "min_score_to_apply": float(self.min_score.value()),
+            "company_cap": {"count": self.company_cap.value()},
+            "mix_role_families": self.mix_families.isChecked(),
+            "prune": {"enabled": self.prune.isChecked()},
             "parallel_sends": self.parallel_sends.value(),
             "parallel_prepare": self.parallel_prepare.value(),
             "parallel_agent_calls": self.parallel_agent_calls.value(),

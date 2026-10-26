@@ -9,7 +9,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
-from . import db
+from . import config, db, jarvis
 from .apply import apply_to_job
 from .models import ApplyResult, Job, job_fingerprint
 from .priority import held_from_automation
@@ -85,10 +85,37 @@ def _scan_settings(settings: dict) -> dict:
     return scan
 
 
-def rescore() -> None:
-    """Refresh existing rankings after candidate or targeting preferences change."""
-    jobs = db.list_jobs(status="all", limit=100000)
-    db.update_scores(score_all(jobs, db.get_profile(), db.get_settings()))
+# Settings that change a score (desktop/controller.SCORING_KEYS lists the same ones).
+_SCORING_SETTINGS = ("target_titles", "preferred_locations", "exclude_title_words", "include_internships",
+                     "remote_ok", "min_salary", "years_experience", "favorite_locations")
+# A full rescore also refreshes time-based parts (freshness, posting age); between
+# full passes only postings inserted or changed since the last pass are scored.
+FULL_RESCORE_SECONDS = 6 * 3600
+_rescored: dict = {"key": None, "at": 0.0, "since": ""}
+
+
+def rescore(force: bool = False) -> None:
+    """Refresh rankings for postings that changed, or for all after preferences change.
+
+    Scoring the whole library read every description and held the database for
+    seconds, twice per cycle; most cycles change only a few postings.
+    """
+    import hashlib
+    import json as _json
+    from .models import now_iso
+    profile, settings = db.get_profile(), db.get_settings()
+    key = (str(config.DB_PATH), hashlib.sha256(
+        ((profile.model_dump_json() if profile else "") + _json.dumps(
+            {k: settings.get(k) for k in _SCORING_SETTINGS}, sort_keys=True, default=str)).encode()).hexdigest())
+    started = now_iso()
+    full = (force or key != _rescored["key"] or not _rescored["since"]
+            or time.time() - _rescored["at"] > FULL_RESCORE_SECONDS)
+    jobs = db.list_jobs(status="all", limit=100000) if full else db.jobs_changed_since(_rescored["since"])
+    if jobs:
+        db.update_scores(score_all(jobs, profile, settings))
+    _rescored["since"] = started
+    if full:
+        _rescored.update(key=key, at=time.time())
 
 
 def hosted_posting_url(job: Job) -> str:
@@ -145,6 +172,9 @@ def scan_once() -> dict:
     found = new = 0
     status = "ok"
     try:
+        if jarvis.active(db.get_settings()) and jarvis.hold("scan"):
+            db.add_event("JARVIS deferred its scan while the computer is busy")
+            return {"status": "deferred", "found": 0, "new": 0}
         run_id = db.create_run()
         settings = _scan_settings(db.get_settings())
         enabled = [n for n, on in settings.get("sources", {}).items() if on and n in SOURCES]
@@ -152,7 +182,8 @@ def scan_once() -> dict:
         jobs: list[Job] = []
         t0 = time.time()
         successful = 0
-        with ThreadPoolExecutor(max_workers=6) as ex:
+        boards_read: dict[str, set[str]] = {}
+        with ThreadPoolExecutor(max_workers=jarvis.parallel(settings, "_source_workers", 6, 6)) as ex:
             futures = {ex.submit(SOURCES[n], settings): n for n in enabled}
             for future in as_completed(futures):
                 name = futures[future]
@@ -161,6 +192,8 @@ def scan_once() -> dict:
                     jobs.extend(result)
                     successful += 1
                     log.append(f"{name}: {len(result)} jobs")
+                    if name in db.FULL_LISTING_ATS:
+                        boards_read[name] = set(getattr(result, "boards_read", ()) or ())
                     board_results = getattr(result, "board_results", None)
                     if board_results and name in BOARD_SOURCES:
                         db.record_board_scans(name, board_results)
@@ -194,6 +227,16 @@ def scan_once() -> dict:
         jobs = list(by_key.values())
         found = len(jobs)
         new = db.upsert_jobs(jobs)
+        db.mark_seen([job.id for job in jobs], t0)   # upsert_jobs points each job at its stored row
+        try:
+            pruned = db.prune_jobs(settings, boards_read=boards_read, scan_started=t0)
+            if pruned["closed"] or pruned["stale"]:
+                log.append(f"pruned {pruned['closed']} closed and {pruned['stale']} long-unseen posting(s)")
+                db.add_event(f"Removed {pruned['closed'] + pruned['stale']} postings that are no longer hiring "
+                             f"({pruned['closed']} closed on their boards, {pruned['stale']} not seen for weeks)")
+            db.compact()
+        except Exception as error:  # noqa: BLE001 - pruning must never cost a scan
+            log.append(f"pruning: WARNING {error}")
         boards = db.discover_boards(jobs) if settings.get("discover_boards", True) else 0
         if boards:
             log.append(f"discovered {boards} more company board(s) to read in later scans")
@@ -231,7 +274,7 @@ def queue_application(job_id: str, parallel: int = 1) -> int:
 
 def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | None = None,
               require_eligible: bool = False, extra_answers: dict | None = None,
-              resume_override: str | None = None, assist: bool = False) -> dict:
+              resume_override: str | None = None, assist: bool = False, required_jarvis_mode: str | None = None) -> dict:
     """Reserve once, record before submitting, and persist the outcome atomically.
 
     ``extra_answers`` are answers the candidate approved for this one
@@ -258,20 +301,12 @@ def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | No
             if job is None or profile is None:
                 raise ValueError("Job or profile no longer exists")
             settings = db.get_settings()
-            if extra_answers:
-                import copy
-                settings = copy.deepcopy(settings)
-                answers = settings.setdefault("answers", {})
-                answers["field_answers"] = {**(answers.get("field_answers") or {}), **extra_answers}
-                # Kept apart as well: the candidate approved these for this application, so a
-                # "Yes" may tick an acknowledgement box (saved answers never can).
-                answers["approved_answers"] = dict(extra_answers)
             job = enrich_job(job)
             if require_eligible:
                 settings = db.get_settings()
                 min_score = float(settings.get("min_score_to_apply", 60))
                 if (job.score_json.get("auto_apply_eligible") is not True or job.score < min_score
-                        or not settings.get("auto_apply") or not settings.get("setup_complete")):
+                        or not jarvis.automatic(settings) or not settings.get("setup_complete")):
                     raise PostingGone(
                         "The current posting no longer meets your automatic application criteria. "
                         "Review the refreshed role before applying."
@@ -281,6 +316,20 @@ def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | No
                         "This is a starred or priority-company role, so it waits for your own approval. "
                         "Prepare it and use Approve & send."
                     )
+            if required_jarvis_mode:
+                if settings.get("jarvis_mode") != required_jarvis_mode or not jarvis.eligible(job, settings):
+                    raise PostingRefreshError("JARVIS authorization or eligibility changed before sending.")
+                if jarvis.hold("send"):
+                    raise PostingRefreshError("JARVIS stopped before sending because the computer is busy.")
+                settings = {**settings, "show_browser": False}
+            if extra_answers:
+                import copy
+                settings = copy.deepcopy(settings)
+                answers = settings.setdefault("answers", {})
+                answers["field_answers"] = {**(answers.get("field_answers") or {}), **extra_answers}
+                # Kept apart as well: the candidate approved these for this application, so a
+                # "Yes" may tick an acknowledgement box (saved answers never can).
+                answers["approved_answers"] = dict(extra_answers)
             db.add_event(f"Applying: {job.company} / {job.title}", "info", job_id)
             from pathlib import Path
             chosen = resume_override if resume_override and Path(resume_override).is_file() else None
@@ -365,8 +414,10 @@ def _auto_apply_preflight_window(candidates: list[Job], budget: int) -> list[Job
 
 def auto_apply_batch() -> list[dict]:
     settings = db.get_settings()
-    if not settings.get("auto_apply") or not settings.get("setup_complete"):
+    if not jarvis.automatic(settings) or not settings.get("setup_complete"):
         return []
+    if jarvis.active(settings):
+        return jarvis_batch()
     rescore()
     priority = settings.get("priority_companies") or []
     # Priority companies and starred roles are never applied to unattended.
@@ -375,6 +426,7 @@ def auto_apply_batch() -> list[dict]:
                       or (job.ats == "workday" and (settings.get("workday") or {}).get("send")))
                   and job.score_json.get("auto_apply_eligible", True)
                   and not held_from_automation(job, priority)]
+    candidates = jarvis.diversify(candidates, settings)
     results = []
     attempted_companies: set[str] = set()
     max_applications = int(settings.get("max_apply_per_run", 3))
@@ -407,13 +459,103 @@ def auto_apply_batch() -> list[dict]:
     return results
 
 
+def jarvis_batch() -> list[dict]:
+    """Standing, mode-scoped authorization, always through the durable send pipeline.
+
+    AI answers remain on their own draft. Neither candidate facts nor the answer
+    bank are changed. An attempt of any outcome is never retried by JARVIS.
+    """
+    from . import prepare
+    settings = db.get_settings()
+    mode = settings.get("jarvis_mode", "off")
+    if not jarvis.active(settings) or not settings.get("setup_complete") or STATE.stop:
+        return []
+    if jarvis.hold("apply"):
+        db.add_event("JARVIS deferred applications while the computer is busy")
+        return []
+    rescore()
+    profile = db.get_profile()
+    if profile is None:
+        return []
+    with db.conn() as connection:
+        attempted = {row["job_id"] for row in connection.execute("SELECT job_id FROM applications")}
+    floor = float(settings.get("min_score_to_apply", 60))
+    candidates = [job for status in (("new", "prepared") if mode == "all" else ("new",))
+                  for job in db.list_jobs(status=status, min_score=floor, limit=100000)
+                  if job.id not in attempted and jarvis.eligible(job, settings)]
+    if mode == "all":
+        candidates = jarvis.still_listed(candidates)
+    candidates = jarvis.diversify(jarvis.rank(candidates, mode), settings)
+    results, employers = [], set()
+    maximum = int(settings.get("max_apply_per_run", 3))
+    # Probe a bounded rotating window, so an unanswerable form cannot starve the backlog.
+    for job in _auto_apply_preflight_window(candidates, max(24, maximum * 8)):
+        current = db.get_settings()
+        if (STATE.stop or current.get("jarvis_mode") != mode or jarvis.hold("apply")
+                or len(results) >= maximum):
+            break
+        job = db.get_job(job.id)
+        if job is None or not jarvis.eligible(job, current):
+            continue
+        company = job.company.strip().casefold()
+        if company in employers:
+            continue
+        if mode == "new":
+            if preflight_job(job, profile, current).status == "missing_facts":
+                continue
+            result = apply_one(job.id, require_eligible=True, required_jarvis_mode=mode)
+        else:
+            try:
+                draft = db.draft_for_job(job.id)
+                # Errors, interrupted preparations, and uncertain submissions wait for the owner.
+                if draft and (draft["status"] not in ("ready", "needs_answers", "approved")
+                              or draft.get("application_id")):
+                    continue
+                if draft is None:
+                    job = enrich_job(job)
+                    if not jarvis.eligible(job, db.get_settings()):
+                        continue
+                    draft_id = prepare.prepare_job(job, profile, current)
+                else:
+                    draft_id = draft["id"]
+                if db.get_settings().get("jarvis_mode") != mode or jarvis.hold("apply") or STATE.stop:
+                    break
+                draft = db.get_draft(draft_id)
+                if any(prepare._open(q) for q in draft["questions"]):
+                    prepare.autofill(draft_id, current)
+                current = db.get_settings()
+                if current.get("jarvis_mode") != mode or jarvis.hold("apply") or STATE.stop:
+                    break
+                if not jarvis.eligible(db.get_job(job.id), current):
+                    continue
+                prepare.approve_and_queue(draft_id)
+                db.add_event("JARVIS ALL authorized this draft, including its application-only AI Autofill answers", "info", job.id)
+                result = prepare.send_draft(draft_id, parallel=jarvis.parallel(current, "parallel_sends", 4, 24),
+                                            unattended=True)
+            except PostingGone:
+                db.set_job_status(job.id, "skipped")
+                continue
+            except Exception as error:  # one unavailable form/agent must not stop the overnight cycle
+                db.add_event(f"JARVIS left this application for review: {str(error)[:300]}", "warn", job.id)
+                continue
+        if result.get("status") == "skipped":
+            continue
+        results.append(result)
+        employers.add(company)
+        if result.get("status") in ("blocked", "busy"):
+            break
+    db.add_event(f"JARVIS {mode.upper()} finished: {len(results)} attempt(s), "
+                 f"{sum(r.get('status') == 'applied' for r in results)} confirmed")
+    return results
+
+
 async def loop() -> None:
     """Scan while the server runs, using the latest interval after each cycle."""
     STATE.stop = False
     await asyncio.sleep(2)
     while not STATE.stop:
         cycle_started = time.time()
-        interval = max(5, int(db.get_settings().get("scan_interval_min", 60))) * 60
+        interval = jarvis.interval_minutes(db.get_settings()) * 60
         STATE.next_scan_at = datetime.fromtimestamp(cycle_started + interval, tz=timezone.utc).isoformat(timespec="seconds")
         try:
             summary = await asyncio.to_thread(scan_once)
@@ -427,7 +569,7 @@ async def loop() -> None:
             STATE.last_error = str(error)
             db.add_event(f"Background cycle failed: {error}", "error")
         while not STATE.stop:
-            interval = max(5, int(db.get_settings().get("scan_interval_min", 60))) * 60
+            interval = jarvis.interval_minutes(db.get_settings()) * 60
             # Application time is part of the hourly cycle, not added to it.
             next_time = cycle_started + interval
             STATE.next_scan_at = datetime.fromtimestamp(next_time, tz=timezone.utc).isoformat(timespec="seconds")

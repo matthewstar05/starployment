@@ -169,7 +169,7 @@ ASHBY_COMPANIES = [
 # Boards added to the bundled catalog in version 2. Each one was checked
 # against its public API when added. Existing installs receive these once
 # (see db._upgrade_settings), so a board the candidate removes stays removed.
-CATALOG_VERSION = 2
+CATALOG_VERSION = 3
 CATALOG_ADDITIONS = {
     "greenhouse": [
         "airtable", "cockroachlabs", "coursera", "faire", "fivetran", "gemini", "intercom", "lattice",
@@ -180,14 +180,26 @@ CATALOG_ADDITIONS = {
         "gravitonresearchcapital", "jumptrading", "drweng", "sigmacomputing", "sambanovasystems", "coreweave",
         "figure", "kodiak", "mercury", "mozilla", "wikimedia", "lucidmotors", "attentive", "klaviyo", "braze",
         "contentful", "calendly", "monzo", "scopely", "crunchyroll", "vercel", "netlify", "humeai",
+        # Version 3: finance, fintech, FP&A software, insurance, and consulting boards, so
+        # finance, accounting, and business-analysis roles are found as readily as software ones.
+        "aqr", "bridgewater89", "pdtpartners", "marshallwace", "schonfeld", "worldquant", "genevatrading",
+        "gsacapital", "towerresearchcapital", "mangroup", "engineersgate", "williamblair",
+        "lincolninternational", "generalatlantic", "charlesriverassociates", "addepar1", "iex", "alphasense",
+        "upstart", "pagaya", "oportun", "alloy", "adyen", "billcom", "fireblocks", "alpaca", "earnin", "blend",
+        "wise", "sezzle", "payoneer", "zuora", "highradius", "anaplan", "datarails", "a16z", "iconiq",
+        "exoduspoint", "optiverus", "bitgo", "consensys", "thoughtworks", "amwins", "costar", "coalition",
+        "ethoslife", "pieinsurance", "counterpart", "insurify", "federato",
     ],
-    "lever": ["spotify", "outreach", "gopuff", "ro", "binance", "offchainlabs"],
+    "lever": ["spotify", "outreach", "gopuff", "ro", "binance", "offchainlabs",
+              "anchorage", "finix", "dlocal", "nium"],
     "ashby": [
         "cohere", "posthog", "render", "railway", "neon", "clickhouse", "airbyte", "prefect", "astronomer",
         "weaviate", "pinecone", "langchain", "llamaindex", "baseten", "lambda", "crusoe", "cerebras", "etched",
         "snowflake", "confluent", "vanta", "drata", "plaid", "zip", "attio", "pylon", "decagon", "abridge",
         "suno", "pika", "krea", "1password", "temporal", "sentry", "cribl", "mintlify", "resend", "omni",
         "cursor", "warp", "saronic",
+        "voleon", "lemonade", "openly", "kin", "bestow", "dave", "nubank", "nerdwallet", "moderntreasury",
+        "column", "circle", "acorns", "rho", "cube", "airwallex", "pleo", "ramp",
     ],
 }
 # Workday boards, written tenant.wdN/site (see sources/workday.py). Each was
@@ -216,17 +228,60 @@ PRIORITY_COMPANIES = [
 ]
 
 
+# Starting title lists by role family, offered in Settings → What to look for → Add a
+# role family. Adding one appends its titles to target_titles; nothing else changes.
+ROLE_PRESETS: dict[str, list[str]] = {
+    "Software": ["software engineer", "software developer", "backend engineer", "frontend engineer", "full stack",
+                 "platform engineer", "infrastructure engineer", "site reliability engineer", "mobile engineer",
+                 "new grad", "entry level"],
+    "Data & ML": ["data scientist", "data analyst", "data engineer", "analytics engineer", "machine learning engineer",
+                  "ai engineer", "applied scientist", "decision scientist", "business intelligence analyst"],
+    "Quant & trading": ["quantitative developer", "quantitative researcher", "quantitative analyst",
+                        "quantitative trader", "trading analyst", "quantitative strategist", "algorithmic trading"],
+    "Finance & FP&A": ["fp&a", "fp&a analyst", "financial analyst", "finance analyst", "financial planning",
+                       "strategic finance", "corporate finance analyst", "business finance", "budget analyst",
+                       "revenue analyst", "treasury analyst", "investment analyst", "investment banking analyst",
+                       "equity research", "credit analyst", "valuation analyst", "corporate development analyst",
+                       "finance rotational", "finance development program", "investment operations"],
+    "Accounting": ["accountant", "staff accountant", "accounting analyst", "accounting associate",
+                   "revenue accountant", "financial reporting", "technical accounting", "fund accountant",
+                   "fund accounting", "tax analyst", "tax associate", "audit associate", "internal audit",
+                   "assurance associate", "sox analyst"],
+    "Business & strategy": ["business analyst", "business systems analyst", "business operations",
+                            "operations analyst", "strategy analyst", "strategy & operations", "strategy and operations",
+                            "bizops", "commercial analyst", "pricing analyst", "revenue operations analyst",
+                            "deal desk analyst", "product analyst", "associate product manager",
+                            "associate consultant", "consulting analyst", "management consultant",
+                            "supply chain analyst", "procurement analyst"],
+    "Risk & actuarial": ["risk analyst", "credit risk", "market risk", "model validation", "actuarial",
+                         "underwriting analyst", "insurance analyst", "compliance analyst", "fraud analyst"],
+    "Economics & research": ["economist", "economic analyst", "economic consultant", "economic research",
+                             "research analyst", "research associate", "policy analyst", "econometrician",
+                             "statistician"],
+}
+
+
 DEFAULT_SETTINGS: dict = {
     # --- desktop appearance ---
     "appearance": "System",       # System | Light | Dark
     "font": "Claude",             # Claude (Anthropic Sans/Serif from the installed Claude app) | System
     # --- autonomy ---
     "setup_complete": False,     # first-run desktop setup completed by the candidate
+    "jarvis_mode": "off",          # off | new (recent postings) | all (autonomous AI Autofill)
     "auto_apply": False,           # when True the hourly loop applies to top jobs on its own
     "dry_run": False,              # fill every form but never click Submit
     "scan_interval_min": 60,
     "max_apply_per_run": 3,
     "min_score_to_apply": 60,
+    # Automatic runs (auto_apply and JARVIS) stop sending to an employer once it has
+    # this many attempts in the last ``days`` days, and alternate role families
+    # (software, data, quant, finance, accounting...) so one kind of role or one
+    # large employer cannot take every overnight send.
+    "company_cap": {"count": 3, "days": 30},
+    "mix_role_families": True,
+    # Delete untouched postings that are no longer hiring: gone from a board that was
+    # read successfully, or not found by any scan for ``unseen_days`` days.
+    "prune": {"enabled": True, "unseen_days": 21},
     # --- sending: applications sent side by side, each in its own background browser ---
     "parallel_sends": 4,
     "parallel_prepare": 8,         # forms read and Luna/AI Autofill drafts run at once while preparing
@@ -376,6 +431,14 @@ def validate_settings(settings: dict) -> dict:
         create_accounts: StrictBool
         send: StrictBool
 
+    class CompanyCap(StrictModel):
+        count: StrictInt = Field(ge=0, le=100)     # 0 turns the cap off
+        days: StrictInt = Field(ge=1, le=365)
+
+    class Prune(StrictModel):
+        enabled: StrictBool
+        unseen_days: StrictInt = Field(ge=3, le=365)
+
     class ResumeBuilder(StrictModel):
         one_page: StrictBool
         luna_select: StrictBool
@@ -443,17 +506,21 @@ def validate_settings(settings: dict) -> dict:
         appearance: Literal["System", "Light", "Dark"]
         font: Literal["Claude", "System"]
         setup_complete: StrictBool
+        jarvis_mode: Literal["off", "new", "all"] = "off"
         auto_apply: StrictBool
         dry_run: StrictBool
         scan_interval_min: StrictInt = Field(ge=5, le=10080)
         max_apply_per_run: StrictInt = Field(ge=1, le=25)
+        company_cap: CompanyCap
+        mix_role_families: StrictBool
+        prune: Prune
         parallel_sends: StrictInt = Field(ge=1, le=24)
         parallel_prepare: StrictInt = Field(ge=1, le=32)
         parallel_agent_calls: StrictInt = Field(ge=1, le=16)
         show_browser: StrictBool
         min_score_to_apply: float = Field(ge=0, le=100, allow_inf_nan=False, strict=True)
         priority_companies: list[StrictStr] = Field(max_length=300)
-        target_titles: list[StrictStr] = Field(max_length=100)
+        target_titles: list[StrictStr] = Field(max_length=300)
         exclude_title_words: list[StrictStr] = Field(max_length=100)
         include_internships: StrictBool
         preferred_locations: list[StrictStr] = Field(max_length=100)
