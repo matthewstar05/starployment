@@ -69,7 +69,13 @@ def check_bundle(executable: Path, screenshots: Path | None = None) -> int:
         temporary_dir = Path(temporary)
         env = os.environ.copy()
         env["JOBHUB_DATA_DIR"] = str(temporary_dir / "candidate-data")
-        env["QT_QPA_PLATFORM"] = "offscreen"
+        if sys.platform == "win32":
+            # Qt's offscreen platform on Windows reads no system fonts and
+            # draws every glyph as a box. Render through the native platform
+            # users run; grab() needs no visible desktop.
+            env.pop("QT_QPA_PLATFORM", None)
+        else:
+            env["QT_QPA_PLATFORM"] = "offscreen"
         env.pop("PLAYWRIGHT_BROWSERS_PATH", None)
         env.pop("PLAYWRIGHT_NODEJS_PATH", None)
 
