@@ -182,7 +182,7 @@ def test_quitting_during_a_send_exits_once_it_finishes(monkeypatch):
     exits: list[int] = []
     monkeypatch.setattr(entry, "sending_now", lambda: next(answers))
     monkeypatch.setattr(entry.time, "sleep", lambda seconds: None)
-    monkeypatch.setattr(entry.os, "_exit", exits.append)
+    monkeypatch.setattr(entry, "hard_exit", exits.append)
     entry.exit_promptly(0)
     assert exits == [0]     # it never falls back to waiting on idle worker threads
 
@@ -193,7 +193,7 @@ def test_windowed_bundle_quits_without_standard_streams(monkeypatch):
     monkeypatch.setattr(entry, "sending_now", lambda: False)
     monkeypatch.setattr(entry.sys, "stdout", None)
     monkeypatch.setattr(entry.sys, "stderr", None)
-    monkeypatch.setattr(entry.os, "_exit", exits.append)
+    monkeypatch.setattr(entry, "hard_exit", exits.append)
     entry.exit_promptly(0)
     assert exits == [0]
 
@@ -228,3 +228,28 @@ def test_the_quit_path_works_when_run_as_the_bundle_entry_script():
     from jobhub.desktop import __main__ as entry
     tree = ast.parse(inspect.getsource(entry))
     assert not [node for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.level]
+
+
+def test_hard_exit_skips_dll_detach_on_windows(monkeypatch):
+    """Windows ends the process with TerminateProcess; os._exit crashed Qt on exit."""
+    from jobhub.desktop import __main__ as entry
+    calls = []
+
+    class Kernel:
+        class GetCurrentProcess:
+            restype = None
+
+            def __new__(cls):
+                return 42
+
+        class TerminateProcess:
+            argtypes = None
+
+            def __new__(cls, handle, code):
+                calls.append(("terminate", handle, code))
+
+    monkeypatch.setattr(entry.sys, "platform", "win32")
+    monkeypatch.setattr("ctypes.WinDLL", lambda name: Kernel, raising=False)
+    monkeypatch.setattr(entry.os, "_exit", lambda code: calls.append(("_exit", code)))
+    entry.hard_exit(3)
+    assert calls[0] == ("terminate", 42, 3)

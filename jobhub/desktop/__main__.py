@@ -47,6 +47,21 @@ def sending_now() -> bool:
         return True     # unsure: let the send finish
 
 
+def hard_exit(code: int) -> None:
+    """End the process now, skipping Python's wait for worker threads."""
+    if sys.platform == "win32":
+        # os._exit still runs every DLL's process-detach code, and Qt's crashes
+        # with an access violation while the application object is alive.
+        # TerminateProcess ends the process at once, as os._exit is meant to.
+        import ctypes
+
+        kernel = ctypes.WinDLL("kernel32")
+        kernel.GetCurrentProcess.restype = ctypes.c_void_p
+        kernel.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+        kernel.TerminateProcess(kernel.GetCurrentProcess(), code & 0xFFFFFFFF)
+    os._exit(code)
+
+
 def exit_promptly(code: int) -> int:
     """End the process once the window has quit, unless an application is being sent.
 
@@ -70,7 +85,7 @@ def exit_promptly(code: int) -> int:
                 stream.flush()
             except (OSError, ValueError):
                 pass
-    os._exit(code)
+    hard_exit(code)
 
 
 def main(argv: list[str] | None = None) -> int:
