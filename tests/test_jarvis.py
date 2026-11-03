@@ -128,7 +128,58 @@ def test_a_busy_machine_delays_jarvis_but_never_stops_it(monkeypatch):
     assert not jarvis.hold("scan")          # waited long enough: go ahead at halved concurrency
     assert jarvis.hold("apply")             # each kind of work has its own clock
     monkeypatch.setattr(governor, "busy", lambda: False)
-    assert not jarvis.hold("scan") and "scan" not in jarvis._deferred
+    assert not jarvis.hold("scan")
+    clock[0] += jarvis.HEADROOM_RESET_SECONDS
+    assert not jarvis.hold("scan") and "scan" not in jarvis._deferred   # sustained headroom resets
+
+
+def test_flickering_load_does_not_restart_the_deferral_clock(monkeypatch):
+    """Load hovering at the limit flips busy every few seconds; JARVIS still goes ahead in time."""
+    monkeypatch.setattr(jarvis, "_deferred", {})
+    monkeypatch.setattr(jarvis, "_headroom", {})
+    clock = [1000.0]
+    monkeypatch.setattr(jarvis.time, "monotonic", lambda: clock[0])
+    readings = iter([True, False] * 1000)
+    monkeypatch.setattr(governor, "busy", lambda *a, **kw: next(readings))
+    went_ahead_at = None
+    while clock[0] < 1000 + 2 * jarvis.MAX_DEFER_SECONDS:
+        busy_now = jarvis.hold("apply")          # busy reading
+        jarvis.hold("apply")                     # brief headroom reading
+        if not busy_now:
+            went_ahead_at = clock[0]
+            break
+        clock[0] += 5
+    assert went_ahead_at is not None and went_ahead_at - 1000 <= jarvis.MAX_DEFER_SECONDS + 5
+
+
+def test_a_busy_moment_mid_cycle_pauses_instead_of_ending_the_cycle(running, monkeypatch):
+    rows = [job(90 + n, 90 - n) for n in range(3)]
+    save(rows)
+    monkeypatch.setattr(jarvis, "_deferred", {})
+    monkeypatch.setattr(jarvis, "_headroom", {})
+    monkeypatch.setattr(jarvis, "WAIT_POLL_SECONDS", 0)
+    readings = iter([False, False, True, True, False] + [False] * 200)   # busy for a moment mid-cycle
+    monkeypatch.setattr(governor, "busy", lambda *a, **kw: next(readings))
+    monkeypatch.setattr(prepare, "prepare_job", lambda j, *a: db.upsert_draft(j.id, status="ready"))
+    monkeypatch.setattr(prepare, "autofill", lambda *a, **kw: None)
+    monkeypatch.setattr(prepare, "approve_and_queue", lambda *a, **kw: None)
+    sent = []
+    monkeypatch.setattr(prepare, "send_draft", lambda draft_id, **kw: sent.append(draft_id) or {"status": "applied"})
+    assert len(scheduler.jarvis_batch()) == 3 and len(sent) == 3
+
+
+def test_turning_off_while_waiting_for_headroom_ends_the_cycle(running, monkeypatch):
+    monkeypatch.setattr(jarvis, "_deferred", {})
+    monkeypatch.setattr(jarvis, "_headroom", {})
+    monkeypatch.setattr(jarvis, "WAIT_POLL_SECONDS", 0)
+    checks = []
+    def busy(*a, **kw):
+        checks.append(1)
+        if len(checks) == 3:
+            db.set_settings({"jarvis_mode": "off"})
+        return True
+    monkeypatch.setattr(governor, "busy", busy)
+    assert scheduler._headroom_for("all") is False and len(checks) == 3
 
 
 def test_turning_off_during_autofill_prevents_send(running, monkeypatch):

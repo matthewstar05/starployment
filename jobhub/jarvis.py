@@ -24,7 +24,14 @@ MAX_DEFER_SECONDS = 600
 PLUS_DEFER_SECONDS = 180
 PLUS_LOAD_PER_CORE = 1.1
 PLUS_MIN_FREE_MEMORY = 10
+# A busy spell ends only after this long with headroom. Load hovering near the limit flips
+# the reading every few seconds; without this, each flicker restarted the deferral clock,
+# so JARVIS never reached its "go ahead anyway" point and cut most overnight cycles short.
+HEADROOM_RESET_SECONDS = 60
+# While a cycle is under way, how often to look again for headroom.
+WAIT_POLL_SECONDS = 2.0
 _deferred: dict[str, float] = {}
+_headroom: dict[str, float] = {}
 
 
 def label(mode: str) -> str:
@@ -58,18 +65,25 @@ def hold(kind: str, settings: dict | None = None) -> bool:
     """True when ``kind`` of work ("scan", "apply", "send") should wait because the computer is busy.
 
     Once the machine has been busy for ``MAX_DEFER_SECONDS`` in a row, work proceeds anyway,
-    as the governor's "one task always runs" rule intends; headroom resets the clock. ALL+
+    as the governor's "one task always runs" rule intends; ``HEADROOM_RESET_SECONDS`` of
+    headroom resets the clock (a brief dip below the limit does not). ALL+
     waits only while the Mac is near its limits, for at most ``PLUS_DEFER_SECONDS``.
     """
     from . import governor
     boost = plus(settings) if settings is not None else False
     busy = (governor.busy(load_per_core=PLUS_LOAD_PER_CORE, min_free=PLUS_MIN_FREE_MEMORY) if boost
             else governor.busy())
+    now = time.monotonic()
     if not busy:
-        _deferred.pop(kind, None)
+        since = _headroom.setdefault(kind, now)
+        if now - since >= HEADROOM_RESET_SECONDS:
+            _deferred.pop(kind, None)
         return False
-    first = _deferred.setdefault(kind, time.monotonic())
-    return time.monotonic() - first < (PLUS_DEFER_SECONDS if boost else MAX_DEFER_SECONDS)
+    since = _headroom.pop(kind, None)
+    if since is not None and now - since >= HEADROOM_RESET_SECONDS:
+        _deferred.pop(kind, None)          # the last busy spell really ended: a new one starts now
+    first = _deferred.setdefault(kind, now)
+    return now - first < (PLUS_DEFER_SECONDS if boost else MAX_DEFER_SECONDS)
 
 
 def parallel(settings: dict, key: str, default: int, ceiling: int = 32) -> int:

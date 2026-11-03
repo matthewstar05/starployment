@@ -481,6 +481,22 @@ def _set_aside_kind(job: Job, error: Exception) -> str:
     return "transient"
 
 
+def _headroom_for(mode: str) -> bool:
+    """Inside a JARVIS cycle, wait out a busy spell instead of dropping the rest of the cycle.
+
+    Returns False when the cycle should end: the app is stopping or the mode changed. The wait
+    is bounded by ``jarvis.hold``, which lets work go ahead once the Mac has stayed busy for
+    its deferral limit; JARVIS sits idle meanwhile, so waiting adds no load.
+    """
+    while True:
+        current = db.get_settings()
+        if STATE.stop or current.get("jarvis_mode") != mode:
+            return False
+        if not jarvis.hold("apply", current):
+            return True
+        time.sleep(jarvis.WAIT_POLL_SECONDS)
+
+
 def jarvis_batch() -> list[dict]:
     """Standing, mode-scoped authorization, always through the durable send pipeline.
 
@@ -518,8 +534,7 @@ def jarvis_batch() -> list[dict]:
     # first); the probe bound keeps one cycle's public requests and agent calls in check.
     for job in candidates[:max(24, maximum * 8)]:
         current = db.get_settings()
-        if (STATE.stop or current.get("jarvis_mode") != mode or jarvis.hold("apply", current)
-                or len(results) >= maximum):
+        if len(results) >= maximum or not _headroom_for(mode):
             break
         job = db.get_job(job.id)
         if job is None or not jarvis.eligible(job, current):
@@ -548,14 +563,14 @@ def jarvis_batch() -> list[dict]:
                     draft_id = prepare.prepare_job(job, profile, current)
                 else:
                     draft_id = draft["id"]
-                if db.get_settings().get("jarvis_mode") != mode or jarvis.hold("apply", current) or STATE.stop:
+                if not _headroom_for(mode):
                     break
                 draft = db.get_draft(draft_id)
                 if any(prepare._open(q) for q in draft["questions"]):
                     prepare.autofill(draft_id, current)
-                current = db.get_settings()
-                if current.get("jarvis_mode") != mode or jarvis.hold("apply", current) or STATE.stop:
+                if not _headroom_for(mode):
                     break
+                current = db.get_settings()
                 if not jarvis.eligible(db.get_job(job.id), current):
                     continue
                 prepare.approve_and_queue(draft_id)
