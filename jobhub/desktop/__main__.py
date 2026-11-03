@@ -83,6 +83,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--native-glass-check", metavar="DIRECTORY",
                         help="run a standalone Cocoa Liquid Glass compositor diagnostic")
     args = parser.parse_args(argv)
+    if args.smoke_test:
+        # Windowed bundles have no stderr, so a native crash would vanish
+        # without a trace. Keep the Python stack beside the screenshot.
+        import faulthandler
+
+        fault_log = Path(args.smoke_test).with_suffix(".fault.txt")
+        fault_log.parent.mkdir(parents=True, exist_ok=True)
+        faulthandler.enable(open(fault_log, "w", encoding="utf-8"), all_threads=True)  # noqa: SIM115 - lives for the process
     if args.native_glass_check:
         # This must stay before source-data migration and all application/controller imports.
         from jobhub.desktop.native_glass_check import run

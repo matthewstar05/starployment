@@ -49,6 +49,17 @@ def validate_executable_platform(path: Path, platform: str = sys.platform) -> No
         )
 
 
+def run_smoke(command: list[str], screenshot: Path, env: dict[str, str]) -> None:
+    """Run one rendering check, showing the app's own crash stack if it dies."""
+    try:
+        subprocess.run(command, check=True, env=env, timeout=90)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        fault_log = screenshot.with_suffix(".fault.txt")
+        if fault_log.is_file() and fault_log.stat().st_size:
+            print(f"--- {fault_log.name} ---\n{fault_log.read_text(encoding='utf-8', errors='replace')}", flush=True)
+        raise
+
+
 def check_bundle(executable: Path, screenshots: Path | None = None) -> int:
     if not executable.is_file():
         raise SystemExit(f"No native bundle found at {executable}")
@@ -65,7 +76,7 @@ def check_bundle(executable: Path, screenshots: Path | None = None) -> int:
         subprocess.run([str(executable), "--dependency-check"], check=True, env=env, timeout=90)
         subprocess.run([str(executable), "--browser-check"], check=True, env=env, timeout=90)
         screenshot = temporary_dir / "window.png"
-        subprocess.run([str(executable), "--smoke-test", str(screenshot)], check=True, env=env, timeout=90)
+        run_smoke([str(executable), "--smoke-test", str(screenshot)], screenshot, env)
         image = screenshot.read_bytes()
         if not image.startswith(b"\x89PNG\r\n\x1a\n") or len(image) < 24:
             raise RuntimeError("The native window did not produce a valid PNG screenshot")
@@ -73,8 +84,7 @@ def check_bundle(executable: Path, screenshots: Path | None = None) -> int:
         if width < 100 or height < 100:
             raise RuntimeError(f"The native window rendered at an invalid size: {width}x{height}")
         setup_screenshot = temporary_dir / "setup.png"
-        subprocess.run([str(executable), "--setup", "--smoke-test", str(setup_screenshot)],
-                       check=True, env=env, timeout=90)
+        run_smoke([str(executable), "--setup", "--smoke-test", str(setup_screenshot)], setup_screenshot, env)
         setup_image = setup_screenshot.read_bytes()
         if not setup_image.startswith(b"\x89PNG\r\n\x1a\n") or len(setup_image) < 24:
             raise RuntimeError("The first-run setup wizard did not render a valid PNG")

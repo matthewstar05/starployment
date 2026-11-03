@@ -2,27 +2,43 @@ name: Native desktop bundles
 
 on:
   workflow_dispatch:
+    inputs:
+      only:
+        description: "Build one artifact (macos-arm64, macos-x64, windows-x64, linux-x64), or leave empty for all"
+        required: false
+        default: ""
+      skip_tests:
+        description: "Skip the unit tests (only for diagnosing a packaging failure; never for a release build)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 jobs:
+  platforms:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - id: pick
+        env:
+          ONLY: ${{ inputs.only }}
+        run: |
+          all='[{"os":"macos-15","artifact":"macos-arm64"},{"os":"macos-15-intel","artifact":"macos-x64"},{"os":"windows-2025","artifact":"windows-x64"},{"os":"ubuntu-24.04","artifact":"linux-x64"}]'
+          matrix=$(jq -c --arg only "$ONLY" 'map(select($only == "" or .artifact == $only))' <<<"$all")
+          if [ "$matrix" = "[]" ]; then echo "Unknown artifact: $ONLY" >&2; exit 1; fi
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: platforms
     name: ${{ matrix.artifact }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: macos-15
-            artifact: macos-arm64
-          - os: macos-15-intel
-            artifact: macos-x64
-          - os: windows-2025
-            artifact: windows-x64
-          - os: ubuntu-24.04
-            artifact: linux-x64
+        include: ${{ fromJSON(needs.platforms.outputs.matrix) }}
 
     steps:
       - uses: actions/checkout@v6
@@ -43,6 +59,7 @@ jobs:
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/packaging/playwright-browsers
       - name: Run local tests
+        if: ${{ !inputs.skip_tests }}
         run: uv run --no-sync pytest -q
         env:
           PLAYWRIGHT_BROWSERS_PATH: ${{ github.workspace }}/packaging/playwright-browsers
