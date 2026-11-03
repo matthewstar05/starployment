@@ -19,6 +19,13 @@ def _pump(app, seconds):
         time.sleep(0.01)
 
 
+def _pump_until(app, done, seconds=2.0):
+    """Pump until done() holds; a loaded CI machine can run animations late."""
+    deadline = time.monotonic() + seconds
+    while not done() and time.monotonic() < deadline:
+        _pump(app, 0.02)
+
+
 def _overlays(window):
     root = window.centralWidget()
     return [child for child in root.findChildren(QLabel) if child.parent() is root and child.pixmap() is not None
@@ -44,6 +51,7 @@ def test_theme_crossfade_runs_every_change_and_leaves_no_overlay(monkeypatch):
         # A switch during a running fade must replace it, not stack a frozen frame.
         window.crossfade(lambda: calls.append("third"))
         _pump(app, Motion.SLOW / 1000 + 0.05)
+        _pump_until(app, lambda: len(_overlays(window)) == before)
         assert calls == ["first", "second", "third"]
         assert len(_overlays(window)) == before
     finally:

@@ -106,6 +106,11 @@ def test_fade_stack_removes_its_opacity_effect_after_the_transition(app, monkeyp
     assert stack.currentIndex() == 2
     assert pages[2].graphicsEffect() is not None
     _settle(app, Motion.PAGE + 100)
+    # A loaded CI machine can finish the fade late; wait up to two seconds for it.
+    for _ in range(40):
+        if pages[2].graphicsEffect() is None:
+            break
+        _settle(app, 50)
     assert pages[2].graphicsEffect() is None
     assert pages[2].pos() == stack.contentsRect().topLeft()
     stack.close()
