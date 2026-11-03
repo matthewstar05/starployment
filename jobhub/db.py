@@ -847,16 +847,7 @@ def mark_submission_attempted(job_id: str) -> None:
 
 def recover_interrupted() -> None:
     """Leave interrupted attempts for review, never resubmit them after restart."""
-    def alive(pid):
-        if not pid:
-            return False
-        try:
-            os.kill(pid, 0)
-            return True
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            return True
+    from .platform_support import process_alive as alive
 
     with conn() as c:
         for row in c.execute("SELECT * FROM applications WHERE status IN ('queued','running')").fetchall():

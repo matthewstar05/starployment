@@ -73,9 +73,7 @@ def _validate_data_root(root: Path) -> Path:
 
 
 def secure_data_tree(root: Path | None = None) -> None:
-    """Make the private data tree accessible only to its owner on POSIX."""
-    if os.name == "nt":
-        return
+    """Make the app-owned private data tree accessible only to its owner."""
     requested_root = Path(root or DATA).expanduser()
     if requested_root.is_symlink():
         raise ValueError(f"Refusing to secure a symlink as the Starployment data root: {requested_root}")
@@ -99,15 +97,21 @@ def secure_data_tree(root: Path | None = None) -> None:
     for path in sorted(paths, key=lambda item: len(item.parts)):
         if path.is_symlink():
             continue
-        if path.is_dir():
+        if os.name == "nt":
+            from .platform_support import windows_private_permissions
+            windows_private_permissions(path)
+        elif path.is_dir():
             path.chmod(0o700)
         elif path.is_file():
             path.chmod(0o600)
 
 
 def secure_file(path: Path) -> None:
-    """Restrict a newly written user artifact on POSIX."""
-    if os.name != "nt":
+    """Restrict a newly written user artifact to its owner."""
+    if os.name == "nt":
+        from .platform_support import windows_private_permissions
+        windows_private_permissions(Path(path))
+    else:
         Path(path).chmod(0o600)
 
 

@@ -62,8 +62,14 @@ def exit_promptly(code: int) -> int:
             time.sleep(1)
     except Exception:  # noqa: BLE001 - whatever happens, never fall back to waiting on idle threads
         pass
-    sys.stdout.flush()
-    sys.stderr.flush()
+    # PyInstaller's Windows windowed launcher has no standard streams. A
+    # closed console must not prevent shutdown after sends have finished.
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None:
+            try:
+                stream.flush()
+            except (OSError, ValueError):
+                pass
     os._exit(code)
 
 
@@ -128,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     apply_appearance(app, "System")
     window = JobHubWindow()
     controller = DesktopController(window, scheduler_enabled=not (args.no_scheduler or args.smoke_test or args.setup),
-                                   show_setup_on_start=not args.smoke_test,
+                                   show_setup_on_start=not args.smoke_test or args.setup,
                                    force_setup_on_start=args.setup)
     if migration_error:
         from PySide6.QtWidgets import QMessageBox
@@ -144,7 +150,14 @@ def main(argv: list[str] | None = None) -> int:
         def finish():
             path = Path(args.smoke_test)
             path.parent.mkdir(parents=True, exist_ok=True)
-            window.grab().save(str(path), "PNG")
+            target = app.activeModalWidget() if args.setup else window
+            if target is None or (args.setup and target.__class__.__name__ != "SetupWizard"):
+                # Leave no screenshot on failure so smoke_bundle rejects it.
+                app.exit(1)
+                return
+            target.grab().save(str(path), "PNG")
+            if args.setup:
+                target.reject()
             app.quit()
         QTimer.singleShot(500, finish)
         return int(app.exec())

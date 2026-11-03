@@ -2,6 +2,8 @@
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import format_datetime
+import os
+import stat
 
 import pytest
 
@@ -307,7 +309,9 @@ def test_empty_sender_auto_discovery(monkeypatch):
 
 
 
-def test_secrets_file_is_owner_only_and_copies_old_keychain_secrets(monkeypatch, tmp_path):
+def test_secrets_file_is_owner_only_and_copies_old_keychain_secrets(
+    monkeypatch, tmp_path, assert_windows_private_acl
+):
     from jobhub import config
 
     class Keychain:
@@ -329,7 +333,10 @@ def test_secrets_file_is_owner_only_and_copies_old_keychain_secrets(monkeypatch,
     monkeypatch.setattr(verification, "keychain_protection", lambda: False)
     assert verification.has_password("ada@example.test")
     secrets = tmp_path / "secrets.json"
-    assert secrets.stat().st_mode & 0o777 == 0o600
+    if os.name == "nt":
+        assert_windows_private_acl(secrets)
+    else:
+        assert stat.S_IMODE(secrets.stat().st_mode) == 0o600
     del keychain.items[(verification.SERVICE, "ada@example.test")]
     assert verification.has_password("ada@example.test")   # read from the file now
 

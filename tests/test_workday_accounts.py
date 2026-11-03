@@ -3,6 +3,7 @@
 Every page here is a local fixture; nothing contacts an employer or the real Keychain.
 """
 import json
+import os
 import stat
 
 import pytest
@@ -48,11 +49,14 @@ def test_generated_passwords_meet_workday_rules():
     assert vault.generate_password() != vault.generate_password()
 
 
-def test_vault_keeps_passwords_out_of_the_accounts_file(store):
+def test_vault_keeps_passwords_out_of_the_accounts_file(store, assert_windows_private_acl):
     vault.save_account("bank", "Ada@Example.test", "S3cret!pass", company="Bank", status="creating")
     accounts = config.DATA / "accounts.json"
     assert "S3cret" not in accounts.read_text()
-    assert stat.S_IMODE(accounts.stat().st_mode) == 0o600
+    if os.name == "nt":
+        assert_windows_private_acl(accounts)
+    else:
+        assert stat.S_IMODE(accounts.stat().st_mode) == 0o600
     assert vault.password_for("bank") == "S3cret!pass"
     vault.set_status("bank", "active", used=True)
     [record] = vault.list_accounts()

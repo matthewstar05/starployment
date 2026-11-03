@@ -52,7 +52,7 @@ def fixture_form(tmp_path, monkeypatch, browser):
             <label for="email">Email *</label><input id="email" type="email" required>
             <label for="resume">Resume *</label><input id="resume" name="resume" type="file" required>
             {fields}<button type="submit">Submit application</button>
-          </form></body></html>''')
+          </form></body></html>''', encoding='utf-8')
         url = path.as_uri()
         job = Job(source="fixture", company="Local Fixture", title="Software Engineer", url=url)
         engine = FormEngine(job, profile, {"submission_timeout_sec": 0.75}, str(resume),

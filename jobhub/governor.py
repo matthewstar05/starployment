@@ -21,6 +21,7 @@ SAMPLE_SECONDS = 2.0
 
 _lock = threading.Lock()
 _sample: tuple[float, float, int | None] = (-SAMPLE_SECONDS, 0.0, None)   # (taken, load, free %)
+_windows_cpu_sample: tuple[int, int] | None = None
 
 
 def _sysctl(name: str) -> int | None:
@@ -37,7 +38,41 @@ _CORES = _sysctl("hw.perflevel0.logicalcpu") or os.cpu_count() or 4
 
 
 def memory_free_percent() -> int | None:
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        class MemoryStatus(ctypes.Structure):
+            _fields_ = [("length", wintypes.DWORD), ("load", wintypes.DWORD)] + [
+                (name, ctypes.c_ulonglong) for name in
+                ("total_physical", "available_physical", "total_page", "available_page", "total_virtual", "available_virtual", "extended")]
+
+        status = MemoryStatus()
+        status.length = ctypes.sizeof(status)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)) and status.total_physical:
+            return int(100 * status.available_physical / status.total_physical)
+        return None
     return _sysctl("kern.memorystatus_level")
+
+
+def _windows_load() -> float:
+    """Busy CPU fraction scaled to cores, from read-only system counters."""
+    global _windows_cpu_sample
+    if sys.platform != "win32":
+        return 0.0
+    import ctypes
+    from ctypes import wintypes
+    idle, kernel, user = wintypes.FILETIME(), wintypes.FILETIME(), wintypes.FILETIME()
+    if not ctypes.windll.kernel32.GetSystemTimes(ctypes.byref(idle), ctypes.byref(kernel), ctypes.byref(user)):
+        return 0.0
+    value = lambda counter: (counter.dwHighDateTime << 32) | counter.dwLowDateTime
+    total, idle_time = value(kernel) + value(user), value(idle)
+    with _lock:
+        previous = _windows_cpu_sample
+        _windows_cpu_sample = (total, idle_time)
+    if previous is None or total <= previous[0]:
+        return 0.0
+    return max(0.0, min(1.0, 1 - (idle_time - previous[1]) / (total - previous[0]))) * _CORES
 
 
 def _readings() -> tuple[float, int | None]:
@@ -48,7 +83,8 @@ def _readings() -> tuple[float, int | None]:
         if time.monotonic() - taken < SAMPLE_SECONDS:
             return load, free
     try:
-        load = os.getloadavg()[0]
+        getloadavg = getattr(os, "getloadavg", None)
+        load = getloadavg()[0] if getloadavg else _windows_load()
     except OSError:
         load = 0.0
     free = memory_free_percent()

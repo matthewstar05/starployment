@@ -70,8 +70,17 @@ def main() -> int:
         width, height = struct.unpack(">II", image[16:24])
         if width < 100 or height < 100:
             raise RuntimeError(f"The native window rendered at an invalid size: {width}x{height}")
+        setup_screenshot = temporary_dir / "setup.png"
+        subprocess.run([str(executable), "--setup", "--smoke-test", str(setup_screenshot)],
+                       check=True, env=env, timeout=90)
+        setup_image = setup_screenshot.read_bytes()
+        if not setup_image.startswith(b"\x89PNG\r\n\x1a\n") or len(setup_image) < 24:
+            raise RuntimeError("The first-run setup wizard did not render a valid PNG")
+        setup_width, setup_height = struct.unpack(">II", setup_image[16:24])
+        if setup_width < 100 or setup_height < 100:
+            raise RuntimeError("The first-run setup wizard rendered at an invalid size")
 
-    print(f"Native discovery dependency, browser, and {width}x{height} Qt window checks passed on {sys.platform}.")
+    print(f"Native dependencies, browser, {width}x{height} window and {setup_width}x{setup_height} setup checks passed on {sys.platform}.")
     return 0
 
 

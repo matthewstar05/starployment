@@ -115,9 +115,13 @@ def _relocate_paths(database: Path, source: Path, destination: Path) -> None:
             if key not in columns:
                 continue
             for app_id, value in con.execute(f"SELECT id, {key} FROM applications WHERE {key} IS NOT NULL"):
-                if not value or old not in value:
+                if not value:
                     continue
-                rewritten = value.replace(old + os.sep, new + os.sep)
+                if key == "screenshots":
+                    paths = json.loads(value)
+                    rewritten = json.dumps([new + item[len(old):] if isinstance(item, str) and item.startswith(old + os.sep) else item for item in paths])
+                else:
+                    rewritten = value.replace(old + os.sep, new + os.sep)
                 con.execute(f"UPDATE applications SET {key}=? WHERE id=?", (rewritten, app_id))
         con.commit()
 

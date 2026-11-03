@@ -187,6 +187,17 @@ def test_quitting_during_a_send_exits_once_it_finishes(monkeypatch):
     assert exits == [0]     # it never falls back to waiting on idle worker threads
 
 
+def test_windowed_bundle_quits_without_standard_streams(monkeypatch):
+    from jobhub.desktop import __main__ as entry
+    exits = []
+    monkeypatch.setattr(entry, "sending_now", lambda: False)
+    monkeypatch.setattr(entry.sys, "stdout", None)
+    monkeypatch.setattr(entry.sys, "stderr", None)
+    monkeypatch.setattr(entry.os, "_exit", exits.append)
+    entry.exit_promptly(0)
+    assert exits == [0]
+
+
 def test_assessment_emails_without_an_application_show_in_progress_and_open_the_email(app):
     from PySide6.QtWidgets import QLabel
     from jobhub.desktop.ui import TRACKER

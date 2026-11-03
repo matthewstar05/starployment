@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import time
+import sys
+
+import pytest
 
 from jobhub import governor
 
@@ -10,7 +13,7 @@ def machine(monkeypatch, load: float, free: int | None):
     monkeypatch.setenv("JOBHUB_GOVERNOR", "1")
     monkeypatch.setattr(governor, "_sample", (-governor.SAMPLE_SECONDS, 0.0, None))
     monkeypatch.setattr(governor, "_CORES", 10)
-    monkeypatch.setattr(governor.os, "getloadavg", lambda: (load, load, load))
+    monkeypatch.setattr(governor.os, "getloadavg", lambda: (load, load, load), raising=False)
     monkeypatch.setattr(governor, "memory_free_percent", lambda: free)
 
 
@@ -38,6 +41,28 @@ def test_the_first_task_never_waits_and_others_wait_at_most_max_wait(monkeypatch
     assert time.monotonic() - started < 0.1
     governor.wait_for_headroom(lambda: 1, max_wait=0.3, poll=0.05)  # busy: waits, but not forever
     assert 0.25 < time.monotonic() - started < 2
+
+
+def test_missing_getloadavg_uses_windows_cpu_reading(monkeypatch):
+    monkeypatch.setattr(governor.sys, "platform", "win32")
+    monkeypatch.delattr(governor.os, "getloadavg", raising=False)
+    monkeypatch.setattr(governor, "_windows_load", lambda: 2.5)
+    monkeypatch.setattr(governor, "memory_free_percent", lambda: 42)
+    monkeypatch.setattr(governor, "_sample", (-governor.SAMPLE_SECONDS - 1, 0.0, None))
+
+    assert governor._readings() == (2.5, 42)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="checks native Windows resource counters")
+def test_windows_resource_readings_are_bounded(monkeypatch):
+    monkeypatch.setattr(governor.os, "getloadavg", None, raising=False)
+    monkeypatch.setattr(governor, "_windows_cpu_sample", None)
+    monkeypatch.setattr(governor, "_sample", (-governor.SAMPLE_SECONDS - 1, 0.0, None))
+
+    load, free = governor._readings()
+
+    assert 0.0 <= load <= governor._CORES
+    assert free is not None and 0 <= free <= 100
 
 
 def test_keep_awake_holds_caffeinate_only_while_automatic_applications_are_on(monkeypatch):

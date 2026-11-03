@@ -52,10 +52,19 @@ def test_toggle_switch_is_a_checkbox_and_lands_on_its_end_state(app, monkeypatch
     _settle(app)
     switch.setChecked(True)
     _settle(app, 60)
+    # A loaded CI runner can deliver the animation's first frame late. Wait
+    # for completion, with a bound, instead of assuming two frames in 60 ms.
+    import time
+    deadline = time.monotonic() + 2
+    while switch._anim.state() != switch._anim.State.Stopped and time.monotonic() < deadline:
+        _settle(app, 20)
     assert switch.isChecked()
     assert switch._position == pytest.approx(1.0)
     switch.click()
     _settle(app, 60)
+    deadline = time.monotonic() + 2
+    while switch._anim.state() != switch._anim.State.Stopped and time.monotonic() < deadline:
+        _settle(app, 20)
     assert not switch.isChecked()
     assert switch._position == pytest.approx(0.0)
     switch.close()

@@ -15,6 +15,12 @@ Contributors and coding agents should start with [AGENTS.md](AGENTS.md). Roadmap
 
 ## Start
 
+For a downloaded Windows or Mac app, follow the [installation and first-run guide](docs/INSTALL.md).
+The native ZIP includes Python and Chromium. Choose the archive for your operating
+system and Mac processor, extract it, and open the application.
+
+For a source checkout:
+
 On macOS, open `/Applications/Starployment.app` (or double-click `Launch Starployment.command` in a checkout).
 `Set up Starployment.command` opens the setup wizard. From a terminal:
 

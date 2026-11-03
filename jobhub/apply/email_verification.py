@@ -130,11 +130,13 @@ class _FileVault:
         return data if isinstance(data, dict) else {}
 
     def _save(self, data: dict) -> None:
+        from .. import config
         path = self._path()
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(path.name + ".tmp")
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            config.secure_file(temporary)
             json.dump(data, handle, indent=2)
         os.replace(temporary, path)
         if not data:
