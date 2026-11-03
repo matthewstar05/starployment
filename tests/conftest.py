@@ -4,7 +4,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import re
-import subprocess
 
 import pytest
 
@@ -34,14 +33,27 @@ def assert_windows_private_acl():
     def check(path: Path) -> None:
         if os.name != "nt":
             pytest.fail("Windows ACL assertion used outside Windows")
-        env = os.environ.copy()
-        env["STARPLOYMENT_ACL_CHECK_PATH"] = str(path)
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
-             "$acl = Get-Acl -LiteralPath $env:STARPLOYMENT_ACL_CHECK_PATH; [Console]::Out.Write($acl.Sddl)"],
-            capture_output=True, text=True, encoding="ascii", errors="strict", env=env, check=True,
-        )
-        sddl = result.stdout.upper()
+        import ctypes
+        from ctypes import wintypes
+        advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+        kernel = ctypes.WinDLL("kernel32")
+        pointer = ctypes.c_void_p
+        advapi.GetNamedSecurityInfoW.argtypes = [wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD,
+                                                pointer, pointer, pointer, pointer, ctypes.POINTER(pointer)]
+        advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [pointer, wintypes.DWORD, wintypes.DWORD,
+                                                                                ctypes.POINTER(wintypes.LPWSTR), pointer]
+        kernel.LocalFree.argtypes = [pointer]
+        descriptor = pointer()
+        result = advapi.GetNamedSecurityInfoW(str(path), 1, 4, None, None, None, None, ctypes.byref(descriptor))
+        assert result == 0, f"Cannot read the file's Windows DACL: {result}"
+        text = wintypes.LPWSTR()
+        try:
+            assert advapi.ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor, 1, 4, ctypes.byref(text), None), ctypes.get_last_error()
+            sddl = text.value.upper()
+        finally:
+            if text:
+                kernel.LocalFree(text)
+            kernel.LocalFree(descriptor)
         assert "D:P" in sddl, f"DACL is not protected from parent inheritance: {sddl}"
         assert re.search(r"\(A;[^)]*;;;OW\)", sddl), f"DACL has no owner-rights grant: {sddl}"
         for sid in ("WD", "BU", "AU"):

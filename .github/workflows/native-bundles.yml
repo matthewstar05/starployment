@@ -63,6 +63,16 @@ jobs:
       - name: Archive Linux application
         if: runner.os == 'Linux'
         run: tar -C dist -czf dist/Starployment-${{ matrix.artifact }}.tar.gz Starployment
+      - name: Test the extracted release archive in a new user path
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then extension=tar.gz; else extension=zip; fi
+          uv run --no-sync python packaging/smoke_bundle.py --archive "dist/Starployment-${{ matrix.artifact }}.$extension" --screenshots "dist/screenshots-${{ matrix.artifact }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Starployment-screenshots-${{ matrix.artifact }}
+          path: dist/screenshots-${{ matrix.artifact }}/*.png
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: Starployment-${{ matrix.artifact }}

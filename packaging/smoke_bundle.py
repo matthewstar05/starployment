@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import os
+import argparse
 from pathlib import Path
 import struct
 import subprocess
 import sys
 import tempfile
+import zipfile
+import tarfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,8 +49,7 @@ def validate_executable_platform(path: Path, platform: str = sys.platform) -> No
         )
 
 
-def main() -> int:
-    executable = executable_path()
+def check_bundle(executable: Path, screenshots: Path | None = None) -> int:
     if not executable.is_file():
         raise SystemExit(f"No native bundle found at {executable}")
     validate_executable_platform(executable)
@@ -79,9 +81,42 @@ def main() -> int:
         setup_width, setup_height = struct.unpack(">II", setup_image[16:24])
         if setup_width < 100 or setup_height < 100:
             raise RuntimeError("The first-run setup wizard rendered at an invalid size")
+        connections_screenshot = setup_screenshot.with_name("setup-connections.png")
+        connections_image = connections_screenshot.read_bytes()
+        if not connections_image.startswith(b"\x89PNG\r\n\x1a\n") or len(connections_image) < 24:
+            raise RuntimeError("The first-run Connections page did not render a valid PNG")
+        if screenshots is not None:
+            import shutil
+            screenshots.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(screenshot, screenshots / "window.png")
+            shutil.copy2(setup_screenshot, screenshots / "setup.png")
+            shutil.copy2(connections_screenshot, screenshots / "setup-connections.png")
 
     print(f"Native dependencies, browser, {width}x{height} window and {setup_width}x{setup_height} setup checks passed on {sys.platform}.")
     return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--archive", type=Path, help="extract and test the actual distributable archive")
+    parser.add_argument("--screenshots", type=Path, help="retain fictional first-run screenshots for visual review")
+    args = parser.parse_args(argv)
+    if args.archive is None:
+        return check_bundle(executable_path(), args.screenshots)
+    # Relocation into a path with spaces and non-ASCII characters catches
+    # dependencies that accidentally point back at the build checkout/cache.
+    with tempfile.TemporaryDirectory(prefix="Starployment new user α ") as temporary:
+        extracted = Path(temporary)
+        if sys.platform == "darwin":
+            subprocess.run(["/usr/bin/ditto", "-x", "-k", str(args.archive.resolve()), str(extracted)], check=True)
+        elif zipfile.is_zipfile(args.archive):
+            with zipfile.ZipFile(args.archive) as archive:
+                archive.extractall(extracted)
+        else:
+            with tarfile.open(args.archive) as archive:
+                archive.extractall(extracted, filter="data")
+        relative = executable_path().relative_to(ROOT / "dist")
+        return check_bundle(extracted / relative, args.screenshots)
 
 
 if __name__ == "__main__":

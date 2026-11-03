@@ -157,10 +157,16 @@ def main(argv: list[str] | None = None) -> int:
                 return
             target.grab().save(str(path), "PNG")
             if args.setup:
+                # Render the actual first-run connection controls as well.
+                target.tabs.setCurrentIndex(target.tabs.count() - 1)
+                app.processEvents()
+                target.grab().save(str(path.with_name(path.stem + "-connections.png")), "PNG")
                 target.reject()
             app.quit()
         QTimer.singleShot(500, finish)
-        return int(app.exec())
+        # Exercise the same shutdown path as the installed windowed app,
+        # including platforms where stdout/stderr do not exist.
+        return exit_promptly(int(app.exec()))
     return exit_promptly(int(app.exec()))
 
 
