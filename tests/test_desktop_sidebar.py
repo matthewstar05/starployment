@@ -48,12 +48,59 @@ def test_jarvis_mode_changes_from_the_sidebar_and_all_asks_first(app, monkeypatc
     window.choose_jarvis_mode("new")
     assert chosen == ["new"] and "NEW" in window.sidebar.jarvis_status.text()
     assert window.settings.jarvis_mode.currentData() == "new" and not window.settings.dirty
-    monkeypatch.setattr(window, "_confirm_jarvis_all", lambda: False)
+    monkeypatch.setattr(window, "_confirm_jarvis_all", lambda *a: False)
     window.choose_jarvis_mode("all")
     assert chosen == ["new"]
-    monkeypatch.setattr(window, "_confirm_jarvis_all", lambda: True)
+    monkeypatch.setattr(window, "_confirm_jarvis_all", lambda *a: True)
     window.choose_jarvis_mode("all")
     assert chosen == ["new", "all"] and "ALL" in window.sidebar.jarvis_status.text()
+    window.close()
+
+
+def test_all_plus_asks_with_its_own_sheet_and_all_to_all_plus_still_asks(app, monkeypatch):
+    window = JobHubWindow()
+    asked: list[str] = []
+    chosen: list[str] = []
+    window.jarvis_mode_requested.connect(chosen.append)
+    monkeypatch.setattr(window, "_confirm_jarvis_all", lambda mode="all": asked.append(mode) or True)
+    window.choose_jarvis_mode("all")
+    window.choose_jarvis_mode("all_plus")          # a faster, wider mode asks again
+    window.choose_jarvis_mode("all")               # stepping back down keeps the permission
+    assert asked == ["all", "all_plus"] and chosen == ["all", "all_plus", "all"]
+    window.choose_jarvis_mode("all_plus")
+    assert "ALL+" in window.sidebar.jarvis_status.text()
+    window.close()
+
+
+def test_jarvis_confirm_sheet_defaults_to_cancel(app):
+    from jobhub.desktop.views.jarvis_sheet import JarvisConfirmSheet
+    for mode, rows in (("all", 4), ("all_plus", 5)):
+        sheet = JarvisConfirmSheet(mode)
+        assert len(sheet.rows) == rows and sheet.cancel.isDefault() and not sheet.confirm.autoDefault()
+        assert ("ALL+" in sheet.title.text()) == (mode == "all_plus")
+        sheet.close()
+
+
+def test_jarvis_pill_opens_a_glass_popover_not_a_native_menu(app, monkeypatch):
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QKeyEvent
+
+    window = JobHubWindow()
+    window.show()
+    chosen: list[str] = []
+    window.jarvis_mode_requested.connect(chosen.append)
+    window.sidebar.jarvis_status.clicked.emit()
+    popover = window._jarvis_popover
+    assert popover.isVisible() and popover.windowFlags() & Qt.WindowType.Popup
+    assert len(popover._rows) == 4 and popover._hover == 0         # the current mode (Off) is highlighted
+    popover.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Down, Qt.KeyboardModifier.NoModifier))
+    popover.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key.Key_Return, Qt.KeyboardModifier.NoModifier))
+    assert chosen == ["new"] and not popover.isVisible()
+    opened: list[bool] = []
+    monkeypatch.setattr(window, "show_jarvis_settings", lambda: opened.append(True))
+    window.sidebar.jarvis_status.clicked.emit()
+    window._jarvis_popover.activate(4)                              # the footer row
+    assert opened == [True] and chosen == ["new"]
     window.close()
 
 
@@ -127,3 +174,46 @@ def test_quitting_waits_only_for_an_application_being_sent(store):
     db.upsert_jobs([job])
     db.reserve_application(job.id)
     assert sending_now() is True
+
+
+def test_quitting_during_a_send_exits_once_it_finishes(monkeypatch):
+    from jobhub.desktop import __main__ as entry
+    answers = iter([True, True, False])
+    exits: list[int] = []
+    monkeypatch.setattr(entry, "sending_now", lambda: next(answers))
+    monkeypatch.setattr(entry.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(entry.os, "_exit", exits.append)
+    entry.exit_promptly(0)
+    assert exits == [0]     # it never falls back to waiting on idle worker threads
+
+
+def test_assessment_emails_without_an_application_show_in_progress_and_open_the_email(app):
+    from PySide6.QtWidgets import QLabel
+    from jobhub.desktop.ui import TRACKER
+    from jobhub.desktop.widgets import ActionRow, NAV_BADGE_ROLE
+    window = JobHubWindow()
+    window.dashboard.set_settings({"email_verification": {"imap_host": "imap.gmail.com",
+                                                          "imap_username": "ada@example.test"}})
+    inbox = [{"id": 7, "received_at": "2026-10-28T10:00:00+00:00", "sender": "noreply@litmus.build",
+              "subject": "[Litmus] Assessment invitation from Northwind", "stage": "assessment",
+              "message_id": "abc@litmus.build", "employer": "Northwind"}]
+    opened: list[str] = []
+    window.dashboard.open_url_requested.connect(opened.append)
+    window.set_data(drafts=[], tracker=[], inbox=inbox)
+    card = window.dashboard.focus_card
+    assert not card.isHidden()
+    texts = " ".join(label.text() for label in card.findChildren(QLabel))
+    assert "Northwind" in texts and "not linked to an application" in texts
+    assert window.nav.item(TRACKER).data(NAV_BADGE_ROLE) == "1"
+    card.findChildren(ActionRow)[0].clicked.emit()
+    assert opened and "mail.google.com" in opened[0]
+    window.close()
+
+
+def test_the_quit_path_works_when_run_as_the_bundle_entry_script():
+    """In the app bundle __main__.py is the top-level script, so relative imports fail there."""
+    import ast
+    import inspect
+    from jobhub.desktop import __main__ as entry
+    tree = ast.parse(inspect.getsource(entry))
+    assert not [node for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.level]

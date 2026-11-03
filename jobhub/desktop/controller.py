@@ -219,6 +219,12 @@ class DesktopController(QObject):
             if task is None:
                 return
             kind, payload = task
+            # Background cycles yield to whatever the user is doing: ALL runs at macOS background
+            # QoS (efficiency cores, throttled I/O), others at utility. Work the user asked for
+            # (an Apply click, an import) runs at the normal level.
+            settings = db.get_settings() if kind == "cycle" else None
+            governor.set_thread_qos(("background" if jarvis.mode_of(settings) in ("new", "all") else "utility")
+                                    if settings is not None else "initiated")
             try:
                 if kind == "cycle":
                     report = scheduler.scan_once()
@@ -461,6 +467,8 @@ class DesktopController(QObject):
                 events=db.list_events(limit=60),
                 drafts=drafts,
                 tracker=self._changed("tracker", (apps_version, jobs_version), db.list_tracker),
+                inbox=self._changed("inbox", (db.table_version("mail_events"),), lambda: db.unmatched_stage_mail(
+                    int((settings.get("email_tracking") or {}).get("lookback_days", 30)))),
                 resume_files=db.list_resume_files(),
                 mail=self._mail_state,
             )
@@ -611,7 +619,8 @@ class DesktopController(QObject):
         """The sidebar's JARVIS menu: save only the mode, leaving other unsaved Settings edits alone."""
         self.save_settings({"jarvis_mode": mode})
         label = {"off": "JARVIS is off", "new": "JARVIS NEW is on: recent postings with saved answers",
-                 "all": "JARVIS ALL is on: new and older open postings, sent without review"}.get(mode, "")
+                 "all": "JARVIS ALL is on: new and older open postings, sent without review",
+                 "all_plus": "JARVIS ALL+ is on: a wider net at full speed, sent without review"}.get(mode, "")
         if label:
             self._status(label, tone="success" if mode != "off" else "info")
 
@@ -1256,10 +1265,11 @@ class DesktopController(QObject):
             self._status(f"Could not add it: {exc}", tone="error")
         self.refresh()
 
-    def _mail_sync_job(self):
+    def _mail_sync_job(self, manual: bool = False):
         from .. import email_tracker
         try:
-            return email_tracker.sync(db.get_settings())
+            # A check the candidate asked for has Luna read unsettled emails now, not in a later batch.
+            return email_tracker.sync(db.get_settings(), luna_now=manual)
         finally:
             self._mail_syncing.clear()
 
@@ -1280,7 +1290,7 @@ class DesktopController(QObject):
         if manual:
             self._status("Checking your inbox…", 0, "busy")
         self._mail_syncing.set()
-        self._submit_assist("mail_sync", self._mail_sync_job, manual)
+        self._submit_assist("mail_sync", self._mail_sync_job, manual, manual)
 
     # ------------------------------------------------------------------ profile
     def import_resume(self, path: str) -> None:

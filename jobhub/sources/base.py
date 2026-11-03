@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import httpx
 
 from ..config import DEFAULT_SETTINGS
+from ..governor import same_qos
 
 
 # A missing bundled board is normally an employer that changed ATS providers.
@@ -84,7 +85,7 @@ def fetch_boards(slugs: list[str], fetch_one, settings: dict, *, source: str | N
     cached = 0
     successful = 0
     from ..jarvis import parallel
-    with ThreadPoolExecutor(max_workers=parallel(settings, "_board_workers", 8, 8)) as executor:
+    with ThreadPoolExecutor(max_workers=parallel(settings, "_board_workers", 8, 8), initializer=same_qos()) as executor:
         for slug, (jobs, warning, absent, was_cached, ok) in zip(unique_slugs, executor.map(attempt, unique_slugs)):
             result.extend(jobs)
             successful += ok
@@ -206,7 +207,7 @@ def resolve_hosted_greenhouse(jobs: list, workers: int = 8) -> int:
                 pass
             return None
 
-        with ThreadPoolExecutor(max_workers=workers) as pool:
+        with ThreadPoolExecutor(max_workers=workers, initializer=same_qos()) as pool:
             for res in pool.map(_resolve_redirect, pending_redirect):
                 if res:
                     board, job_id, job = res
@@ -226,7 +227,7 @@ def resolve_hosted_greenhouse(jobs: list, workers: int = 8) -> int:
 
     # 3. Resolve ?gh_jid= URLs via _greenhouse_board_for
     if pending_gh_jid:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
+        with ThreadPoolExecutor(max_workers=workers, initializer=same_qos()) as pool:
             boards = dict(zip(pending_gh_jid, pool.map(_greenhouse_board_for, pending_gh_jid)))
         for job_id, board in boards.items():
             if not board:

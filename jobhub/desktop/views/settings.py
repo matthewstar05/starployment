@@ -84,17 +84,21 @@ class SettingsView(QWidget):
 
         jarvis_group = FormGroup("JARVIS", "Quiet background applications while you work or sleep.")
         self.jarvis_mode = SegmentedControl()
-        for title, value in (("OFF", "off"), ("NEW", "new"), ("ALL", "all")):
+        for title, value in (("OFF", "off"), ("NEW", "new"), ("ALL", "all"), ("ALL+", "all_plus")):
             self.jarvis_mode.addItem(title, value)
         self.jarvis_mode.setAccessibleName("JARVIS mode")
         jarvis_group.add_row("Mode", self.jarvis_mode,
                            "NEW sends suitable postings from the last 24 hours using saved answers. "
                            "ALL also works through older postings that scans still find listed, prepares "
                            "applications, and sends AI Autofill answers (assumptions labeled) without review. "
+                           "ALL+ does the same with a wider net (older postings still listed, twice the "
+                           "per-employer limit) at full speed, for overnight. "
                            "Starred roles, priority companies, and Workday wait for you. Change it from the "
                            "JARVIS badge in the sidebar too.")
         jarvis_group.add_row("Performance", QLabel(""),
-                             "Half your saved concurrency, scans twice as often, and backs off under load. "
+                             "NEW and ALL run at background priority with half your saved concurrency and pause "
+                             "while the Mac is busy. ALL+ uses your full concurrency, scans twice as often, and "
+                             "slows down only near the Mac's memory or CPU limits. "
                              "OFF restores your ordinary automation settings. Keep the app open; the display may sleep.")
         groups.addWidget(jarvis_group)
         self.jarvis_group = jarvis_group

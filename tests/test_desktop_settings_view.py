@@ -130,7 +130,7 @@ def test_jarvis_modes_round_trip_and_mark_settings_dirty(app):
     view = SettingsView()
     emitted = []
     view.save_requested.connect(emitted.append)
-    for mode in ("off", "new", "all"):
+    for mode in ("off", "new", "all", "all_plus"):
         view.set_settings(merge_settings(DEFAULT_SETTINGS, {"jarvis_mode": mode}))
         assert view.jarvis_mode.currentData() == mode
         view._save()

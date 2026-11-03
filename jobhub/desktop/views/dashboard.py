@@ -10,7 +10,7 @@ from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPen, QRadia
 from PySide6.QtWidgets import QDialog, QFrame, QHBoxLayout, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget
 
 from ..delegates import score_color
-from ..format import activity_label, activity_tone, greeting, local_time, plural, relative_time, salary
+from ..format import activity_label, activity_tone, email_link, greeting, local_time, plural, relative_time, salary
 from ..theme import current_colors
 from ..native_glass import prepare_window
 from ..widgets import (
@@ -504,12 +504,12 @@ class DashboardView(QWidget):
         """Counts of prepared applications and the applications needing your focus."""
         review = sum(drafts.get(s, 0) for s in ("ready", "needs_answers", "practice"))
         self.hero.set_counts(review, drafts.get("approved", 0), len(focus), self._new_matches, self._fresh)
-        signature = tuple((r.get("id"), r.get("stage")) for r in focus[:5])
+        signature = tuple((r.get("id"), r.get("stage")) for r in focus[:8])
         if not self._changed("focus", signature):
             return
         self.focus_card.clear_rows()
         self.focus_card.setVisible(bool(focus))
-        for record in focus[:5]:
+        for record in focus[:8]:
             row = ActionRow()
             stage = str(record.get("stage") or "")
             tone = {"interview": "amber", "assessment": "indigo", "offer": "green"}.get(stage, "accent")
@@ -518,11 +518,18 @@ class DashboardView(QWidget):
             text = QVBoxLayout()
             text.setSpacing(1)
             text.addWidget(ElidedLabel(f"{record.get('company', 'Employer')} · {record.get('title', 'Role')}", "rowPrimary"))
-            text.addWidget(ElidedLabel({"interview": "Interview", "assessment": "Online assessment",
-                                        "offer": "Offer"}.get(stage, stage.title()), "rowSecondary"))
+            label = {"interview": "Interview", "assessment": "Online assessment", "offer": "Offer"}.get(stage, stage.title())
+            if record.get("from_inbox"):
+                label += " · in your inbox, not linked to an application"
+            text.addWidget(ElidedLabel(label, "rowSecondary"))
             row.layout_.addLayout(text, 1)
             row.finish()
-            row.clicked.connect(lambda: self.tracker_requested.emit())
+            link = email_link(record, self._settings.get("email_verification")) if record.get("from_inbox") else ""
+            if link:
+                row.setToolTip("Open this email")
+                row.clicked.connect(lambda url=link: self.open_url_requested.emit(url))
+            else:
+                row.clicked.connect(lambda: self.tracker_requested.emit())
             self.focus_card.add_row(row)
 
     def _open_plan(self, *, exclude_starred: bool | None = None) -> None:

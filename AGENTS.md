@@ -140,7 +140,7 @@ them to make a feature easier.
    desktop send pool never runs two to one employer at once. Automatic runs
    are capped per run, at one attempt per employer per cycle, and at
    `company_cap.count` attempts per employer in `company_cap.days`
-   (`jarvis.diversify`, default 3 in 30 days); with `mix_role_families` they
+   (`jarvis.diversify`, default 3 in 30 days; JARVIS ALL+ allows twice the count, `jarvis.company_limit`); with `mix_role_families` they
    alternate role families (`families.py`: software, data, quant, finance,
    accounting, business, risk, economics) so one kind of role cannot take every send.
 5. **Automation is opt-in.** `auto_apply` defaults to off; practice mode
@@ -193,7 +193,18 @@ them to make a feature easier.
    `email_tracker.RULES_VERSION` when classification changes), and only advances a stage
    (`db.set_application_stage(..., "email")`); it never reopens an offer or a
    closed application or undoes a manual choice. Uncertain matches are left
-   for the candidate. The one write is opt-in **Archive rejections**
+   for the candidate: an assessment, interview, or offer no application matches is
+   kept with its employer's name (`mail_events.employer`, `employer_hint`) and listed
+   in Overview → In progress, where it opens the email (`db.unmatched_stage_mail`).
+   **Luna's second reading** (`email_tracking.use_luna`, on by default; Settings →
+   Connections → Email → Ask Luna about unclear emails) covers only what the rules
+   cannot settle (`_needs_luna`: invitation or rejection phrases in an acknowledgement
+   or unclassified email, links removed first, or a real step with no matching
+   employer), `LUNA_BATCH` emails per call (`luna.classify_emails`; each agy call
+   carries ~8k tokens of its own), waiting up to `LUNA_WAIT` for a fuller batch unless
+   the candidate asked for the check. Its readings are kept by hashed key
+   (`mail_luna`) so no email is read twice, and it can raise a stage or name an
+   employer but never demote the rules' reading. The one write is opt-in **Archive rejections**
    (`email_tracking.archive_rejections`, off by default; Settings →
    Connections → Email): after a check, `Mailbox.archive` takes a rejection
    out of the Inbox only when it names one tracked application whose stage is
@@ -328,7 +339,7 @@ every 15 s) and renders via window.set_data.
 | `jobhub/models.py` | Pydantic `Job`, `Profile`, `ApplyResult`; canonical URLs and job IDs; `posted_epoch` (posting dates to UTC seconds) and `board_of` (the public board behind a posting URL). |
 | `jobhub/db.py` | SQLite schema, dedup view (`DEDUPED_JOBS`), jobs (`posted_ts` for posting-window filters and `JOB_ORDERS` sorting; `starred`), applications (`hidden`), runs, events, settings (and the one-time `_upgrade_settings` catalog upgrade), profile, discovered `boards`. |
 | `jobhub/families.py` | Role families by title (`family`) and round-robin `interleave`, for variety in automatic runs. Pure functions. |
-| `jobhub/jarvis.py` | JARVIS policy: modes, halved concurrency, eligibility, `rank`, `still_listed` (ALL takes older postings only while scans still find them), and `diversify` (employer cap, role families). |
+| `jobhub/jarvis.py` | JARVIS policy (docs/JARVIS.md): OFF/NEW/ALL/ALL+ (`all_plus`), halved concurrency for NEW and ALL, eligibility (ALL+ looks past posting age alone), `rank`, `still_listed` (ALL takes older postings only while scans still find them), `diversify` (employer cap, role families), and `set_aside` (`db.jarvis_holds`: blocked postings are skipped until their draft changes or their time runs out, never retried every cycle). |
 | `jobhub/priority.py` | Priority-company matching (`normalize_company`, `is_priority`), the effective star (`is_starred`), and the holds for bulk sends and automation. Pure functions. |
 | `jobhub/sources/` | One module per source; `import_job.py` validates and imports a single posting URL. `base.fetch_boards` reads configured boards plus the scan's discovered boards (quietly, reporting `board_results`). Greenhouse reads the light listing and fetches descriptions only for undescribed matches. `workday.py` reads public Workday boards (`tenant.wdN/site`, Workday's job-search JSON), US postings only when the board offers that filter, descriptions for matching titles only; discovered Workday boards are read `DISCOVERED_WORKDAY_PER_SCAN` at a time. |
 | `jobhub/scoring.py` | Deterministic, explainable 0–100 match score and auto-apply eligibility. Settings that affect it are listed in `controller.SCORING_KEYS`. |
@@ -340,10 +351,10 @@ every 15 s) and renders via window.set_data.
 | `jobhub/profile.py` | Resume parsing (pdftotext/pypdf, optional LLM). |
 | `jobhub/tailor.py` | One-page resume builder (`plan_resume`, `build_resume`: rank saved content, resize body text from 11 to 10 points, then `shrink` and `compact`; final `KeepInFrame` scaling protects the one-page guarantee). Helvetica typography, centered name/contact, Education first, saved Summary if present, Projects above Experience, then Skills and Awards; thin section rules and dates flush right. Entries, bullets, education details, tools, and skills display by job relevance; pins and Luna selections protect inclusion without overriding display order. The target job title is never added as a headline. Also role types (`classify_role`), resume files (`choose_resume_file`), `resume_choice`. |
 | `jobhub/prepare.py` | Read Greenhouse/Lever/Ashby form definitions, answer from saved facts, Luna fill, `prepare_batch`, `approve_and_queue`, `send_draft`. |
-| `jobhub/agents.py` | Connections for Luna: Claude CLI, Codex CLI, Antigravity CLI (agy), Anthropic/OpenAI keys; CLI discovery beyond a GUI PATH, status, sign-in, tool-free `complete`. agy runs with `HOME` set to `config.AGENT_HOME/agy`, which links only the candidate's agy sign-in, so none of the user's MCP servers start (≈40 s → ≈5 s per call); the user's own agy config is never changed. |
-| `jobhub/governor.py` | Load and free-memory checks that hold back extra parallel work while the computer is busy. |
+| `jobhub/agents.py` | Connections for Luna: Claude CLI, Codex CLI, Antigravity CLI (agy), Anthropic/OpenAI keys; CLI discovery beyond a GUI PATH, status, sign-in, tool-free `complete`. agy runs with `HOME` set to `config.AGENT_HOME/agy`, which links only the candidate's agy sign-in, so none of the user's MCP servers start (≈40 s → ≈5 s per call); the user's own agy config is never changed. Those calls also set an SSH session marker (`SSH_CONNECTION`) so agy saves its hourly token refresh to its token file, not the Keychain, whose save asks for approval each time (stacked dialogs overnight); reading the Keychain copy needs no approval. |
+| `jobhub/governor.py` | Load and free-memory checks that hold back extra parallel work while the computer is busy (`busy(load_per_core, min_free)`; ALL+ passes looser limits), and macOS thread QoS for background cycles (`set_thread_qos`; Python threads do not inherit it, so pools pass `initializer=same_qos()`). |
 | `jobhub/luna.py` | Draft answers (`draftable`, `draft_answers`), resume selection, optional email second opinion; all output validated. |
-| `jobhub/email_tracker.py` | Provider presets, read-only IMAP, `classify`, `match_application`, `sync`. |
+| `jobhub/email_tracker.py` | Provider presets, read-only IMAP, `classify` (assessment platforms in `_PLATFORMS`), `match_application` (ignores no-reply words, compares names without spaces, groups "X" with "X University", picks the role by title words), batched Luna second reading, `sync`. Audit changes against a real inbox before trusting a rule: acknowledgements describe later steps and company slogans say "challenges". |
 | `jobhub/setup.py`, `readiness.py` | Saving setup and the resume library (`save_resume_library`, `merge_resume_into_library`); what is still missing before unattended work. |
 | `jobhub/migration.py` | One-time import of checkout data into the packaged app's data directory. |
 | `jobhub/server.py`, `web/` | Legacy FastAPI JSON API and static web UI (no build step). |
@@ -512,6 +523,7 @@ Buttons: `button(text, role, icon=..., trailing=...)` where role is `primary`
 | `Stepper` | Wraps a `QSpinBox` with a −/+ capsule. Keep reading and writing the wrapped spin box. |
 | `SearchField` | Capsule search input with a magnifier and a clear button. |
 | `ChoiceButton` | A secondary capsule that opens a menu of exclusive choices (Sort, Posted). `changed` fires only for user picks. |
+| `ChoicePopover` | A Qt-painted glass popup of exclusive choices with a note and tone dot per row, plus an optional footer row (the JARVIS mode picker). Closes before it emits, so handlers may open dialogs. |
 | `paint_star_mark` | The filled amber star for starred rows (painted by delegates, never a per-row widget). |
 | `GlassNavList` | The sidebar list with a spring-animated selection pill and count badges (`set_badge`). |
 | `FadeStack` | A `QStackedWidget` with fade-and-rise (pages) or push (wizard) transitions. It removes its opacity effect when done. |
@@ -640,7 +652,7 @@ and scrolling.
 The sidebar is resizable (drag `SidebarHandle`, 200–460px, remembered in QSettings
 unless `JOBHUB_UI_PREFS=0`) and can be hidden (⌘\\, View → Hide Sidebar, double-click
 or drag the handle narrow); a chevron button in a left gutter brings it back. The
-JARVIS badge (`JarvisPill`) opens a mode menu; ALL asks for confirmation, and only
+JARVIS badge (`JarvisPill`) opens a glass mode popover (`widgets.ChoicePopover`, not a native menu); ALL and ALL+ ask first with a glass sheet (`views/jarvis_sheet.JarvisConfirmSheet`, Cancel is the default button), and only
 `jarvis_mode` is saved (`controller.set_jarvis_mode`), never other unsaved edits.
 
 Shortcuts: ⌘1–⌘6 pages (Overview, Jobs, Applications, Tracker, Profile,

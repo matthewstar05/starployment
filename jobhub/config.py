@@ -267,7 +267,7 @@ DEFAULT_SETTINGS: dict = {
     "font": "Claude",             # Claude (Anthropic Sans/Serif from the installed Claude app) | System
     # --- autonomy ---
     "setup_complete": False,     # first-run desktop setup completed by the candidate
-    "jarvis_mode": "off",          # off | new (recent postings) | all (autonomous AI Autofill)
+    "jarvis_mode": "off",          # off | new (recent postings) | all (autonomous AI Autofill) | all_plus (ALL+, overnight)
     "auto_apply": False,           # when True the hourly loop applies to top jobs on its own
     "dry_run": False,              # fill every form but never click Submit
     "scan_interval_min": 60,
@@ -331,7 +331,7 @@ DEFAULT_SETTINGS: dict = {
                    "posted_within_hours": 0, "order": "match", "exclude_starred": True},
     # --- optional inbox tracking for replies (uses the mailbox below) ---
     # archive_rejections: take matched rejection emails out of the Inbox (never deletes; Gmail adds a label).
-    "email_tracking": {"enabled": False, "lookback_days": 30, "use_luna": False, "archive_rejections": False},
+    "email_tracking": {"enabled": False, "lookback_days": 30, "use_luna": True, "archive_rejections": False},
     # --- canned answers (edit in the UI; used when a form asks) ---
     "answers": {
         "work_authorized_us": "",
@@ -506,7 +506,7 @@ def validate_settings(settings: dict) -> dict:
         appearance: Literal["System", "Light", "Dark"]
         font: Literal["Claude", "System"]
         setup_complete: StrictBool
-        jarvis_mode: Literal["off", "new", "all"] = "off"
+        jarvis_mode: Literal["off", "new", "all", "all_plus"] = "off"
         auto_apply: StrictBool
         dry_run: StrictBool
         scan_interval_min: StrictInt = Field(ge=5, le=10080)

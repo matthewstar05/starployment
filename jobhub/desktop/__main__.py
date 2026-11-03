@@ -5,6 +5,7 @@ import argparse
 import os
 import signal
 import sys
+import time
 from pathlib import Path
 
 from PySide6.QtCore import QTimer
@@ -27,11 +28,14 @@ def quit_on_termination(app: QApplication) -> None:
     wake.start(500)
 
 
+SEND_GRACE_SECONDS = 900     # a send's own timeouts end it well before this
+
+
 def sending_now() -> bool:
     """Whether an application is queued or being sent, read on a connection of its own
     (the shared one may be held by a worker thread that is still running)."""
     import sqlite3
-    from .. import config
+    from jobhub import config    # absolute: in the app bundle this file runs as the top-level script
     try:
         con = sqlite3.connect(f"file:{config.DB_PATH}?mode=ro", uri=True, timeout=2)
         try:
@@ -49,10 +53,15 @@ def exit_promptly(code: int) -> int:
     Python waits for every background thread at exit, so a scan, an inbox check, or
     agent calls kept a quitting app alive for minutes (and made the installer give
     up). Interrupted scans roll back, and unfinished drafts are recovered at the next
-    start (db.recover_drafts). A send in progress still finishes, as before.
+    start (db.recover_drafts). A send in progress still finishes first; returning
+    to the normal exit instead left the process waiting on idle workers for good.
     """
-    if sending_now():
-        return code
+    deadline = time.monotonic() + SEND_GRACE_SECONDS
+    try:
+        while sending_now() and time.monotonic() < deadline:
+            time.sleep(1)
+    except Exception:  # noqa: BLE001 - whatever happens, never fall back to waiting on idle threads
+        pass
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(code)

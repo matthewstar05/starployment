@@ -1315,6 +1315,195 @@ class ChoiceButton(CapsuleButton):
         menu.exec(self.mapToGlobal(QPoint(0, self.height() + 4)))
 
 
+class ChoicePopover(QWidget):
+    """A glass popover of exclusive choices, each with a note, in place of a native menu.
+
+    ``options`` are ``(value, title, note, tone)``; ``tone`` names a palette color
+    for the row's dot. An optional footer row ("Settings…") emits
+    ``footer_chosen``. The popover closes before it emits, so a handler may open a
+    dialog. Arrow keys move, Return picks, Escape closes.
+    """
+
+    chosen = Signal(object)
+    footer_chosen = Signal()
+
+    MARGIN = 16
+    WIDTH = 300
+    RADIUS = 16
+    PAD = 6
+
+    def __init__(self, parent: QWidget, title: str, options: list[tuple[object, str, str, str]],
+                 current: object = None, footer: str | None = None, footer_icon: str = "settings"):
+        super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint
+                         | Qt.WindowType.NoDropShadowWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setMouseTracking(True)
+        self.setAccessibleName(title)
+        self._title = title
+        self._options = list(options)
+        self._current = current
+        self._footer = footer
+        self._footer_icon = footer_icon
+        self._hover = next((index for index, option in enumerate(self._options) if option[0] == current), 0)
+        self._rows: list[QRectF] = []
+        self._footer_rect = QRectF()
+        self._separator_y = 0.0
+        self._fade = QVariantAnimation(self)
+        self._fade.valueChanged.connect(lambda value: self.setWindowOpacity(float(value)))
+        self._layout_rows()
+
+    # ---------------------------------------------------------------- layout
+    def _note_height(self, note: str, width: float) -> float:
+        return QFontMetrics(ui_font(12)).boundingRect(
+            0, 0, int(width), 1000, int(Qt.TextFlag.TextWordWrap), note).height()
+
+    def _layout_rows(self) -> None:
+        left = self.MARGIN + self.PAD
+        width = self.WIDTH - self.PAD * 2
+        y = self.MARGIN + self.PAD + 30
+        self._rows = []
+        for _value, _title, note, _tone in self._options:
+            height = 10 + 18 + self._note_height(note, width - 64) + 10
+            self._rows.append(QRectF(left, y, width, height))
+            y += height + 2
+        if self._footer:
+            self._separator_y = y + 3
+            self._footer_rect = QRectF(left, y + 8, width, 32)
+            y += 8 + 32
+        self.resize(self.WIDTH + self.MARGIN * 2, int(y + self.PAD + self.MARGIN))
+
+    def _targets(self) -> list[QRectF]:
+        return self._rows + ([self._footer_rect] if self._footer else [])
+
+    def _target_at(self, point) -> int:
+        for index, rect in enumerate(self._targets()):
+            if rect.contains(QPointF(point)):
+                return index
+        return -1
+
+    # ---------------------------------------------------------------- showing
+    def popup(self, anchor: QWidget, gap: int = 6) -> None:
+        """Open below ``anchor``, its left edge aligned, kept on screen."""
+        origin = anchor.mapToGlobal(QPoint(0, anchor.height() + gap))
+        x, y = origin.x() - self.MARGIN - self.PAD, origin.y() - self.MARGIN
+        screen = anchor.screen().availableGeometry() if anchor.screen() else None
+        if screen is not None:
+            x = max(screen.left() - self.MARGIN, min(x, screen.right() - self.width() + self.MARGIN))
+            if y + self.height() - self.MARGIN > screen.bottom():
+                y = anchor.mapToGlobal(QPoint(0, -gap)).y() - self.height() + self.MARGIN
+        self.move(x, y)
+        if reduced_motion():
+            self.setWindowOpacity(1.0)
+            self.show()
+        else:
+            self.setWindowOpacity(0.0)
+            self.show()
+            _animate(self._fade, 0.0, 1.0, Motion.FAST, QEasingCurve.Type.OutCubic)
+        self.setFocus(Qt.FocusReason.PopupFocusReason)
+
+    def activate(self, index: int) -> None:
+        """Pick the row at ``index`` (the footer follows the options)."""
+        self.close()
+        if 0 <= index < len(self._options):
+            if self._options[index][0] != self._current:
+                self.chosen.emit(self._options[index][0])
+        elif self._footer and index == len(self._options):
+            self.footer_chosen.emit()
+
+    # ---------------------------------------------------------------- input
+    def mouseMoveEvent(self, event) -> None:
+        index = self._target_at(event.position())
+        if index >= 0 and index != self._hover:
+            self._hover = index
+            self.update()
+
+    def mouseReleaseEvent(self, event) -> None:
+        index = self._target_at(event.position())
+        if event.button() == Qt.MouseButton.LeftButton and index >= 0:
+            self.activate(index)
+        elif not QRectF(self.rect()).adjusted(self.MARGIN, self.MARGIN, -self.MARGIN, -self.MARGIN).contains(
+                event.position()):
+            self.close()
+
+    def keyPressEvent(self, event) -> None:
+        count = len(self._targets())
+        if event.key() in (Qt.Key.Key_Down, Qt.Key.Key_Tab):
+            self._hover = (self._hover + 1) % count
+        elif event.key() in (Qt.Key.Key_Up, Qt.Key.Key_Backtab):
+            self._hover = (self._hover - 1) % count
+        elif event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space):
+            self.activate(self._hover)
+            return
+        elif event.key() == Qt.Key.Key_Escape:
+            self.close()
+            return
+        else:
+            super().keyPressEvent(event)
+            return
+        self.update()
+
+    # ---------------------------------------------------------------- painting
+    def paintEvent(self, event) -> None:
+        colors = current_colors()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        body = QRectF(self.rect()).adjusted(self.MARGIN, self.MARGIN, -self.MARGIN, -self.MARGIN)
+        paint_soft_shadow(painter, body, self.RADIUS, colors["glass_shadow"], blur=16)
+        # Near-opaque like a toast: the popover floats over the sidebar's own text.
+        painter.fillPath(rounded_path(body, self.RADIUS), qcolor(colors["glass_thick"]))
+        paint_glass(painter, body, self.RADIUS, material="thick")
+
+        painter.setFont(ui_font(11, QFont.Weight.DemiBold))
+        painter.setPen(qcolor(colors["text_muted"]))
+        painter.drawText(QRectF(body.left() + 18, body.top() + self.PAD + 4, body.width() - 36, 22),
+                         Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self._title.upper())
+
+        row_radius = self.RADIUS - self.PAD
+        title_font, note_font = ui_font(13, QFont.Weight.DemiBold), ui_font(12)
+        for index, ((value, title, note, tone), rect) in enumerate(zip(self._options, self._rows)):
+            selected = value == self._current
+            if selected:
+                painter.fillPath(rounded_path(rect, row_radius), qcolor(colors["fill_selected"]))
+            if index == self._hover:
+                painter.fillPath(rounded_path(rect, row_radius), qcolor(colors["fill_hover"]))
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(qcolor(colors.get(tone, colors["text_muted"])))
+            painter.drawEllipse(QPointF(rect.left() + 18, rect.top() + 19), 4.5, 4.5)
+            text_left = rect.left() + 34
+            text_width = rect.width() - 64
+            painter.setFont(title_font)
+            painter.setPen(qcolor(colors["accent_text"] if selected else colors["text"]))
+            painter.drawText(QRectF(text_left, rect.top() + 10, text_width, 18),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, title)
+            painter.setFont(note_font)
+            painter.setPen(qcolor(colors["text_muted"]))
+            painter.drawText(QRectF(text_left, rect.top() + 29, text_width, rect.height() - 37),
+                             Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft | Qt.TextFlag.TextWordWrap, note)
+            if selected:
+                tick = QPainterPath(QPointF(rect.right() - 27, rect.top() + 19))
+                tick.lineTo(rect.right() - 23, rect.top() + 23)
+                tick.lineTo(rect.right() - 16, rect.top() + 15)
+                painter.setPen(QPen(qcolor(colors["accent"]), 2.0, Qt.PenStyle.SolidLine,
+                                    Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawPath(tick)
+
+        if self._footer:
+            painter.setPen(QPen(qcolor(colors["separator"]), 1))
+            painter.drawLine(QPointF(body.left() + 14, self._separator_y), QPointF(body.right() - 14, self._separator_y))
+            rect = self._footer_rect
+            if self._hover == len(self._options):
+                painter.fillPath(rounded_path(rect, row_radius), qcolor(colors["fill_hover"]))
+            painter.drawPixmap(QPointF(rect.left() + 11, rect.center().y() - 7),
+                               icon_pixmap(self._footer_icon, colors["text_muted"], 14, 2.0))
+            painter.setFont(ui_font(13))
+            painter.setPen(qcolor(colors["text"]))
+            painter.drawText(QRectF(rect.left() + 34, rect.top(), rect.width() - 44, rect.height()),
+                             Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self._footer)
+        painter.end()
+
+
 def paint_star_mark(painter: QPainter, center: QPointF, radius: float, color: QColor | str) -> None:
     """A filled five-point star (the "starred application" mark)."""
     path = QPainterPath()

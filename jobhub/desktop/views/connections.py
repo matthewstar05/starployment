@@ -253,6 +253,9 @@ class EmailConnection(QWidget):
         self.track.toggled.connect(self._track_changed)
         self.archive = ToggleSwitch()
         self.archive.toggled.connect(self.changed)
+        self.luna_mail = ToggleSwitch()
+        self.luna_mail.setAccessibleName("Ask Luna about unclear emails")
+        self.luna_mail.toggled.connect(self.changed)
         self.codes = ToggleSwitch()
         self.codes.toggled.connect(self._codes_changed)
         self.sender = QLineEdit()
@@ -268,6 +271,9 @@ class EmailConnection(QWidget):
         self.port_row = self.group.add_row("Port (TLS)", self.port)
         self.group.add_widget(self.status)
         self.group.add_row("Track replies", self.track, "Update Tracker stages from recruiting emails.")
+        self.luna_mail_row = self.group.add_row(
+            "Ask Luna about unclear emails", self.luna_mail,
+            "Luna reads only the emails the rules can't settle, many per request, and never the same email twice.")
         self.archive_row = self.group.add_row(
             "Archive rejections", self.archive,
             "Takes a rejection out of your Inbox once its application is marked Rejected. Nothing is deleted; "
@@ -287,6 +293,7 @@ class EmailConnection(QWidget):
 
     def _track_changed(self, *_args) -> None:
         self.archive_row.setVisible(self.track.isChecked() and not getattr(self, "_compact", False))
+        self.luna_mail_row.setVisible(self.track.isChecked() and not getattr(self, "_compact", False))
         self.changed.emit()
 
     def _provider_changed(self, *_args) -> None:
@@ -322,6 +329,7 @@ class EmailConnection(QWidget):
         self.codes.setChecked(bool(verification.get("enabled")))
         self.track.setChecked(bool(tracking.get("enabled")))
         self.archive.setChecked(bool(tracking.get("archive_rejections")))
+        self.luna_mail.setChecked(bool(tracking.get("use_luna", True)))
         self._track_changed()
         self.password.clear()
         self.forget.setChecked(False)
@@ -339,7 +347,8 @@ class EmailConnection(QWidget):
                 "sender_address": self.sender.text().strip() if self.codes.isChecked() else "",
             },
             "email_tracking": {"enabled": self.track.isChecked(),
-                               "archive_rejections": self.track.isChecked() and self.archive.isChecked()},
+                               "archive_rejections": self.track.isChecked() and self.archive.isChecked(),
+                               "use_luna": self.luna_mail.isChecked()},
         }
         if self.password.text():
             patch["_imap_password"] = self.password.text()

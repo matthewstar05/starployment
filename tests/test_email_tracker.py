@@ -465,3 +465,151 @@ def test_an_unreachable_mail_server_is_reported_as_offline(monkeypatch):
         list(box.recent(30))
     assert str(raised.value).startswith(email_tracker.OFFLINE)
     assert _StallingIMAP.opened == email_tracker._RECONNECTS + 1
+
+
+# Wording from real assessment invitations the rules once missed (2026-10), with fictional employers.
+@pytest.mark.parametrize("subject, body", [
+    ("Northwind invites you to take an assessment",
+     "As part of their evaluation process, you have been invited by Northwind to complete an assessment. "
+     "Start Assessment. This link is exclusively yours."),
+    ("[Litmus] Assessment invitation from Northwind",
+     "You've been invited to complete an assessment from Northwind, due Nov 1, 2026 at 11:59 PM PT."),
+    ("Congratulations, you're on to the next step with Northwind!",
+     "Thank you for taking the time to apply for the Summer Analyst position at Northwind. We partner with an "
+     "online pre-recruiting assessment provider. Please complete this pre-recruiting assessment within the next "
+     "48 hours. This is a required step in your application process."),
+    ("Next step in your application with Northwind",
+     "As a next step, we ask you to take two short assessments: an adaptive cognitive test and a personality "
+     "questionnaire. Start now."),
+    ("[Action Required] Your Northwind Assessments Expire in 24 hours",
+     "Quick reminder that your assessments expire in 24 hours. Robots (25 minutes): Incomplete."),
+    ("Next Steps with Northwind: HackerRank Coding Challenge",
+     "Thank you for your interest in Northwind! We're happy to move forward with the process for the Junior "
+     "Researcher role, which is an online coding assessment via the HackerRank platform."),
+])
+def test_assessment_invitations_in_their_many_wordings(subject, body):
+    assert email_tracker.classify(subject, body)[0] == "assessment"
+
+
+@pytest.mark.parametrize("subject, body", [
+    ("Thank you for applying to Northwind!",
+     "Thank you for applying! As we review your application, here's a quick overview of what to expect next:"
+     "\r\n\r\n* Complete our Assessments: If your profile meets our basic qualifications, you'll receive a link."),
+    ("Thanks for your interest in joining the team at Northwind",
+     "Thanks for applying. In the meantime, we recommend that you take our products for a test spin."),
+    ("Hiring now: Software Engineer at Northwind", "Your job alert. View job: https://example.test/?ref=bryqwoven"),
+])
+def test_descriptions_and_product_tests_are_not_assessments(subject, body):
+    assert email_tracker.classify(subject, body)[0] != "assessment"
+
+
+def test_matching_ignores_mailbox_words_and_spacing_and_picks_the_named_role():
+    apps = [{"id": 1, "company": "Reply", "title": "Data Engineer", "finished_at": "2026-10-01"},
+            {"id": 2, "company": "Eightsleep", "title": "Security Engineer", "finished_at": "2026-10-02"},
+            {"id": 3, "company": "Akuna Capital", "title": "Junior Quantitative Risk Analyst", "finished_at": "2026-10-05"},
+            {"id": 4, "company": "Akuna Capital University", "title": "Junior Quantitative Researcher",
+             "finished_at": "2026-10-01"}]
+    match = email_tracker.match_application
+    assert match("Hiring Team DO-NOT-REPLY@criteriacorp.com", "Next step in your application with Eight Sleep",
+                 "Any questions, just reply.", apps)["id"] == 2
+    assert match("no-reply@akunacapital.com", "Next Steps with Akuna Capital: HackerRank Coding Challenge",
+                 "We're happy to move forward with the process for the Junior Quantitative Researcher role", apps)["id"] == 4
+
+
+def test_unmatched_emails_name_their_employer():
+    hint = email_tracker.employer_hint
+    assert hint("Coderbyte <do-not-reply@coderbyte.com>", "Northwind AI invites you to take an assessment") == "Northwind AI"
+    assert hint("noreply@litmus.build", "[Litmus] Assessment invitation from Bluebird") == "Bluebird"
+    assert hint("Madeleine Example <m@northwind.test>", "Northwind | Reminder to complete your assessment") in (
+        "Madeleine Example", "Northwind")
+
+
+def test_luna_reads_only_unsettled_emails_in_one_batch_and_never_twice(store, monkeypatch):
+    from jobhub import luna
+    northwind = submitted("Northwind Labs", "Software Engineer", "https://job-boards.greenhouse.io/nw/jobs/1")
+    monkeypatch.setattr(email_tracker, "_luna_ready", lambda settings: True)
+    calls: list[list[dict]] = []
+
+    def fake(emails, settings):
+        calls.append(emails)
+        return [{"stage": "assessment", "company": "Northwind Labs"}, {"stage": None, "company": ""}][:len(emails)]
+
+    monkeypatch.setattr(luna, "classify_emails", fake)
+    mails = [
+        message("Talent <hello@talentportal.test>", "Your next step: candidate portal",
+                "Your application stands out among other candidates. Your next task is in the portal.", "<a@x>"),
+        message("Portal <hello@talentportal.test>", "Application portal update",
+                "Your application status changed. We decided not to share details by email.", "<b@x>"),
+        message("Northwind Labs <talent@northwindlabs.com>", "Northwind Labs interview",
+                "We'd like to schedule a phone screen.", "<c@x>"),    # the rules settle this one
+    ]
+    feed = [(str(i).encode(), mail, mail.get_content()) for i, mail in enumerate(mails)]
+    settings = {"email_tracking": {"lookback_days": 30, "use_luna": True}, "agent": {"backend": "claude_cli"}}
+    email_tracker.sync(settings, messages=feed)
+    assert len(calls) == 1 and len(calls[0]) == 2          # one call for both unsettled emails
+    assert "candidate portal" in calls[0][0]["subject"]
+    stages = {row["id"]: row["stage"] for row in db.list_tracker()}
+    assert stages[northwind] == "interview"                # Luna never demotes; interview stands
+    events = {e["subject"]: e for e in db.list_mail_events()}
+    assert events["Your next step: candidate portal"]["stage"] == "assessment"
+    email_tracker.sync(settings, messages=feed)
+    assert len(calls) == 1                                  # each email is read by Luna once
+
+
+def test_a_failed_luna_reading_keeps_the_rules_reading(store, monkeypatch):
+    from jobhub import luna
+    monkeypatch.setattr(email_tracker, "_luna_ready", lambda settings: True)
+    monkeypatch.setattr(luna, "classify_emails", lambda emails, settings: (_ for _ in ()).throw(RuntimeError("down")))
+    mail = message("Hiring <jobs@bluebird.test>", "Bluebird coding challenge",
+                   "Please complete the HackerRank assessment within 7 days.", "<a@x>")
+    report = email_tracker.sync({"email_tracking": {"lookback_days": 30, "use_luna": True}, "agent": {}},
+                                messages=[(b"1", mail, mail.get_content())])
+    assert report.recruiting == 1 and report.unmatched[0]["stage"] == "assessment"
+    assert db.unmatched_stage_mail(days=36500)[0]["employer"] == "Bluebird"   # fixtures are dated 2026-09-30
+
+
+def test_scheduled_checks_wait_for_a_fuller_luna_batch_but_manual_checks_do_not(store, monkeypatch):
+    from datetime import datetime, timezone
+    from email.utils import format_datetime
+    from jobhub import luna
+    monkeypatch.setattr(email_tracker, "_luna_ready", lambda settings: True)
+    calls: list[int] = []
+    monkeypatch.setattr(luna, "classify_emails", lambda emails, settings: calls.append(len(emails)) or [None] * len(emails))
+    mail = message("Talent <hello@talentportal.test>", "Your next step: candidate portal",
+                   "Your application stands out among other candidates. Your next task is in the portal.", "<a@x>")
+    mail.replace_header("Date", format_datetime(datetime.now(timezone.utc)))    # just arrived
+    feed = [(b"1", mail, mail.get_content())]
+    settings = {"email_tracking": {"lookback_days": 30, "use_luna": True}, "agent": {"backend": "claude_cli"}}
+    email_tracker.sync(settings, messages=feed)
+    assert calls == []                       # one fresh email waits for a fuller batch
+    email_tracker.sync(settings, messages=feed, luna_now=True)
+    assert calls == [1]
+
+
+def test_job_alerts_are_never_application_updates(store):
+    mail = message("LinkedIn Job Alerts <jobalerts-noreply@linkedin.com>", "Application Developer at Northwind",
+                   "Northwind is hiring. Schedule an interview with top candidates fast.", "<a@x>")
+    report = email_tracker.sync({"email_tracking": {"lookback_days": 30}}, messages=[(b"1", mail, mail.get_content())])
+    assert report.recruiting == 0 and db.list_mail_events() == []
+    db.record_mail_event(message_key=email_tracker._message_key(mail, b"1"), received_at="2026-09-30T10:00:00+00:00",
+                         sender="LinkedIn Job Alerts", subject="Application Developer at Northwind", stage="interview",
+                         application_id=None, confidence=0.5)              # as older rules read it
+    email_tracker.sync({"email_tracking": {"lookback_days": 30}}, messages=[(b"1", mail, mail.get_content())])
+    assert db.list_mail_events() == [] and db.unmatched_stage_mail(days=36500) == []
+
+
+def test_an_email_stays_with_the_application_sent_before_it_arrived(store):
+    """Generic emails once moved to each newer application at the same employer, undoing stages."""
+    first = submitted("Northwind", "Data Analyst", "https://jobs.ashbyhq.com/northwind/1")
+    mail = message("Coderbyte <do-not-reply@coderbyte.com>", "Northwind invites you to take an assessment",
+                   "You have been invited by Northwind to complete an assessment.", "<a@x>")
+    mail.replace_header("Date", "Wed, 28 Oct 2099 10:00:00 +0000")     # after the first application
+    feed = [(b"1", mail, mail.get_content())]
+    email_tracker.sync({"email_tracking": {"lookback_days": 30}}, messages=feed)
+    later = submitted("Northwind", "Platform Engineer", "https://jobs.ashbyhq.com/northwind/2")
+    with db.conn() as c:   # sent after the email arrived
+        c.execute("UPDATE applications SET finished_at='2099-10-29T10:00:00+00:00' WHERE id=?", (later,))
+    for _ in range(3):
+        email_tracker.sync({"email_tracking": {"lookback_days": 30}}, messages=feed)
+    stages = {row["id"]: row["stage"] for row in db.list_tracker()}
+    assert stages[first] == "assessment" and stages[later] == "applied"

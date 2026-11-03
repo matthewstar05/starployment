@@ -9,7 +9,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
-from . import config, db, jarvis
+from . import config, db, governor, jarvis
 from .apply import apply_to_job
 from .models import ApplyResult, Job, job_fingerprint
 from .priority import held_from_automation
@@ -172,7 +172,8 @@ def scan_once() -> dict:
     found = new = 0
     status = "ok"
     try:
-        if jarvis.active(db.get_settings()) and jarvis.hold("scan"):
+        current = db.get_settings()
+        if jarvis.active(current) and jarvis.hold("scan", current):
             db.add_event("JARVIS deferred its scan while the computer is busy")
             return {"status": "deferred", "found": 0, "new": 0}
         run_id = db.create_run()
@@ -183,7 +184,8 @@ def scan_once() -> dict:
         t0 = time.time()
         successful = 0
         boards_read: dict[str, set[str]] = {}
-        with ThreadPoolExecutor(max_workers=jarvis.parallel(settings, "_source_workers", 6, 6)) as ex:
+        with ThreadPoolExecutor(max_workers=jarvis.parallel(settings, "_source_workers", 6, 6),
+                                initializer=governor.same_qos()) as ex:
             futures = {ex.submit(SOURCES[n], settings): n for n in enabled}
             for future in as_completed(futures):
                 name = futures[future]
@@ -319,7 +321,7 @@ def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | No
             if required_jarvis_mode:
                 if settings.get("jarvis_mode") != required_jarvis_mode or not jarvis.eligible(job, settings):
                     raise PostingRefreshError("JARVIS authorization or eligibility changed before sending.")
-                if jarvis.hold("send"):
+                if jarvis.hold("send", settings):
                     raise PostingRefreshError("JARVIS stopped before sending because the computer is busy.")
                 settings = {**settings, "show_browser": False}
             if extra_answers:
@@ -459,18 +461,40 @@ def auto_apply_batch() -> list[dict]:
     return results
 
 
+def _set_aside(job: Job, reason: str, kind: str = "transient") -> None:
+    """Leave a posting for the candidate without retrying it every cycle (jarvis.set_aside)."""
+    if db.hold_for_jarvis(job.id, reason, jarvis.set_aside_seconds(kind)):
+        db.add_event(f"JARVIS left this application for review: {reason[:300]}", "warn", job.id)
+
+
+def _set_aside_kind(job: Job, error: Exception) -> str:
+    """How long a failure should keep a posting aside (see jarvis.SET_ASIDE_SECONDS)."""
+    from . import prepare
+    if isinstance(error, PostingRefreshError):
+        return "posting"
+    if str(error).startswith("Answer the required questions first"):
+        draft = db.draft_for_job(job.id)
+        # Only uploads and answers AI Autofill may not give remain: nothing will change
+        # until the candidate looks. An open question means an AI call fell short; retry soon.
+        if draft and not any(prepare.missing(q) and prepare._open(q) for q in draft["questions"]):
+            return "candidate"
+    return "transient"
+
+
 def jarvis_batch() -> list[dict]:
     """Standing, mode-scoped authorization, always through the durable send pipeline.
 
     AI answers remain on their own draft. Neither candidate facts nor the answer
-    bank are changed. An attempt of any outcome is never retried by JARVIS.
+    bank are changed. An attempt of any outcome is never retried by JARVIS. A posting
+    it had to leave for the candidate is set aside (``jarvis.set_aside``), so later
+    cycles spend their time on postings that can still go, not the same blocked ones.
     """
     from . import prepare
     settings = db.get_settings()
-    mode = settings.get("jarvis_mode", "off")
+    mode = jarvis.mode_of(settings)
     if not jarvis.active(settings) or not settings.get("setup_complete") or STATE.stop:
         return []
-    if jarvis.hold("apply"):
+    if jarvis.hold("apply", settings):
         db.add_event("JARVIS deferred applications while the computer is busy")
         return []
     rescore()
@@ -480,18 +504,21 @@ def jarvis_batch() -> list[dict]:
     with db.conn() as connection:
         attempted = {row["job_id"] for row in connection.execute("SELECT job_id FROM applications")}
     floor = float(settings.get("min_score_to_apply", 60))
-    candidates = [job for status in (("new", "prepared") if mode == "all" else ("new",))
+    sweep = jarvis.sweeping(mode)
+    candidates = [job for status in (("new", "prepared") if sweep else ("new",))
                   for job in db.list_jobs(status=status, min_score=floor, limit=100000)
                   if job.id not in attempted and jarvis.eligible(job, settings)]
-    if mode == "all":
+    if sweep:
         candidates = jarvis.still_listed(candidates)
-    candidates = jarvis.diversify(jarvis.rank(candidates, mode), settings)
+    waiting = jarvis.set_aside(job.id for job in candidates)
+    candidates = jarvis.diversify(jarvis.rank([job for job in candidates if job.id not in waiting], mode), settings)
     results, employers = [], set()
     maximum = int(settings.get("max_apply_per_run", 3))
-    # Probe a bounded rotating window, so an unanswerable form cannot starve the backlog.
-    for job in _auto_apply_preflight_window(candidates, max(24, maximum * 8)):
+    # Set-aside postings are already gone, so take the ranking in order (newest and best
+    # first); the probe bound keeps one cycle's public requests and agent calls in check.
+    for job in candidates[:max(24, maximum * 8)]:
         current = db.get_settings()
-        if (STATE.stop or current.get("jarvis_mode") != mode or jarvis.hold("apply")
+        if (STATE.stop or current.get("jarvis_mode") != mode or jarvis.hold("apply", current)
                 or len(results) >= maximum):
             break
         job = db.get_job(job.id)
@@ -500,8 +527,11 @@ def jarvis_batch() -> list[dict]:
         company = job.company.strip().casefold()
         if company in employers:
             continue
-        if mode == "new":
-            if preflight_job(job, profile, current).status == "missing_facts":
+        if not sweep:
+            readiness = preflight_job(job, profile, current)
+            if readiness.status == "missing_facts":
+                _set_aside(job, "Saved answers are missing for: " + ", ".join(readiness.missing or ())[:250],
+                           "candidate")
                 continue
             result = apply_one(job.id, require_eligible=True, required_jarvis_mode=mode)
         else:
@@ -518,25 +548,26 @@ def jarvis_batch() -> list[dict]:
                     draft_id = prepare.prepare_job(job, profile, current)
                 else:
                     draft_id = draft["id"]
-                if db.get_settings().get("jarvis_mode") != mode or jarvis.hold("apply") or STATE.stop:
+                if db.get_settings().get("jarvis_mode") != mode or jarvis.hold("apply", current) or STATE.stop:
                     break
                 draft = db.get_draft(draft_id)
                 if any(prepare._open(q) for q in draft["questions"]):
                     prepare.autofill(draft_id, current)
                 current = db.get_settings()
-                if current.get("jarvis_mode") != mode or jarvis.hold("apply") or STATE.stop:
+                if current.get("jarvis_mode") != mode or jarvis.hold("apply", current) or STATE.stop:
                     break
                 if not jarvis.eligible(db.get_job(job.id), current):
                     continue
                 prepare.approve_and_queue(draft_id)
-                db.add_event("JARVIS ALL authorized this draft, including its application-only AI Autofill answers", "info", job.id)
+                db.add_event(f"JARVIS {jarvis.label(mode)} authorized this draft, including its application-only "
+                             "AI Autofill answers", "info", job.id)
                 result = prepare.send_draft(draft_id, parallel=jarvis.parallel(current, "parallel_sends", 4, 24),
                                             unattended=True)
             except PostingGone:
                 db.set_job_status(job.id, "skipped")
                 continue
             except Exception as error:  # one unavailable form/agent must not stop the overnight cycle
-                db.add_event(f"JARVIS left this application for review: {str(error)[:300]}", "warn", job.id)
+                _set_aside(job, str(error), _set_aside_kind(job, error))
                 continue
         if result.get("status") == "skipped":
             continue
@@ -544,8 +575,9 @@ def jarvis_batch() -> list[dict]:
         employers.add(company)
         if result.get("status") in ("blocked", "busy"):
             break
-    db.add_event(f"JARVIS {mode.upper()} finished: {len(results)} attempt(s), "
-                 f"{sum(r.get('status') == 'applied' for r in results)} confirmed")
+    db.add_event(f"JARVIS {jarvis.label(mode)} finished: {len(results)} attempt(s), "
+                 f"{sum(r.get('status') == 'applied' for r in results)} confirmed"
+                 + (f"; {len(waiting)} set aside for you" if waiting else ""))
     return results
 
 

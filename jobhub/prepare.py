@@ -1045,7 +1045,7 @@ def send_draft(draft_id: int, parallel: int = 1, assist: bool = False, *, unatte
     db.update_draft(draft_id, status="sending", application_id=application_id, error="")
     result = scheduler.apply_one(job.id, application_id=application_id, extra_answers=extra,
                                  resume_override=draft.get("resume_path") or None, assist=assist, require_eligible=unattended,
-                                 required_jarvis_mode="all" if unattended else None)
+                                 required_jarvis_mode=(db.get_settings().get("jarvis_mode") if unattended else None))
     status = str(result.get("status"))
     if status == "applied":
         db.update_draft(draft_id, status="sent")

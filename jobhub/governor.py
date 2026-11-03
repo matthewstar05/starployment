@@ -20,7 +20,7 @@ MIN_FREE_MEMORY = 20          # percent, from kern.memorystatus_level
 SAMPLE_SECONDS = 2.0
 
 _lock = threading.Lock()
-_sample: tuple[float, bool] = (0.0, False)
+_sample: tuple[float, float, int | None] = (-SAMPLE_SECONDS, 0.0, None)   # (taken, load, free %)
 
 
 def _sysctl(name: str) -> int | None:
@@ -40,24 +40,33 @@ def memory_free_percent() -> int | None:
     return _sysctl("kern.memorystatus_level")
 
 
-def busy() -> bool:
-    """True when the machine has no room for more background work (sampled every 2 s)."""
+def _readings() -> tuple[float, int | None]:
+    """The one-minute load and free-memory percent, sampled at most every 2 s."""
     global _sample
-    if os.environ.get("JOBHUB_GOVERNOR", "1") == "0":
-        return False
     with _lock:
-        taken, value = _sample
+        taken, load, free = _sample
         if time.monotonic() - taken < SAMPLE_SECONDS:
-            return value
+            return load, free
     try:
         load = os.getloadavg()[0]
     except OSError:
         load = 0.0
     free = memory_free_percent()
-    value = load > LOAD_PER_CORE * _CORES or (free is not None and free < MIN_FREE_MEMORY)
     with _lock:
-        _sample = (time.monotonic(), value)
-    return value
+        _sample = (time.monotonic(), load, free)
+    return load, free
+
+
+def busy(load_per_core: float = LOAD_PER_CORE, min_free: int = MIN_FREE_MEMORY) -> bool:
+    """True when the machine has no room for more background work.
+
+    The defaults are the everyday limits; JARVIS ALL+ passes looser ones so it holds
+    back only when the Mac is close to running out of CPU or memory.
+    """
+    if os.environ.get("JOBHUB_GOVERNOR", "1") == "0":
+        return False
+    load, free = _readings()
+    return load > load_per_core * _CORES or (free is not None and free < min_free)
 
 
 def wait_for_headroom(others_running: Callable[[], int] | int, stop: threading.Event | None = None,
@@ -68,3 +77,41 @@ def wait_for_headroom(others_running: Callable[[], int] | int, stop: threading.E
         if not busy() or time.monotonic() > deadline or (stop is not None and stop.is_set()):
             return
         time.sleep(poll)
+
+
+# macOS quality-of-service classes (sys/qos.h). Threads the worker starts inherit its class.
+QOS = {"interactive": 0x21, "initiated": 0x19, "default": 0x15, "utility": 0x11, "background": 0x09}
+
+
+def set_thread_qos(level: str) -> bool:
+    """Run the calling thread (and threads it starts) at a macOS quality-of-service class.
+
+    ``background`` keeps work on the efficiency cores with throttled disk and network, so
+    it never competes with what the user is doing; ``utility`` is lower than the window but
+    may use every core. No-op elsewhere or when the call is unavailable.
+    """
+    if sys.platform != "darwin" or level not in QOS:
+        return False
+    try:
+        import ctypes
+        libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        return libc.pthread_set_qos_class_self_np(ctypes.c_uint(QOS[level]), ctypes.c_int(0)) == 0
+    except (OSError, AttributeError):
+        return False
+
+
+def same_qos() -> Callable[[], None] | None:
+    """A ``ThreadPoolExecutor`` initializer that gives pool threads the caller's QoS class
+    (Python threads do not inherit it), or None where there is nothing to carry over."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        import ctypes
+        libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+        current = int(libc.qos_class_self())
+    except (OSError, AttributeError):
+        return None
+    level = next((name for name, value in QOS.items() if value == current), None)
+    if level is None or level in ("default", "initiated", "interactive"):
+        return None
+    return lambda: set_thread_qos(level)

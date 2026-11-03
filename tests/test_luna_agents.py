@@ -110,14 +110,14 @@ def test_cli_agents_run_tool_free_in_a_scratch_folder(tmp_path, monkeypatch):
     monkeypatch.setattr(agents.subprocess, "run", fake_run)
     assert agents.complete("hi", {"agent": {"backend": "claude_cli", "model": ""}}) == "ready"
     assert agents.complete("hi", {"agent": {"backend": "codex_cli", "model": "gpt-5.5"}}) == "ready"
-    claude, codex = calls[0], calls[1]
+    claude, codex = [call for call in calls if call[0][0].startswith("/opt/")]   # not the governor's sysctl probe
     assert claude[0][claude[0].index("--tools") + 1] == ""
     assert "--safe-mode" in claude[0] and "--strict-mcp-config" in claude[0]
     for feature in ("shell_tool", "unified_exec", "apps", "browser_use", "computer_use"):
         assert feature in codex[0]
     assert "--ignore-user-config" in codex[0] and codex[0][codex[0].index("--sandbox") + 1] == "read-only"
     assert codex[0][codex[0].index("-m") + 1] == "gpt-5.5"
-    for _command, kwargs in calls:
+    for _command, kwargs in (claude, codex):
         assert kwargs["cwd"].startswith(str(tmp_path / "scratch"))
         assert "CLAUDECODE" not in kwargs["env"]
     assert not any((tmp_path / "scratch").iterdir())      # scratch folders are removed
@@ -188,6 +188,7 @@ def test_antigravity_cli_runner_and_complete(tmp_path, monkeypatch):
                    "--model", model]
     state = tmp_path / "agent_home" / "agy" / ".gemini" / "antigravity-cli"
     assert kwargs["env"]["HOME"] == str(tmp_path / "agent_home" / "agy")
+    assert kwargs["env"]["SSH_CONNECTION"]                   # token refreshes go to the file, not Keychain prompts
     assert (state / "antigravity-oauth-token").read_text() == "token" and not (state / "mcp").exists()
     assert kwargs["cwd"].startswith(str(scratch_dir))
     assert not any(scratch_dir.iterdir())

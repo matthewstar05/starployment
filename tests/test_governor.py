@@ -8,7 +8,7 @@ from jobhub import governor
 
 def machine(monkeypatch, load: float, free: int | None):
     monkeypatch.setenv("JOBHUB_GOVERNOR", "1")
-    monkeypatch.setattr(governor, "_sample", (0.0, False))
+    monkeypatch.setattr(governor, "_sample", (-governor.SAMPLE_SECONDS, 0.0, None))
     monkeypatch.setattr(governor, "_CORES", 10)
     monkeypatch.setattr(governor.os, "getloadavg", lambda: (load, load, load))
     monkeypatch.setattr(governor, "memory_free_percent", lambda: free)

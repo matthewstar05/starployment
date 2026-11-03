@@ -21,9 +21,8 @@ from PySide6.QtWidgets import (
     QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
+    QDialog,
     QMainWindow,
-    QMenu,
-    QMessageBox,
     QVBoxLayout,
     QWidget,
 )
@@ -39,10 +38,12 @@ from .views.jobs import JobsView
 from .views.profile import ProfileView
 from .views.settings import SettingsView
 from .views.tracker import TrackerView
+from ..jarvis import label as jarvis_label
 from .theme import current_colors
 from .widgets import (
     AmbientBackdrop,
     CapsuleButton,
+    ChoicePopover,
     FadeStack,
     GlassNavList,
     GlassPanel,
@@ -460,37 +461,33 @@ class JobHubWindow(QMainWindow):
 
     # ------------------------------------------------------------ JARVIS
     JARVIS_MODES = (
-        ("off", "Off", "Your ordinary automation settings"),
-        ("new", "New", "Postings from the last 24 hours, saved answers only"),
-        ("all", "All", "New and older open postings, AI Autofill sent without review"),
+        ("off", "Off", "Your ordinary automation settings", "disabled"),
+        ("new", "New", "Postings from the last 24 hours, saved answers only", "green"),
+        ("all", "All", "New and older open postings, AI Autofill sent without review. Gentle on your Mac", "accent"),
+        ("all_plus", "All+", "ALL with a wider net at full speed, for overnight", "red"),
     )
 
     def _jarvis_menu(self) -> None:
-        pill = self.sidebar.jarvis_status
-        menu = QMenu(self)
-        for value, title, note in self.JARVIS_MODES:
-            action = menu.addAction(f"{title}  ·  {note}")
-            action.setCheckable(True)
-            action.setChecked(value == self._jarvis_mode)
-            action.triggered.connect(lambda _checked=False, value=value: self.choose_jarvis_mode(value))
-        menu.addSeparator()
-        menu.addAction("JARVIS settings…").triggered.connect(self.show_jarvis_settings)
-        menu.exec(pill.mapToGlobal(pill.rect().bottomLeft()))
+        popover = ChoicePopover(self, "JARVIS", list(self.JARVIS_MODES), self._jarvis_mode,
+                                footer="JARVIS settings…")
+        popover.chosen.connect(self.choose_jarvis_mode)
+        popover.footer_chosen.connect(self.show_jarvis_settings)
+        self._jarvis_popover = popover
+        popover.popup(self.sidebar.jarvis_status)
 
-    def _confirm_jarvis_all(self) -> bool:
-        answer = QMessageBox.question(
-            self, "Turn on JARVIS ALL?",
-            "JARVIS ALL prepares applications, fills open questions with AI Autofill (including labeled "
-            "assumptions), and sends them without asking you first. Starred roles, priority companies, and "
-            "Workday still wait for you.",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Cancel)
-        return answer == QMessageBox.StandardButton.Yes
+    def _confirm_jarvis_all(self, mode: str = "all") -> bool:
+        from .views.jarvis_sheet import JarvisConfirmSheet
+        sheet = JarvisConfirmSheet(mode, self)
+        self._jarvis_sheet = sheet
+        return sheet.exec() == QDialog.DialogCode.Accepted
 
     def choose_jarvis_mode(self, mode: str) -> None:
-        """Change JARVIS from the sidebar. ALL asks once, since it sends without review."""
-        if mode not in ("off", "new", "all") or mode == self._jarvis_mode:
+        """Change JARVIS from the sidebar. ALL and ALL+ ask once, since they send without review."""
+        if mode not in ("off", "new", "all", "all_plus") or mode == self._jarvis_mode:
             return
-        if mode == "all" and not self._confirm_jarvis_all():
+        # Moving between ALL and ALL+ keeps the permission already given; ALL+ still shows its pace.
+        if mode in ("all", "all_plus") and not (self._jarvis_mode in ("all", "all_plus") and mode == "all") \
+                and not self._confirm_jarvis_all(mode):
             return
         self._jarvis_mode = mode
         self._update_jarvis_status()
@@ -667,7 +664,7 @@ class JobHubWindow(QMainWindow):
             self._auto_apply = auto_apply
         self._scheduler_enabled = scheduler_enabled
         self._update_jarvis_status()
-        automation = (f"JARVIS {self._jarvis_mode.upper()} on" if self._jarvis_mode in ("new", "all")
+        automation = (f"JARVIS {jarvis_label(self._jarvis_mode)} on" if self._jarvis_mode != "off"
                       else "Auto-apply on" if self._auto_apply else "Auto-apply off")
         self.scan.setEnabled(not scanning)
         self.scan.setText("Scanning…" if scanning else "Refresh jobs")
@@ -685,13 +682,15 @@ class JobHubWindow(QMainWindow):
     def _update_jarvis_status(self) -> None:
         """Keep the saved JARVIS mode visible independently of page and scan activity."""
         mode = self._jarvis_mode
-        text = f"JARVIS · {mode.upper()}"
+        text = f"JARVIS · {jarvis_label(mode)}"
         status = ""
         if mode == "off":
             detail = "JARVIS is off. Ordinary automatic applications follow your saved settings."
         else:
-            detail = ("Recent postings using saved answers." if mode == "new" else
-                      "Recent postings and strong matches, including automatic AI Autofill and sending.")
+            detail = {"new": "Recent postings using saved answers.",
+                      "all": "Recent postings and strong matches, including automatic AI Autofill and sending, "
+                             "at background priority.",
+                      }.get(mode, "Everything ALL does with a wider net at full speed, for overnight runs.")
             status = "applied"
             if not self._scheduler_enabled or not self._setup_complete:
                 text += " · Paused"
@@ -712,7 +711,7 @@ class JobHubWindow(QMainWindow):
     def set_data(
         self, *, profile=None, settings=None, jobs=None, total_jobs=None,
         applications=None, stats=None, events=None, top_jobs=None,
-        drafts=None, tracker=None, resume_files=None, mail=None,
+        drafts=None, tracker=None, resume_files=None, mail=None, inbox=None,
     ) -> None:
         if profile is not None:
             if not self.profile.dirty:
@@ -726,7 +725,7 @@ class JobHubWindow(QMainWindow):
             self._setup_complete = bool(settings.get("setup_complete"))
             self._auto_apply = bool(settings.get("auto_apply"))
             mode = settings.get("jarvis_mode", "off")
-            self._jarvis_mode = mode if mode in ("new", "all") else "off"
+            self._jarvis_mode = mode if mode in ("new", "all", "all_plus") else "off"
             self._jarvis_practice = bool(settings.get("dry_run"))
             self._update_jarvis_status()
             self.dashboard.set_setup_complete(self._setup_complete)
@@ -771,12 +770,20 @@ class JobHubWindow(QMainWindow):
                 counts[draft.get("status", "")] = counts.get(draft.get("status", ""), 0) + 1
             review = sum(counts.get(key, 0) for key in ("ready", "needs_answers", "practice"))
             self.nav.set_badge(APPLICATIONS, str(review) if review else "", "accent")
-        else:
-            counts = None
+            self._draft_counts = counts
         if tracker is not None:
             self.tracker.set_rows(tracker)
-            focus = [row for row in tracker if row.get("stage") in ("assessment", "interview", "offer")]
+            self._tracker_focus = [row for row in tracker if row.get("stage") in ("assessment", "interview", "offer")]
+        if inbox is not None:
+            # Assessments, interviews, and offers in mail that no tracked application matched.
+            self._inbox_focus = [{"id": f"mail-{row['id']}", "company": row.get("employer") or row.get("sender") or "Employer",
+                                  "title": row.get("subject") or "", "stage": row.get("stage"), "from_inbox": True,
+                                  "stage_mail_message_id": row.get("message_id"), "stage_mail_sender": row.get("sender"),
+                                  "stage_mail_subject": row.get("subject")} for row in inbox]
+        if tracker is not None or inbox is not None or drafts is not None:
+            focus = getattr(self, "_tracker_focus", []) + getattr(self, "_inbox_focus", [])
             self.nav.set_badge(TRACKER, str(len(focus)) if focus else "", "amber")
+            counts = getattr(self, "_draft_counts", None)
             if counts is not None:
                 self.dashboard.set_pipeline(counts, focus)
         if events is not None:

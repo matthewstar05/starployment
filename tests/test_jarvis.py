@@ -15,7 +15,7 @@ def test_policy_halves_limits_without_changing_preferences():
     assert jarvis.parallel(settings, "parallel_prepare", 8) == 4
     assert jarvis.parallel(settings, "parallel_agent_calls", 4) == 2
     assert jarvis.parallel(settings, "anything", 1) == 1
-    assert jarvis.interval_minutes(settings) == 30
+    assert jarvis.interval_minutes(settings) == 60   # scans take minutes: ALL keeps the saved interval
     assert settings["parallel_sends"] == 5 and settings["scan_interval_min"] == 60
     settings["jarvis_mode"] = "off"
     assert jarvis.parallel(settings, "parallel_sends", 4) == 5
@@ -172,3 +172,90 @@ def test_jarvis_global_agent_process_cap_is_halved(monkeypatch):
     with ThreadPoolExecutor(max_workers=12) as pool:
         assert list(pool.map(lambda _: agents.complete("fixture", {"jarvis_mode": "all"}), range(12))) == ["ok"] * 12
     assert 1 < counts["peak"] <= agents.MAX_AGENT_CALLS // 2
+
+
+def test_all_plus_uses_saved_concurrency_and_scans_twice_as_often():
+    settings = config.merge_settings(config.DEFAULT_SETTINGS, {"jarvis_mode": "all_plus", "parallel_sends": 5,
+                                                               "company_cap": {"count": 3, "days": 30}})
+    assert config.validate_settings(settings)["jarvis_mode"] == "all_plus"
+    assert jarvis.active(settings) and jarvis.sweeping(settings) and jarvis.plus(settings)
+    assert jarvis.parallel(settings, "parallel_sends", 4) == 5
+    assert jarvis.interval_minutes(settings) == 30
+    assert jarvis.company_limit(settings) == 6
+    assert jarvis.label("all_plus") == "ALL+"
+
+
+def test_all_plus_widens_only_past_the_posting_age_reason():
+    old = job(60, 90)
+    old.score_json = {"auto_apply_eligible": False, "review_reasons": ["Posting date is over 180 days old"]}
+    senior = job(61, 90)
+    senior.score_json = {"auto_apply_eligible": False,
+                         "review_reasons": ["Posting date is over 180 days old", "Senior role"]}
+    settings = config.merge_settings(config.DEFAULT_SETTINGS, {"jarvis_mode": "all"})
+    assert not jarvis.eligible(old, settings)
+    settings["jarvis_mode"] = "all_plus"
+    assert jarvis.eligible(old, settings) and not jarvis.eligible(senior, settings)
+    old.company = "Google"                      # priority companies still wait
+    assert not jarvis.eligible(old, settings)
+
+
+def test_all_plus_waits_only_near_the_limits(monkeypatch):
+    calls = []
+    def busy(load_per_core=governor.LOAD_PER_CORE, min_free=governor.MIN_FREE_MEMORY):
+        calls.append((load_per_core, min_free))
+        return load_per_core < 1       # busy by everyday limits, fine by ALL+ limits
+    monkeypatch.setattr(governor, "busy", busy)
+    monkeypatch.setattr(jarvis, "_deferred", {})
+    assert jarvis.hold("scan", {"jarvis_mode": "all"})
+    assert not jarvis.hold("scan", {"jarvis_mode": "all_plus"})
+    assert calls[-1] == (jarvis.PLUS_LOAD_PER_CORE, jarvis.PLUS_MIN_FREE_MEMORY)
+
+
+def test_blocked_applications_are_set_aside_instead_of_retried_every_cycle(running, monkeypatch):
+    from jobhub import luna
+    rows = [job(70, 90), job(71, 85)]
+    save(rows)
+    monkeypatch.setattr(prepare, "discover_questions", lambda job: ([prepare._question(
+        1, "Transcript", "file", required=True)], "local_fixture"))
+    monkeypatch.setattr(luna, "autofill_answers", lambda *a: {})
+    monkeypatch.setattr(scheduler, "apply_to_job", lambda *a, **kw: pytest.fail("sent without the upload"))
+    assert scheduler.auto_apply_batch() == []
+    assert jarvis.set_aside([r.id for r in rows]) == {rows[0].id, rows[1].id}
+    prepared = []
+    monkeypatch.setattr(prepare, "approve_and_queue", lambda *a: prepared.append(a) or pytest.fail("retried"))
+    assert scheduler.auto_apply_batch() == []            # nothing is retried while the reason stands
+    with db.conn() as c:
+        warnings = c.execute("SELECT COUNT(*) FROM events WHERE msg LIKE 'JARVIS left%'").fetchone()[0]
+    assert warnings == 2                                  # said once per posting, not once per cycle
+    # The candidate edits the draft: it comes back.
+    draft = db.draft_for_job(rows[0].id)
+    time.sleep(1.1)
+    db.update_draft(draft["id"], questions=draft["questions"])
+    assert jarvis.set_aside([r.id for r in rows]) == {rows[1].id}
+
+
+def test_a_transient_failure_is_set_aside_only_briefly(running, monkeypatch):
+    save([job(80, 90)])
+    def boom(*a, **kw):
+        raise agents.AgentError("JARVIS deferred this AI call while the computer is busy")
+    monkeypatch.setattr(prepare, "prepare_job", boom)
+    assert scheduler.auto_apply_batch() == []
+    (until, _stamp), = db.jarvis_holds([job(80, 90).id]).values()
+    assert until - time.time() <= jarvis.SET_ASIDE_SECONDS["transient"] + 5
+
+
+def test_refresh_accepts_a_posting_saved_under_an_older_key(store):
+    row = Job(company="Example", title="Analyst", source="simplify", ats="greenhouse",
+              url="https://careers.example.test/jobs?gh_jid=123",
+              apply_url="https://job-boards.greenhouse.io/example/jobs/123", description="Python")
+    db.upsert_jobs([row])
+    with db.conn() as c:     # a key saved before job_fingerprint knew this kind of link
+        c.execute("UPDATE jobs SET canonical_key=? WHERE id=?", ("https://careers.example.test/jobs", row.id))
+    fresh = row.model_copy(update={"title": "Data Analyst"})
+    assert db.refresh_job_metadata(row.id, fresh).title == "Data Analyst"
+    with db.conn() as c:
+        assert c.execute("SELECT canonical_key FROM jobs WHERE id=?", (row.id,)).fetchone()[0] == "greenhouse:example:123"
+    other = row.model_copy(update={"apply_url": "https://job-boards.greenhouse.io/example/jobs/999",
+                                   "url": "https://job-boards.greenhouse.io/example/jobs/999"})
+    with pytest.raises(ValueError):
+        db.refresh_job_metadata(row.id, other)

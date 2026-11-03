@@ -54,6 +54,14 @@ CREATE TABLE IF NOT EXISTS mail_events (
 CREATE TABLE IF NOT EXISTS mail_seen (
   message_key TEXT PRIMARY KEY, rules INTEGER, seen_at TEXT
 );
+-- Postings JARVIS left for the candidate, with the draft's updated_at then, so it is not retried every cycle.
+CREATE TABLE IF NOT EXISTS jarvis_holds (
+  job_id TEXT PRIMARY KEY, reason TEXT, held_at REAL, until REAL, draft_updated TEXT DEFAULT ''
+);
+-- Luna's reading of an email the rules could not settle (hashed key, stage, employer), so it is asked once.
+CREATE TABLE IF NOT EXISTS mail_luna (
+  message_key TEXT PRIMARY KEY, stage TEXT, company TEXT, read_at TEXT
+);
 CREATE TABLE IF NOT EXISTS resume_files (
   id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT UNIQUE, label TEXT, category TEXT DEFAULT 'general',
   is_default INTEGER DEFAULT 0, added_at TEXT, enabled INTEGER DEFAULT 1, removed INTEGER DEFAULT 0
@@ -188,7 +196,9 @@ def init() -> None:
             "runs": {"worker_pid": "INTEGER"},
             "resume_files": {"enabled": "INTEGER DEFAULT 1", "removed": "INTEGER DEFAULT 0"},
             # message_id: the email's Message-ID header, so the candidate can open that email.
-            "mail_events": {"message_id": "TEXT DEFAULT ''"},
+            "mail_events": {"message_id": "TEXT DEFAULT ''",
+                            # employer: who the email is from, for listing one no application matches.
+                            "employer": "TEXT DEFAULT ''"},
         }.items():
             existing = {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}
             for name, definition in fields.items():
@@ -406,14 +416,19 @@ def refresh_job_metadata(job_id: str, fresh: Job) -> Job:
             raise ValueError("Job not found")
         key = job_fingerprint(fresh)
         if row["canonical_key"] and row["canonical_key"] != key:
-            raise ValueError("Refreshed posting does not match the stored vacancy")
+            # Keys saved before job_fingerprint knew a board (Workable, Rippling, a careers page
+            # linked to Greenhouse) are plain URLs. The stored posting itself still identifies the
+            # vacancy, so compare its current fingerprint; a real mismatch still stops here.
+            stored = c.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if job_fingerprint(_job_from_row(stored)) != key:
+                raise ValueError("Refreshed posting does not match the stored vacancy")
         c.execute(
             "UPDATE jobs SET source=?, ats=?, company=?, title=?, location=?, remote=?, "
             "salary_min=?, salary_max=?, url=?, apply_url=?, description=?, posted_at=?, posted_ts=?, raw=?, "
-            "updated_at=? WHERE id=?",
+            "updated_at=?, canonical_key=? WHERE id=?",
             (fresh.source, fresh.ats, fresh.company, fresh.title, fresh.location, int(fresh.remote),
              fresh.salary_min, fresh.salary_max, fresh.url, fresh.apply_url, fresh.description,
-             fresh.posted_at, posted_epoch(fresh.posted_at), json.dumps(fresh.raw), now_iso(), job_id),
+             fresh.posted_at, posted_epoch(fresh.posted_at), json.dumps(fresh.raw), now_iso(), key, job_id),
         )
     return get_job(job_id)
 
@@ -423,6 +438,47 @@ def jobs_changed_since(stamp: str) -> list[Job]:
     with reader() as c:
         rows = c.execute("SELECT * FROM jobs WHERE updated_at >= ?", (stamp,)).fetchall()
     return [_job_from_row(r) for r in rows]
+
+
+def hold_for_jarvis(job_id: str, reason: str, seconds: float) -> bool:
+    """Set a posting aside for the candidate for ``seconds``. Returns True when it was not
+    already set aside for the same reason (so the activity log says it once, not every cycle)."""
+    import time as _time
+    now = _time.time()
+    with conn() as c:
+        draft = c.execute("SELECT updated_at FROM drafts WHERE job_id=?", (job_id,)).fetchone()
+        stamp = (draft["updated_at"] or "") if draft else ""
+        before = c.execute("SELECT reason FROM jarvis_holds WHERE job_id=?", (job_id,)).fetchone()
+        c.execute("INSERT INTO jarvis_holds(job_id, reason, held_at, until, draft_updated) VALUES (?,?,?,?,?) "
+                  "ON CONFLICT(job_id) DO UPDATE SET reason=excluded.reason, held_at=excluded.held_at, "
+                  "until=excluded.until, draft_updated=excluded.draft_updated",
+                  (job_id, reason[:300], now, now + seconds, stamp))
+    return before is None or before["reason"] != reason[:300]
+
+
+def jarvis_holds(job_ids) -> dict[str, tuple[float, str]]:
+    """(set aside until, draft updated_at then) for the given jobs JARVIS set aside."""
+    ids = list(job_ids)
+    found: dict[str, tuple[float, str]] = {}
+    with reader() as c:
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            found.update((r[0], (r[1] or 0.0, r[2] or "")) for r in c.execute(
+                f"SELECT job_id, until, draft_updated FROM jarvis_holds WHERE job_id IN ({','.join('?' * len(chunk))})",
+                chunk))
+    return found
+
+
+def draft_stamps(job_ids) -> dict[str, str]:
+    """Each draft's updated_at by job, so a set-aside posting returns once the candidate edits it."""
+    ids = list(job_ids)
+    found: dict[str, str] = {}
+    with reader() as c:
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            found.update((r[0], r[1] or "") for r in c.execute(
+                f"SELECT job_id, updated_at FROM drafts WHERE job_id IN ({','.join('?' * len(chunk))})", chunk))
+    return found
 
 
 def recent_company_attempts(days: float) -> dict[str, int]:
@@ -1348,7 +1404,7 @@ def add_manual_application(*, company: str, title: str, url: str = "", location:
 
 # ---------------- inbox events ----------------
 def record_mail_event(*, message_key: str, received_at: str, sender: str, subject: str, stage: str,
-                      application_id: int | None, confidence: float, message_id: str = "") -> bool:
+                      application_id: int | None, confidence: float, message_id: str = "", employer: str = "") -> bool:
     """Store only the sender, subject, date, Message-ID, and classification; never message bodies.
 
     A message read again with a better classification or match replaces its row
@@ -1356,12 +1412,14 @@ def record_mail_event(*, message_key: str, received_at: str, sender: str, subjec
     with conn() as c:
         cur = c.execute(
             "INSERT INTO mail_events(message_key, received_at, sender, subject, stage, application_id, "
-            "confidence, created_at, message_id) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(message_key) DO UPDATE SET "
-            "stage=excluded.stage, application_id=excluded.application_id, confidence=excluded.confidence, "
+            "confidence, created_at, message_id, employer) VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(message_key) "
+            "DO UPDATE SET stage=excluded.stage, application_id=excluded.application_id, "
+            "confidence=excluded.confidence, employer=excluded.employer, "
             "message_id=COALESCE(NULLIF(excluded.message_id, ''), mail_events.message_id) "
-            "WHERE mail_events.stage IS NOT excluded.stage OR mail_events.application_id IS NOT excluded.application_id",
+            "WHERE mail_events.stage IS NOT excluded.stage OR mail_events.application_id IS NOT excluded.application_id "
+            "OR COALESCE(mail_events.employer, '') != excluded.employer",
             (message_key, received_at, sender[:320], subject[:300], stage, application_id, confidence, now_iso(),
-             message_id[:500]))
+             message_id[:500], employer[:120]))
         return bool(cur.rowcount)
 
 
@@ -1400,6 +1458,48 @@ def prune_mail_seen(rules: int, before: str) -> None:
     """Forget keys from older rules or older than the lookback window."""
     with conn() as c:
         c.execute("DELETE FROM mail_seen WHERE rules IS NOT ? OR seen_at < ?", (rules, before))
+        c.execute("DELETE FROM mail_luna WHERE read_at < ?", (before,))
+
+
+def dismiss_mail_event(message_key: str) -> int | None:
+    """Set aside a recorded email that turned out not to be about an application.
+    Returns the application it was linked to, so its stage can be recomputed."""
+    with conn() as c:
+        row = c.execute("SELECT application_id FROM mail_events WHERE message_key=? AND dismissed=0",
+                        (message_key,)).fetchone()
+        if row is None:
+            return None
+        c.execute("UPDATE mail_events SET dismissed=1 WHERE message_key=?", (message_key,))
+        return row["application_id"]
+
+
+def mail_luna_readings() -> dict[str, tuple[str | None, str]]:
+    """Luna's earlier readings by message key: (stage or None, employer)."""
+    with conn() as c:
+        return {r["message_key"]: (r["stage"] or None, r["company"] or "")
+                for r in c.execute("SELECT message_key, stage, company FROM mail_luna").fetchall()}
+
+
+def save_mail_luna_readings(readings: list[tuple[str, str, str]]) -> None:
+    """Keep (message key, stage, employer) so Luna never reads the same email twice."""
+    if not readings:
+        return
+    stamp = now_iso()
+    with conn() as c:
+        c.executemany("INSERT INTO mail_luna(message_key, stage, company, read_at) VALUES (?,?,?,?) "
+                      "ON CONFLICT(message_key) DO UPDATE SET stage=excluded.stage, company=excluded.company",
+                      [(key, stage, company[:120], stamp) for key, stage, company in readings])
+
+
+def unmatched_stage_mail(days: int = 30) -> list[dict]:
+    """Assessments, interviews, and offers in recent mail that no tracked application matched."""
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+    with reader() as c:
+        rows = c.execute(
+            "SELECT id, received_at, sender, subject, stage, message_id, employer FROM mail_events "
+            "WHERE application_id IS NULL AND dismissed=0 AND stage IN ('assessment', 'interview', 'offer') "
+            "AND received_at >= ? ORDER BY received_at DESC", (since,)).fetchall()
+    return [dict(r) for r in rows]
 
 
 def known_mail_keys() -> dict[str, tuple[str, int | None]]:

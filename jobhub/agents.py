@@ -319,15 +319,19 @@ def complete(prompt: str, settings: dict, *, timeout: int = 120) -> str:
     with _call_slots:
         # Past the first call, wait while the computer is busy so it stays responsive.
         wait_for_headroom(lambda: _calls_running, max_wait=300)
-        from .jarvis import active
-        limit = MAX_AGENT_CALLS // 2 if active(settings) else MAX_AGENT_CALLS
+        from . import jarvis
+        active = jarvis.active(settings)
+        boost = jarvis.plus(settings)
+        # NEW and ALL halve the agent-process ceiling; ALL+ uses all of it.
+        limit = MAX_AGENT_CALLS // 2 if active and not boost else MAX_AGENT_CALLS
         with _calls_changed:
             while _calls_running >= limit:
                 _calls_changed.wait(timeout=1)
             _calls_running += 1
         try:
             from .governor import busy
-            if active(settings) and busy():
+            if active and (busy(load_per_core=jarvis.PLUS_LOAD_PER_CORE, min_free=jarvis.PLUS_MIN_FREE_MEMORY)
+                           if boost else busy()):
                 raise AgentError("JARVIS deferred this AI call while the computer is busy")
             return _complete(prompt, settings, timeout)
         finally:
@@ -463,6 +467,11 @@ def _antigravity_cli(prompt: str, model: str, timeout: int) -> str:
             home = None
         if home is not None:
             env["HOME"] = str(home)
+            # agy saves each hourly token refresh to the macOS Keychain, and every save asks
+            # the user to approve it; unattended, those dialogs pile up overnight. With an SSH
+            # session marker agy saves to its token file (linked above) instead. It still
+            # reads the Keychain copy, which needs no approval.
+            env.setdefault("SSH_CONNECTION", "127.0.0.1 0 127.0.0.1 0")
         result = subprocess.run(command, capture_output=True, text=True, timeout=timeout,
                                 env=env, cwd=str(scratch))
         try:

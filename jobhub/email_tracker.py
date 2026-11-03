@@ -45,6 +45,12 @@ def provider_for(host: str) -> str:
 
 
 # ------------------------------------------------------------------ classification
+# Assessment platforms, by the names and domains their invitations use. "Suited" and
+# "Litmus" are also ordinary words, so only their domains count.
+_PLATFORMS = (r"\b(?:hackerrank|codesignal|codility|hirevue|karat|testgorilla|coderpad|qualified\.io|coderbyte|"
+              r"litmus\.build|criteriacorp|shl\b|pymetrics|harver\b|mettl|imocha|hackerearth|vervoe|codescreen|"
+              r"devskiller|cappfinity|arctic shores|plum\.io|wearesuited|suited\.com|modern ?hire|"
+              r"spark ?hire|wonderlic|canditech|alva labs|equalture)")
 _SIGNALS: dict[str, tuple[tuple[str, float], ...]] = {
     "offer": ((r"\boffer letter\b", 4), (r"pleased to (?:extend|offer)", 4), (r"extend (?:you )?an offer", 4),
               (r"\bverbal offer\b", 3), (r"offer of employment", 4)),
@@ -54,27 +60,37 @@ _SIGNALS: dict[str, tuple[tuple[str, float], ...]] = {
                  (r"candidates? whose (?:background|experience|skills|qualifications)[^.]{0,80}(?:better|more closely)", 3.5),
                  (r"not (?:been )?selected", 3), (r"regret to inform", 3.5), (r"position has been filled", 3),
                  (r"no longer (?:under )?consider", 3), (r"will not be (?:moving|proceeding|advancing)", 3.5),
-                 (r"other applicants whose", 3), (r"(?:do|does) not qualify", 3), (r"decided to (?:pursue|go with|move ahead with) other", 3.5), (r"unable to (?:offer|move forward)", 3)),
+                 (r"other applicants whose", 3), (r"(?:do|does) not qualify", 3), (r"decided to (?:pursue|go with|move ahead with) other", 3.5), (r"unable to (?:offer|move forward)", 3),
+                 (r"not (?:the|a) (?:right |good |strong )?(?:fit|match) (?:for|at) this time|not the right fit", 3),
+                 (r"(?:decided|chosen) not to (?:move|proceed|advance|continue)", 3.5),
+                 (r"won't be (?:moving|proceeding|advancing)", 3.5)),
     "interview": ((r"\binterview(?:s|ing)?\b", 1.6), (r"schedule (?:a|an|your|some) (?:time|call|interview|chat)", 3),
                   (r"phone screen", 3), (r"(?:recruiter|technical) (?:call|screen)", 2.5), (r"\bonsite\b|on-site interview", 2.5),
                   (r"\bsuperday\b", 3.5), (r"calendly\.com|goodtime\.io|availability for", 2.5),
                   (r"invite you to (?:a |an )?(?:interview|call|chat|meet)", 3.5), (r"next round", 2)),
-    "assessment": ((r"online assessment|\boa\b", 3), (r"coding (?:challenge|assessment|test)", 3.2),
-                   (r"hackerrank|codesignal|codility|hirevue|karat|testgorilla|coderpad|qualified\.io", 3.5),
-                   (r"take[- ]home", 3), (r"technical (?:assessment|challenge|exercise)", 3), (r"complete the assessment", 3)),
+    "assessment": ((r"online (?:[\w-]+ ){0,2}(?:assessments?|tests?|challenges?)|\boa\b", 3),
+                   (r"coding (?:challenge|assessment|test)", 3.2), (_PLATFORMS, 3.5), (r"take[- ]home", 3),
+                   (r"technical (?:assessment|challenge|exercise)", 3),
+                   # "complete your assessments", "take two short assessments", "start the HackerRank test"
+                   (r"(?:complete|take|start|begin|access|finish) (?:the |this |your |my |our |an? |two |both |these )?"
+                    r"(?:(?!for |a )[\w-]+ ){0,3}(?:assessments?|challenges?|tests?)\b", 3),
+                   (r"invit\w* (?:by [^.\n]{1,40} )?to (?:complete|take|start)", 3),
+                   (r"assessments? (?:invitation|link|request|expire|deadline|due|reminder)|(?:pre-recruiting|"
+                    r"pre-employment|pre-screening|cognitive|aptitude|psychometric) (?:assessment|test)", 3)),
     "applied": ((r"thank you for (?:applying|your application|your interest)", 2.4),
                 (r"(?:application|submission) (?:has been |was )?(?:received|submitted)", 2.6),
                 (r"received your application", 3), (r"thanks for applying", 2.8)),
 }
 _PRIORITY = ("offer", "rejected", "interview", "assessment", "applied")
+# Subjects and senders worth downloading. Reading a body costs no tokens, so this errs wide.
 _RECRUITING_HINT = re.compile(
     r"application|applying|applied|candida|recruit|interview|assessment|position|role|opportunit|offer|hiring|talent|"
-    r"your interest|update|careers|greenhouse|lever\.co|ashbyhq|workday|hackerrank|codesignal|codility", re.I)
+    r"your interest|update|careers|greenhouse|lever\.co|ashbyhq|workday|next step|invit|challenge|"
+    r"action required|reminder|deadline|expir|" + _PLATFORMS, re.I)
 # "If you move forward, the next stage is an assessment" describes the process; it is not an invitation.
 _CONDITIONAL_CLAUSE = re.compile(r"\b(?:if|should|whether|in case|once|when)\b[^.!?\n]{0,160}")
 # What an actual invitation asks the candidate to do. An acknowledgement ("thanks for applying")
 # moves an application forward only with one of these, not by describing later stages.
-_PLATFORMS = r"(?:hackerrank|codesignal|codility|hirevue|karat|testgorilla|coderpad|qualified\.io)"
 # Describing an assessment that may come later ("you will receive a HackerRank challenge",
 # "our process includes a coding test") is not an invitation to one. Read only for the
 # assessment stage: "you'll receive an offer letter" is still an offer.
@@ -83,7 +99,10 @@ _PROSPECTIVE_CLAUSE = re.compile(
     r"(?:may|might|will) be (?:asked|invited|required|sent)|"
     r"(?:our|the|this) (?:recruiting|hiring|interview|selection|application) process (?:includes|consists|involves|"
     r"may include|typically|usually|will)|(?:roles|positions) (?:include|typically include|may include)|"
-    r"next steps? (?:will |may |could |might )?(?:include|involve|consist))[^.!?\n]{0,200}")
+    r"next steps? (?:will |may |could |might )?(?:include|involve|consist))[^.!?\n]{0,200}|"
+    # Roblox: "here's a quick overview of what to expect next:\n\n* Complete our Assessments: If ..."
+    # runs past the line break into its bulleted list.
+    r"(?:what to expect|overview of (?:our|the) (?:process|next steps))[^.!?]{0,200}")
 _INVITATION = {
     # A platform's name alone is not an invitation: Akuna's acknowledgements (2026-10) name
     # HackerRank while describing their process. An invitation links to, or invites to, the test.
@@ -91,7 +110,10 @@ _INVITATION = {
                              r"(?:invit|link|click)[^.\n]{0,60}" + _PLATFORMS + r"|"
                              r"(?:complete|start|take|begin|access)\s+(?:the|this|your|an?|our)\s[^.\n]{0,40}"
                              r"(?:assessment|challenge|test|exercise)|(?:assessment|challenge) link|"
-                             r"invited? (?:you )?to (?:complete|take)"),
+                             r"invited? (?:you )?to (?:complete|take)|"
+                             # Akuna: "happy to move forward with the process ..., which is an online coding assessment"
+                             r"(?:move|moving) forward[^.\n]{0,100}(?:assessment|challenge)|"
+                             r"next step[^.\n]{0,80}(?:assessment|challenge)"),
     "interview": re.compile(r"schedule (?:a|an|your|some) (?:time|call|interview|chat)|phone screen|calendly\.com|"
                             r"goodtime\.io|availability for|invite you to|\bsuperday\b|book (?:a|your) (?:time|slot)"),
     "offer": re.compile(r"offer letter|pleased to (?:extend|offer)|extend (?:you )?an offer|offer of employment"),
@@ -148,13 +170,61 @@ def _words(text: str) -> str:
     return " " + " ".join(re.findall(r"[a-z0-9]+", (text or "").lower())) + " "
 
 
-def match_application(sender: str, subject: str, body: str, applications: list[dict]) -> dict | None:
+# Mailbox words, not employers: "DO-NOT-REPLY@criteriacorp.com" once matched a company named "Reply".
+_SENDER_NOISE = re.compile(r"\b(?:do[-_. ]?not[-_. ]?reply|no[-_. ]?reply|noreply|reply|notifications?|mailer|"
+                           r"hiring team|talent team|recruiting team)\b")
+_TITLE_WORDS = re.compile(r"[a-z0-9+#]+")
+_TITLE_FILLER = frozenset("and of the for a an in at to with new grad senior junior i ii iii iv 2026 2027".split())
+
+
+def _same_employer(a: str, b: str) -> bool:
+    """One tracked employer under two names ("Akuna Capital", "Akuna Capital University")."""
+    a, b = _norm_company(a), _norm_company(b)
+    return bool(a and b) and (a == b or a.startswith(b + " ") or b.startswith(a + " ")
+                              or a.replace(" ", "") == b.replace(" ", ""))
+
+
+def _title_overlap(title: str, text: str) -> float:
+    """Share of a title's distinctive words that appear in the message."""
+    words = {w for w in _TITLE_WORDS.findall((title or "").lower()) if w not in _TITLE_FILLER}
+    if not words:
+        return 0.0
+    present = set(_TITLE_WORDS.findall(text))
+    return len(words & present) / len(words)
+
+
+def _sent_at(app: dict) -> datetime | None:
+    try:
+        stamp = datetime.fromisoformat(str(app.get("finished_at") or app.get("started_at") or ""))
+    except ValueError:
+        return None
+    return stamp if stamp.tzinfo else stamp.replace(tzinfo=timezone.utc)
+
+
+def _latest_before(apps: list[dict], received: datetime | None) -> dict:
+    """The application sent most recently before the email arrived.
+
+    Plain "newest" moved an email every time another application to that employer
+    was sent later (Netic's assessment invitations arrive seconds after each
+    application), so stages flipped back to Applied on every check."""
+    dated = [(stamp, app) for app in apps if (stamp := _sent_at(app)) is not None]
+    if received is not None and dated:
+        before = [(stamp, app) for stamp, app in dated if stamp <= received]
+        if before:
+            return max(before, key=lambda item: item[0])[1]
+        return min(dated, key=lambda item: item[0])[1]   # clock skew: the earliest one
+    return max(apps, key=lambda app: str(app.get("finished_at") or app.get("started_at") or ""))
+
+
+def match_application(sender: str, subject: str, body: str, applications: list[dict],
+                      received: datetime | None = None) -> dict | None:
     """The single tracked application this message is about, or None when unsure."""
     sender_l, subject_l, body_l = sender.lower(), subject.lower(), body[:6000].lower()
     domain = sender_l.rpartition("@")[-1]
     domain_labels = set(re.findall(r"[a-z0-9]+", domain.replace("-", "")))
-    sender_w, subject_w, body_w = _words(sender_l), _words(subject_l), _words(body_l)
+    sender_w, subject_w, body_w = _words(_SENDER_NOISE.sub(" ", sender_l)), _words(subject_l), _words(body_l)
     sender_compact = sender_w.replace(" ", "")
+    subject_compact = subject_w.replace(" ", "")
     ranked: list[tuple[float, dict]] = []
     for app in applications:
         company = _norm_company(re.sub(r"\s+-\s+external\b.*$", "", str(app.get("company") or ""), flags=re.I))
@@ -169,7 +239,7 @@ def match_application(sender: str, subject: str, body: str, applications: list[d
         if (needle in sender_w or (len(compact) >= 4 and compact in domain.replace("-", ""))
                 or (len(compact) >= 6 and compact in sender_compact) or (lead_ok and lead in domain_labels)):
             score += 3
-        if needle in subject_w:
+        if needle in subject_w or (len(compact) >= 6 and compact in subject_compact):   # "Eight Sleep" for "Eightsleep"
             score += 2.5
         elif lead_ok and f" {lead} " in subject_w:
             score += 2
@@ -186,14 +256,19 @@ def match_application(sender: str, subject: str, body: str, applications: list[d
     best_score, best = ranked[0]
     if best_score < 2.5:
         return None
-    # Several applications at the same employer: prefer a title match, else the newest.
-    same = [app for score, app in ranked if _norm_company(app.get("company") or "") == _norm_company(best.get("company") or "")]
+    # Several applications at the same employer: prefer the role the message names, else the newest.
+    same = [app for score, app in ranked if _same_employer(app.get("company") or "", best.get("company") or "")]
     if len(same) > 1:
         titled = [app for app in same if str(app.get("title") or "").lower() in f"{subject_l} {body_l}"]
         if len(titled) == 1:
             return titled[0]
-        return max(same, key=lambda app: str(app.get("finished_at") or app.get("started_at") or ""))
-    others = [score for score, app in ranked[1:] if _norm_company(app.get("company") or "") != _norm_company(best.get("company") or "")]
+        text = f"{subject_l} {body_l}"
+        overlaps = sorted(((_title_overlap(str(app.get("title") or ""), text), app) for app in same),
+                          key=lambda item: -item[0])
+        if overlaps[0][0] >= 0.75 and (len(overlaps) == 1 or overlaps[1][0] < overlaps[0][0]):
+            return overlaps[0][1]
+        return _latest_before(same, received)
+    others = [score for score, app in ranked[1:] if not _same_employer(app.get("company") or "", best.get("company") or "")]
     if others and others[0] >= best_score:
         return None   # names two employers equally; let the candidate decide
     return best
@@ -236,7 +311,7 @@ _RECONNECTS = 3
 _CONNECTION_ERRORS = (imaplib.IMAP4.abort, OSError)   # includes timeouts, SSL, DNS, and broken pipes
 # Bump when ``classify``, ``_RECRUITING_HINT`` or the Luna reading changes, so mail
 # already read and set aside (``db.mark_mail_seen``) is read again under the new rules.
-RULES_VERSION = 2
+RULES_VERSION = 3
 OFFLINE = "Couldn't reach your mail server"
 
 
@@ -404,12 +479,13 @@ def test_mailbox(verification_settings: dict) -> tuple[bool, str]:
         return False, str(error)[:240]
 
 
-def sync(settings: dict | None = None, *, messages=None, archiver=None) -> SyncReport:
+def sync(settings: dict | None = None, *, messages=None, archiver=None, luna_now: bool = False) -> SyncReport:
     """Classify recent mail and advance matching applications.
 
     With ``email_tracking.archive_rejections`` on, a rejection is archived once it
     names one tracked application whose stage is Rejected. ``messages`` and
-    ``archiver`` are for tests."""
+    ``archiver`` are for tests. Luna reads unsettled emails in full batches, or at once with
+    ``luna_now`` (a check the candidate asked for)."""
     settings = settings or db.get_settings()
     tracking = settings.get("email_tracking") or {}
     days = int(tracking.get("lookback_days", 30))
@@ -427,7 +503,8 @@ def sync(settings: dict | None = None, *, messages=None, archiver=None) -> SyncR
     rejections: list[tuple[bytes, str, int]] = []   # (uid, Message-ID, application id) still in the Inbox
     set_aside: list[str] = []
     try:
-        _read(source, report, tracking, settings, applications, known, without_id, rejections, seen, set_aside, rules)
+        _read(source, report, tracking, settings, applications, known, without_id, rejections, seen, set_aside, rules,
+              luna_now)
     finally:
         db.mark_mail_seen(set_aside, rules)   # keep progress even when the connection drops
     if tracking.get("archive_rejections") and rejections:
@@ -435,8 +512,70 @@ def sync(settings: dict | None = None, *, messages=None, archiver=None) -> SyncR
     return report
 
 
+# Luna reads only what the rules cannot settle, many emails per call (each agy call
+# carries ~8k tokens of its own before the first email), and never the same email twice.
+LUNA_BATCH = 20
+# Scheduled checks wait for a full batch, but never longer than this; a manual check asks at once.
+LUNA_WAIT = timedelta(hours=4)
+# Phrases that ask the candidate to do something or close the application. Words alone fire on
+# company slogans ("national security challenges") and on lists of platform links, so links are
+# removed first and only these phrases count (2026-10 inbox: 45 of 1,357 recruiting emails).
+_LATER_STAGE_CUE = re.compile(
+    r"(?:complete|take|start|begin|finish|access)\b[^.\n]{0,60}\b(?:assessments?|challenge|tests?)\b|"
+    r"assessments? (?:link|invitation)|invit\w* (?:you )?to (?:complete|take|interview|schedule|meet|a |an )|"
+    r"schedul\w* (?:a|an|your|some)\b|your availability|(?:decided|chosen) (?:not|to (?:move|pursue|proceed))|"
+    r"not (?:be )?(?:moving|proceeding|selected|advancing)|other candidates|not (?:the right|a) (?:fit|match)", re.I)
+_LINK = re.compile(r"\(?\s*https?://\S+\s*\)?")
+_APPLICATION_CUE = re.compile(r"your (?:application|candidacy|submission)|applied|applying|assessment|interview|"
+                              r"challenge|position|\brole\b|recruit|hiring", re.I)
+
+
+# Job alerts and digests list other people's openings; "interview" in them is never about the candidate.
+_JOB_ALERT_SENDER = re.compile(r"jobalerts?|job-alerts?|jobs-listings@linkedin|jobs-noreply@linkedin|alert@indeed|"
+                               r"@match\.indeed|noreply@glassdoor|alerts@ziprecruiter|@notifications\.joinhandshake|"
+                               r"jobs@simplify", re.I)
+
+
+def _needs_luna(stage: str | None, app: dict | None, subject: str, body: str) -> bool:
+    """Whether a second reading could change what the rules found."""
+    if stage in ("assessment", "interview", "offer"):
+        return app is None   # a real step for an employer the rules could not name
+    if stage not in (None, "applied"):
+        return False
+    text = _LINK.sub(" ", f"{subject}\n{body[:3000]}")
+    current = _PROSPECTIVE_CLAUSE.sub(" ", _CONDITIONAL_CLAUSE.sub(" ", text.lower()))
+    if stage is None and not (_RECRUITING_HINT.search(subject) and _APPLICATION_CUE.search(text)):
+        return False
+    return bool(_LATER_STAGE_CUE.search(current))
+
+
+_HINT_FROM = re.compile(r"(?:\bfrom|\bwith|\bat|\bto)\s+([A-Z][\w&.'-]*(?:\s+[A-Z][\w&.'-]*){0,3})")
+_HINT_INVITES = re.compile(r"^([A-Z][\w&.'-]*(?:\s+[A-Z][\w&.'-]*){0,3})\s+(?:invites|has invited|would like)")
+_SENDER_ROLE = re.compile(r"\b(?:hiring|talent|recruiting|recruitment|careers?|team|early|support|assessments?|"
+                          r"university|campus|no-?reply|do-not-reply|the)\b", re.I)
+
+
+def employer_hint(sender: str, subject: str) -> str:
+    """The employer an email seems to come from, for listing it when no application matches."""
+    subject = re.sub(r"^\s*(?:\[[^\]]*\]\s*|(?:re|fwd?):\s*)+", "", subject or "", flags=re.I)
+    for pattern in (_HINT_INVITES, _HINT_FROM):
+        found = pattern.search(subject)
+        if found and found.group(1).lower() not in {"the", "your", "our", "a", "an"}:
+            return found.group(1).strip(" .!-")
+    name, address = (getaddresses([sender or ""]) or [("", "")])[0]
+    name = _SENDER_ROLE.sub(" ", name).strip(" -|,\"'")
+    if len(name) >= 2 and "@" not in name:
+        return " ".join(name.split())
+    domain = (address or sender or "").rpartition("@")[-1].split(".")
+    labels = [label for label in domain[:-1] if label not in {"mail", "email", "us", "eu", "noreply", "careers", "jobs"}]
+    return labels[-1].title() if labels else ""
+
+
 def _read(source, report, tracking, settings, applications, known, without_id, rejections, seen, set_aside,
-          rules) -> None:
+          rules, luna_now: bool = False) -> None:
+    luna = bool(tracking.get("use_luna")) and _luna_ready(settings)
+    asked = db.mail_luna_readings() if luna else {}
+    pending: list[dict] = []
     for uid, message, body in source:
         report.scanned += 1
         if body is None:
@@ -451,61 +590,124 @@ def _read(source, report, tracking, settings, applications, known, without_id, r
         senders = getaddresses([sender_header])
         sender = " ".join(part for pair in senders for part in pair if part) or sender_header
         stage, confidence = classify(subject, body)
-        if stage is None and key in known:
-            continue   # read before (perhaps by Luna); keep that reading instead of asking again
-        if stage is None and tracking.get("use_luna") and _RECRUITING_HINT.search(subject):
-            try:
-                from .luna import classify_email
-                stage = classify_email(subject, body, settings)
-                confidence = 0.6 if stage else 0.0
-            except Exception:  # noqa: BLE001 - optional second opinion
-                stage = None
-        if stage is None:
-            if key not in seen and key not in known:
-                set_aside.append(key)
-                if len(set_aside) >= 100:
-                    db.mark_mail_seen(set_aside, rules)
-                    seen.update(set_aside)
-                    set_aside.clear()
+        if _JOB_ALERT_SENDER.search(sender_header):
+            if key in known:   # read as an update by older rules
+                linked = db.dismiss_mail_event(key)
+                if linked is not None:
+                    db.restage_from_mail(int(linked))
             continue
-        report.recruiting += 1
+        item = {"uid": uid, "key": key, "message": message, "message_id": message_id, "subject": subject,
+                "sender": sender, "sender_header": sender_header, "body": body, "stage": stage,
+                "confidence": confidence, "company": ""}
+        app = match_application(sender, subject, body, applications, _received(message)) if stage else None
+        if luna and _needs_luna(stage, app, subject, body):
+            if key in asked:
+                _merge_luna(item, *asked[key])
+            else:
+                pending.append(item)
+                if stage is None:
+                    continue   # not set aside, so the next check reads it again until Luna has
+        _apply(item, report, applications, known, rejections, seen, set_aside, rules)
+    if pending and not luna_now and len(pending) < LUNA_BATCH:
+        oldest = min((_received(item["message"]) for item in pending), default=None)
+        if oldest and datetime.now(timezone.utc) - oldest < LUNA_WAIT:
+            return   # a few emails wait for a fuller, cheaper batch
+    for start in range(0, len(pending), LUNA_BATCH):
+        batch = pending[start:start + LUNA_BATCH]
         try:
-            received = parsedate_to_datetime(str(message.get("Date"))).astimezone(timezone.utc).isoformat(timespec="seconds")
-        except (TypeError, ValueError, OverflowError):
-            received = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        app = match_application(sender, subject, body, applications)
-        app_id = int(app["id"]) if app else None
-        if stage == "rejected" and app_id is not None and message_id:
-            rejections.append((uid, message_id, app_id))
-        # A message already read the same way is done. One read differently, by a
-        # better rule or because its application is now tracked, is applied again.
-        if known.get(key) == (stage, app_id):
-            continue
-        previous = known.get(key)
-        db.record_mail_event(message_key=key, received_at=received, sender=sender, subject=subject, stage=stage,
-                             application_id=app_id, confidence=confidence, message_id=message_id)
-        known[key] = (stage, app_id)
-        # A message read differently no longer vouches for the stage it set before.
-        restaged = db.restage_from_mail(int(previous[1])) if previous and previous[1] is not None else None
-        if restaged:
-            for tracked in applications:
-                if int(tracked["id"]) == int(previous[1]):
-                    tracked["stage"] = restaged
-                    db.add_event(f"Inbox correction: {tracked.get('company')} · {tracked.get('title')} → "
-                                 f"{tracked['stage']}", "info", tracked.get("job_id"))
-        if app is None:
-            report.unmatched.append({"sender": sender, "subject": subject, "stage": stage})
-            continue
-        try:
-            changed = db.set_application_stage(int(app["id"]), stage, "email")
-        except ValueError:
-            changed = False
-        if changed:
-            app["stage"] = stage
-            report.updates.append({"application_id": app["id"], "company": app.get("company"),
-                                   "title": app.get("title"), "stage": stage})
-            db.add_event(f"Inbox update: {app.get('company')} · {app.get('title')} → {stage}", "success"
-                         if stage in ("interview", "offer", "assessment") else "info", app.get("job_id"))
+            from .luna import classify_emails
+            readings = classify_emails([{"sender": i["sender_header"], "subject": i["subject"], "body": i["body"]}
+                                        for i in batch], settings)
+        except Exception:  # noqa: BLE001 - optional second opinion; the rules' reading stands
+            readings = [None] * len(batch)
+        answered = []
+        for item, reading in zip(batch, readings):
+            before = item["stage"]
+            if reading is not None:
+                answered.append((item["key"], reading.get("stage") or "", reading.get("company") or ""))
+                _merge_luna(item, reading.get("stage"), reading.get("company"))
+            if before is None or item["stage"] != before or item["company"]:
+                _apply(item, report, applications, known, rejections, seen, set_aside, rules,
+                       counted=before is not None)
+        db.save_mail_luna_readings(answered)
+
+
+def _received(message) -> datetime | None:
+    try:
+        return parsedate_to_datetime(str(message.get("Date"))).astimezone(timezone.utc)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _luna_ready(settings: dict) -> bool:
+    try:
+        from .agents import status
+        return status(str((settings.get("agent") or {}).get("backend") or "none")).ready
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _merge_luna(item: dict, stage: str | None, company: str | None) -> None:
+    """Luna can name a stage the rules missed or an employer they could not match; it never demotes."""
+    if stage in ("assessment", "interview", "offer", "rejected") and item["stage"] in (None, "applied"):
+        item["stage"], item["confidence"] = stage, 0.6
+    elif stage == "applied" and item["stage"] is None:
+        item["stage"], item["confidence"] = stage, 0.5
+    item["company"] = (company or "").strip()[:80]
+
+
+def _apply(item: dict, report, applications, known, rejections, seen, set_aside, rules, counted: bool = False) -> None:
+    key, stage, subject, sender, body = item["key"], item["stage"], item["subject"], item["sender"], item["body"]
+    message, message_id = item["message"], item["message_id"]
+    if stage is None:
+        if key not in seen and key not in known:
+            set_aside.append(key)
+            if len(set_aside) >= 100:
+                db.mark_mail_seen(set_aside, rules)
+                seen.update(set_aside)
+                set_aside.clear()
+        return
+    report.recruiting += not counted
+    received = (_received(message) or datetime.now(timezone.utc)).isoformat(timespec="seconds")
+    arrived = _received(message)
+    app = match_application(sender, subject, body, applications, arrived)
+    if app is None and item["company"]:   # the employer Luna named, read as if the subject said it
+        app = match_application(f"{sender} {item['company']}", f"{subject} · {item['company']}", body, applications,
+                                arrived)
+    app_id = int(app["id"]) if app else None
+    if stage == "rejected" and app_id is not None and message_id:
+        rejections.append((item["uid"], message_id, app_id))
+    # A message already read the same way is done. One read differently, by a
+    # better rule or because its application is now tracked, is applied again.
+    if known.get(key) == (stage, app_id):
+        return
+    previous = known.get(key)
+    db.record_mail_event(message_key=key, received_at=received, sender=sender, subject=subject, stage=stage,
+                         application_id=app_id, confidence=item["confidence"], message_id=message_id,
+                         employer=item["company"] or employer_hint(item["sender_header"], subject))
+    known[key] = (stage, app_id)
+    # A message read differently no longer vouches for the stage it set before.
+    restaged = db.restage_from_mail(int(previous[1])) if previous and previous[1] is not None else None
+    if restaged:
+        for tracked in applications:
+            if int(tracked["id"]) == int(previous[1]):
+                tracked["stage"] = restaged
+                db.add_event(f"Inbox correction: {tracked.get('company')} · {tracked.get('title')} → "
+                             f"{tracked['stage']}", "info", tracked.get("job_id"))
+    if app is None:
+        report.unmatched[:] = [u for u in report.unmatched if (u["sender"], u["subject"]) != (sender, subject)]
+        report.unmatched.append({"sender": sender, "subject": subject, "stage": stage})
+        return
+    try:
+        changed = db.set_application_stage(int(app["id"]), stage, "email")
+    except ValueError:
+        changed = False
+    if changed:
+        app["stage"] = stage
+        report.updates.append({"application_id": app["id"], "company": app.get("company"),
+                               "title": app.get("title"), "stage": stage})
+        db.add_event(f"Inbox update: {app.get('company')} · {app.get('title')} → {stage}", "success"
+                     if stage in ("interview", "offer", "assessment") else "info", app.get("job_id"))
 
 
 def _archive_rejections(report: SyncReport, rejections: list[tuple[bytes, str, int]], archiver) -> None:
