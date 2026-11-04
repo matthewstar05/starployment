@@ -591,7 +591,8 @@ def _standing_answer(q: Q, label: str, answers: dict, confirmed: list, profile: 
     if matches(r"previously (?:been )?(?:worked|employed)|former (?:employee|worker)|worked (?:here|for us|for (?:this|the) "
                r"company)|ever (?:been )?(?:worked|employed) (?:for|by|at|with)|(?:have|had) you (?:ever )?worked (?:for|at)|"
                r"prior (?:employee|employment with)|(?:currently|presently) (?:employed by|work(?:ing)? (?:for|at))|"
-               r"current (?:employee|worker)|been employed by|accepted an offer (?:of employment )?(?:to work )?(?:at|with|from)"):
+               r"current (?:employee|worker)|been employed by|accepted an offer (?:of employment )?(?:to work )?(?:at|with|from)|"
+               r"worked (?:with|for) us\b|employed (?:with|by) us\b"):
         # "No" was saved as "no, unless the employer is in my resume's work history".
         if _standing(answers, confirmed, "former_employee") == "no" and job is not None \
                 and not _worked_for(profile, job.company):

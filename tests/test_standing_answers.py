@@ -149,3 +149,7 @@ def test_phone_extension_is_never_the_phone_number():
     for label in ("Phone Extension", "Phone extension", "Ext."):
         assert rule_answer(Q(label=label, kind="text"), profile, settings(), job) is None
     assert rule_answer(Q(label="Phone Number", kind="text"), profile, settings(), job) is not None
+
+
+def test_worked_with_us_before_is_the_former_employer_question():
+    assert ask("Have you worked with us before?", company="CIBC") == "No"

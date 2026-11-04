@@ -59,6 +59,7 @@ SEND_SECONDS = 8 * 60      # an unattended send, including a verification email
 # two fresh Workday emails at once could otherwise cross (each link opened for the wrong account).
 _SIGNUP_LOCK = threading.Lock()
 SIGNUP_WAIT_SECONDS = 6 * 60
+VERIFY_SECONDS = 4 * 60     # Workday's activation emails can take a few minutes
 # Workday labels that mean a standard question under another name.
 ALIASES = {"country phone code": "Phone country code", "phone extension": "Phone extension",
            "address line 1": "Address Line 1", "postal code": "Postal Code"}
@@ -448,6 +449,18 @@ class WorkdayEngine(FormEngine):
                 naming = sorted((o for o in options if wanted in o.casefold()), key=len)
                 if naming and (len(naming) == 1 or len(naming[0]) < len(naming[1])):
                     chosen = naming[0]
+            if chosen is None and re.search(r"field of study|major|discipline", field["label"], re.I) \
+                    and len(value.split()) > 1:
+                # A fixed catalog without the exact major ("Quantitative Economics"): the option that is
+                # exactly its broader field ("Economics"), never a guess at a different subject.
+                broad = value.split()[-1]
+                search.fill("")
+                search.press_sequentially(broad, delay=30)
+                search.press("Enter")
+                page.wait_for_timeout(1200)
+                options = list(dict.fromkeys(o.strip() for o in page.locator("[data-automation-id=promptOption]:visible")
+                                             .all_inner_texts() if o.strip() and o.strip() not in taken))
+                chosen = next((o for o in options if o.casefold() == broad.casefold()), None)
             if chosen is None:
                 self._log(f"{field['label'][:50]}: no option for {value!r} among {options[:12]}")
             if chosen and self._choose(page, chosen):
@@ -641,11 +654,24 @@ class WorkdayEngine(FormEngine):
 
     def _verify_email(self, ctx) -> bool:
         inbox = self._inbox()
-        if inbox is None or self._mail_baseline is None:
+        if inbox is None:
             return False
-        self._log("Waiting for Workday's verification email")
         baseline = self._mail_baseline
-        deadline = time.monotonic() + 150
+        if baseline is None:
+            # The snapshot before Create Account failed (a mailbox that did not answer in time).
+            # Look from a little before the mailbox's newest message, and only at mail since the
+            # sign-up began; only this employer's own activation link is accepted below.
+            try:
+                from .email_verification import Baseline
+                now = inbox.baseline()
+                baseline = Baseline(now.uidvalidity, max(0, now.max_uid - 10),
+                                    getattr(self, "_signup_started", now.started_at))
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"Could not open the mailbox for Workday's verification email: {str(exc)[:120]}")
+                return False
+        self._log("Waiting for Workday's verification email")
+        deadline = time.monotonic() + VERIFY_SECONDS
+        problem = ""
         while time.monotonic() < deadline:
             try:
                 # Workday links each account's activation to the employer's own address, and its
@@ -653,9 +679,12 @@ class WorkdayEngine(FormEngine):
                 link = inbox.wait_for_link(baseline.max_uid, baseline.started_at,
                                            allowed_hosts=[self._host()] if self._host() else WORKDAY_HOSTS,
                                            timeout_sec=30, baseline_uidvalidity=baseline.uidvalidity)
-            except Exception as exc:  # noqa: BLE001
-                self._log(f"Could not read the verification email: {str(exc)[:120]}")
-                return False
+            except Exception as exc:  # noqa: BLE001 - a slow mailbox read: keep waiting until the deadline
+                if str(exc) != problem:
+                    problem = str(exc)
+                    self._log(f"Could not read the mailbox yet: {problem[:120]}")
+                time.sleep(5)
+                continue
             if link:
                 tab = ctx.new_page()
                 try:
@@ -749,10 +778,15 @@ class WorkdayEngine(FormEngine):
                         return ("Another Workday account was still waiting for its verification email. "
                                 "Send this application again in a few minutes.")
                     self._signup_held = True
-                try:
-                    self._mail_baseline = inbox.baseline()
-                except Exception:  # noqa: BLE001
-                    self._mail_baseline = None
+                from datetime import datetime, timedelta, timezone
+                self._signup_started = datetime.now(timezone.utc) - timedelta(seconds=30)
+                self._mail_baseline = None
+                for _ in range(2):   # a mailbox that is slow to answer gets a second try
+                    try:
+                        self._mail_baseline = inbox.baseline()
+                        break
+                    except Exception:  # noqa: BLE001
+                        continue
             self._click_control(page, "createAccountSubmitButton")
             self._account_tries += 1
             self._used_vault = True
