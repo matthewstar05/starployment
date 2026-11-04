@@ -687,3 +687,19 @@ def test_a_sent_posting_keeps_the_name_it_was_sent_under(store):
     db.upsert_jobs([fresh.model_copy(update={"company": "Cybernetic Labs"})])
     with db.conn() as c:   # a posting nobody applied to still takes the latest name
         assert c.execute("SELECT company FROM jobs WHERE url=?", (fresh.url,)).fetchone()[0] == "Cybernetic Labs"
+
+
+def test_account_mail_and_conditional_offers_are_not_stage_updates(store):
+    app_id = submitted("Amcor", "Applied AI Engineer", "https://job-boards.greenhouse.io/amcor/jobs/1")
+    body = ("Verify your account to continue your application. Per federal guidelines, this survey needs to be "
+            "issued to candidates prior to any offer of employment.")
+    assert email_tracker.classify("Verify your candidate account", body) == (None, 0.0)
+    assert email_tracker.classify("Your Amcor application", body)[0] != "offer"
+    assert email_tracker.classify("Offer", "We are pleased to extend an offer of employment.")[0] == "offer"
+    mail = message("hrservicecenter amcor <amcor@otp.workday.example>", "Verify your candidate account", body, "<v@x>")
+    db.record_mail_event(message_key=email_tracker._message_key(mail, b"1"), received_at="2026-11-04T18:47:49+00:00",
+                         sender="hrservicecenter amcor", subject="Verify your candidate account", stage="offer",
+                         application_id=app_id, confidence=0.8)          # as the older rules read it
+    db.set_application_stage(app_id, "offer", "email")
+    email_tracker.sync({"email_tracking": {"lookback_days": 30}}, messages=[(b"1", mail, mail.get_content())])
+    assert {row["id"]: row["stage"] for row in db.list_tracker()}[app_id] == "applied"

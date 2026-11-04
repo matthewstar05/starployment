@@ -121,9 +121,24 @@ _INVITATION = {
 }
 
 
+# An offer spoken of as a condition, not made: Amcor's Workday account email (2026-11-04) says a
+# survey "needs to be issued to candidates prior to any offer of employment".
+_HYPOTHETICAL_OFFER = re.compile(
+    r"(?:prior to|before|ahead of|in advance of|contingent (?:up)?on|conditional (?:up)?on|pending|"
+    r"(?:any|all) (?:future )?)[^.!?\n]{0,30}\boffers? (?:of employment|letter)s?|\bany offers? of employment")
+# Account mail from an ATS (verify, activate, reset, sign-in codes) is never about an application's
+# stage, whatever its footer mentions.
+_ACCOUNT_MAIL = re.compile(r"verify your (?:candidate |email |e-mail )?(?:account|address|email)|"
+                           r"(?:account|email) (?:verification|activation)|activate your (?:candidate )?account|"
+                           r"(?:reset|change) your password|password reset|(?:sign[- ]?in|one[- ]time|verification) code",
+                           re.I)
+
+
 def classify(subject: str, body: str) -> tuple[str | None, float]:
     """Return ``(stage, confidence)`` for a recruiting email, or ``(None, 0)``."""
-    text = f"{subject}\n{body}".lower().replace("\u2019", "'")
+    if _ACCOUNT_MAIL.search(subject or ""):
+        return None, 0.0
+    text = _HYPOTHETICAL_OFFER.sub(" ", f"{subject}\n{body}".lower().replace("\u2019", "'"))
     # Conditional clauses ("If we decide not to move forward, we'll let you know") are not news;
     # only the acknowledgement itself is read from the full text.
     settled = _CONDITIONAL_CLAUSE.sub(" ", text)
@@ -314,7 +329,7 @@ _RECONNECTS = 3
 _CONNECTION_ERRORS = (imaplib.IMAP4.abort, OSError)   # includes timeouts, SSL, DNS, and broken pipes
 # Bump when ``classify``, ``_RECRUITING_HINT`` or the Luna reading changes, so mail
 # already read and set aside (``db.mark_mail_seen``) is read again under the new rules.
-RULES_VERSION = 3
+RULES_VERSION = 4
 OFFLINE = "Couldn't reach your mail server"
 
 
@@ -631,7 +646,7 @@ def _read(source, report, tracking, settings, applications, known, without_id, r
         senders = getaddresses([sender_header])
         sender = " ".join(part for pair in senders for part in pair if part) or sender_header
         stage, confidence = classify(subject, body)
-        if _JOB_ALERT_SENDER.search(sender_header):
+        if _JOB_ALERT_SENDER.search(sender_header) or _ACCOUNT_MAIL.search(subject):
             if key in known:   # read as an update by older rules
                 linked = db.dismiss_mail_event(key)
                 if linked is not None:
