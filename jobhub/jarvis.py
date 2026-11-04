@@ -7,6 +7,7 @@ runs out of memory or CPU).
 """
 from __future__ import annotations
 
+import re
 import time
 
 from . import families
@@ -104,9 +105,18 @@ def interval_minutes(settings: dict) -> float:
 PLUS_IGNORES = frozenset({"Posting date is over 180 days old"})
 
 
+def workday_on(settings: dict) -> bool:
+    """Workday sends unattended only with both of the candidate's switches on (AGENTS.md rule 14):
+    Manage Workday sign-ins (an account per employer, password in the vault) and Send Workday
+    applications."""
+    workday = settings.get("workday") or {}
+    return bool(workday.get("send") and workday.get("create_accounts"))
+
+
 def eligible(job: Job, settings: dict) -> bool:
     from .priority import held_from_automation
-    if job.ats not in AUTOMATIC_ATS or job.score < float(settings.get("min_score_to_apply", 60)):
+    allowed = job.ats in AUTOMATIC_ATS or (job.ats == "workday" and workday_on(settings))
+    if not allowed or job.score < float(settings.get("min_score_to_apply", 60)):
         return False
     if held_from_automation(job, settings.get("priority_companies") or []):
         return False
@@ -193,3 +203,33 @@ def set_aside(job_ids, now: float | None = None) -> set[str]:
     drafts = db.draft_stamps(holds)
     return {job_id for job_id, (until, stamp) in holds.items()
             if until > now and drafts.get(job_id, "") == stamp}
+
+
+# ---------------------------------------------------------------- one role, one application
+# The same role is often posted more than once ("Forward Deployed Engineer", "…, Early Career",
+# "…, 2027 Graduate"). Automatic runs treat those as one vacancy: these words name a hiring
+# track or level, not a different job.
+_STAGE_WORDS = re.compile(r"\b(?:early|career|new|grads?|graduates?|university|college|campus|entry|level|junior|jr|"
+                          r"associate level|class|of|20\d\d|i{1,3}|iv|[1-4]|remote|hybrid|on.?site|us|usa|"
+                          r"united states|full.?time|program)\b", re.I)
+
+
+def role_key(title: str) -> str:
+    """A title with its hiring-track words removed, for spotting the same role posted twice."""
+    text = re.sub(r"[()\[\],/|–—:-]+", " ", (title or "").casefold())
+    text = _STAGE_WORDS.sub(" ", text)
+    return " ".join(sorted(set(text.split())))
+
+
+def not_repeated(jobs: list[Job]) -> list[Job]:
+    """Drop roles automatic runs must leave alone: one already applied to under another posting,
+    and every role at an employer where an application has reached an assessment, interview, or
+    offer (a second application there can look careless). The candidate may still apply by hand."""
+    from . import db
+    from .priority import normalize_company
+    roles, engaged = db.automation_history()
+    # Within one run the one-employer-per-cycle rule already keeps a role from going twice, and a
+    # posting that cannot be sent (a missing answer) must still let its twin take the turn.
+    return [job for job in jobs
+            if normalize_company(job.company) not in engaged
+            and (normalize_company(job.company), role_key(job.title)) not in roles]

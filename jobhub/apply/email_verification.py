@@ -511,8 +511,10 @@ class EmailVerificationInbox:
                        length: int | None = None,
                        employer: str | None = None,
                        allowed_hosts: list[str] | set[str] | None = None,
-                       timeout_sec: float = 30, poll_sec: float = 2) -> VerificationToken | None:
-        """Return one unique fresh verification token (code or link)."""
+                       timeout_sec: float = 30, poll_sec: float = 2,
+                       kind: str | None = None) -> VerificationToken | None:
+        """Return one unique fresh verification token (code or link); ``kind`` keeps only one sort,
+        so a code meant for another application never counts against a link (or the reverse)."""
         deadline = time.monotonic() + min(max(timeout_sec, 0), 35)
         while True:
             messages = self._fresh_messages(baseline_uid, started, baseline_uidvalidity, employer)
@@ -520,10 +522,10 @@ class EmailVerificationInbox:
             for _, msg in messages:
                 sender = str(msg["From"] or "")
                 subject = str(msg["Subject"] or "")
-                code = _code_from_message(msg, length)
+                code = _code_from_message(msg, length) if kind != "link" else None
                 if code:
                     tokens.append(VerificationToken(kind="code", value=code, sender=sender, subject=subject))
-                links = _links_from_message(msg, allowed_hosts)
+                links = _links_from_message(msg, allowed_hosts) if kind != "code" else set()
                 for link in links:
                     tokens.append(VerificationToken(kind="link", value=link, sender=sender, subject=subject))
 
@@ -557,7 +559,7 @@ class EmailVerificationInbox:
         """Return one unique fresh verification link; backwards-compatible helper."""
         token = self.wait_for_token(baseline_uid, started, baseline_uidvalidity=baseline_uidvalidity,
                                    allowed_hosts=allowed_hosts, employer=employer,
-                                   timeout_sec=timeout_sec, poll_sec=poll_sec)
+                                   timeout_sec=timeout_sec, poll_sec=poll_sec, kind="link")
         if token and token.kind == "link":
             return token.value
         return None

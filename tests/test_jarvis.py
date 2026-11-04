@@ -310,3 +310,162 @@ def test_refresh_accepts_a_posting_saved_under_an_older_key(store):
                                    "url": "https://job-boards.greenhouse.io/example/jobs/999"})
     with pytest.raises(ValueError):
         db.refresh_job_metadata(row.id, other)
+
+
+def _parallel_fixture(running, monkeypatch, rows, mode):
+    save(rows)
+    db.set_settings({"jarvis_mode": mode, "parallel_sends": 4, "max_apply_per_run": 5})
+    monkeypatch.setattr(prepare, "prepare_job", lambda j, *a: db.upsert_draft(j.id, status="ready"))
+    monkeypatch.setattr(prepare, "autofill", lambda *a, **kw: None)
+    monkeypatch.setattr(prepare, "approve_and_queue", lambda *a, **kw: None)
+    lock = threading.Lock()
+    state = {"now": 0, "peak": 0, "companies": set(), "overlap": False, "sent": []}
+
+    def send(draft_id, **kw):
+        company = db.get_job(db.get_draft(draft_id)["job_id"]).company
+        with lock:
+            state["overlap"] |= company in state["companies"]
+            state["companies"].add(company)
+            state["now"] += 1
+            state["peak"] = max(state["peak"], state["now"])
+        time.sleep(0.05)
+        with lock:
+            state["now"] -= 1
+            state["companies"].discard(company)
+            state["sent"].append(company)
+        return {"status": "applied"}
+    monkeypatch.setattr(prepare, "send_draft", send)
+    return state
+
+
+def test_all_plus_runs_applications_side_by_side_within_its_budget(running, monkeypatch):
+    rows = [job(100 + n, 95 - n) for n in range(10)]
+    rows[1].company = rows[0].company           # one employer twice: never at once, once per cycle
+    state = _parallel_fixture(running, monkeypatch, rows, "all_plus")
+    results = scheduler.jarvis_batch()
+    assert len(results) == 5 and len(state["sent"]) == 5
+    assert 1 < state["peak"] <= 4 and not state["overlap"]
+    assert state["sent"].count(rows[0].company) == 1
+
+
+def test_all_runs_half_as_many_side_by_side(running, monkeypatch):
+    state = _parallel_fixture(running, monkeypatch, [job(120 + n, 95 - n) for n in range(6)], "all")
+    assert len(scheduler.jarvis_batch()) == 5 and state["peak"] <= 2
+
+
+def test_a_skipped_parallel_attempt_gives_its_place_back(running, monkeypatch):
+    rows = [job(140 + n, 95 - n) for n in range(8)]
+    state = _parallel_fixture(running, monkeypatch, rows, "all_plus")
+    skipped = {rows[0].id, rows[2].id}
+    original = scheduler._jarvis_attempt
+    monkeypatch.setattr(scheduler, "_jarvis_attempt",
+                        lambda j, *a: ("skip", None) if j.id in skipped else original(j, *a))
+    assert len(scheduler.jarvis_batch()) == 5 and len(state["sent"]) == 5
+
+
+def test_jarvis_sends_workday_only_with_both_switches_and_skips_a_tenant_it_cannot_sign_in_to(running, monkeypatch):
+    from jobhub import vault
+    row = job(160, 90)
+    row.ats, row.source = "workday", "workday"
+    row.url = row.apply_url = "https://bank.wd5.myworkdayjobs.com/External/job/NY/Analyst_R1"
+    save([row])
+    settings = db.get_settings()
+    assert not jarvis.eligible(db.get_job(row.id), settings)
+    db.set_settings({"workday": {"send": True, "create_accounts": False}})
+    assert not jarvis.eligible(db.get_job(row.id), db.get_settings())
+    db.set_settings({"workday": {"send": True, "create_accounts": True}})
+    assert jarvis.eligible(db.get_job(row.id), db.get_settings())
+    monkeypatch.setattr(vault, "get_account", lambda tenant: {"tenant": "bank", "company": "Bank", "status": "exists"})
+    monkeypatch.setattr(scheduler, "apply_to_job", lambda *a, **kw: pytest.fail("tried a tenant it cannot sign in to"))
+    assert scheduler.jarvis_batch() == []
+    assert jarvis.set_aside([row.id]) == {row.id}
+    with db.conn() as c:
+        assert c.execute("SELECT COUNT(*) FROM applications").fetchone()[0] == 0   # no attempt recorded
+    assert db.release_workday_holds("bank.wd5.myworkdayjobs.com") == 1
+    assert jarvis.set_aside([row.id]) == set()
+
+
+def test_a_source_that_never_replies_cannot_hold_up_the_scan(store, monkeypatch):
+    release = threading.Event()
+    def hangs(settings):
+        release.wait(10)          # a read the network dropped mid-reply
+        return []
+    def answers(settings):
+        return [job(170, 80)]
+    monkeypatch.setattr(scheduler, "SOURCES", {"greenhouse": answers, "jobspy": hangs})
+    monkeypatch.setattr(scheduler, "SCAN_SECONDS", 1)
+    db.set_settings({"sources": {"greenhouse": True, "jobspy": True}, "setup_complete": True})
+    started = time.monotonic()
+    try:
+        report = scheduler.scan_once()
+    finally:
+        release.set()
+    assert time.monotonic() - started < 8
+    assert report["status"] == "partial" and report["found"] >= 1
+    with db.conn() as c:
+        assert c.execute("SELECT COUNT(*) FROM events WHERE msg LIKE 'Scan went ahead without jobspy%'").fetchone()[0] == 1
+    assert not scheduler.STATE.running_scan
+
+
+def test_a_workday_stop_on_my_information_sets_the_employers_other_postings_aside(running):
+    rows = []
+    for n in range(3):
+        row = job(180 + n, 90)
+        row.ats, row.source = "workday", "workday"
+        row.url = row.apply_url = f"https://bank.wd5.myworkdayjobs.com/External/job/NY/Analyst_R{n}"
+        rows.append(row)
+    other = job(190, 90)
+    other.ats, other.source = "workday", "workday"
+    other.url = other.apply_url = "https://else.wd1.myworkdayjobs.com/External/job/NY/Analyst_R9"
+    save(rows + [other])
+    scheduler._after_workday(db.get_job(rows[0].id), {
+        "status": "needs_human", "message": "Workday asks what Starployment has no saved answer for: How Did You "
+                                            "Hear About Us? (current step 1 of 6 My Information)"})
+    assert jarvis.set_aside([r.id for r in rows] + [other.id]) == {rows[1].id, rows[2].id}
+    scheduler._after_workday(db.get_job(other.id), {"status": "applied", "message": "confirmed"})
+    assert other.id not in jarvis.set_aside([other.id])
+
+
+def test_the_same_role_posted_twice_is_applied_to_once(running, monkeypatch):
+    first = job(200, 90)
+    first.company, first.title = "Endeavorai", "Forward Deployed Engineer, Early Career"
+    again = job(201, 90)
+    again.company, again.title = "Endeavorai", "Forward Deployed Engineer, 2027 Graduate"
+    other = job(202, 90)
+    other.company, other.title = "Endeavorai", "Product Designer"
+    save([first, again, other])
+    application_id = scheduler.queue_application(first.id, parallel=4)
+    db.finish_application(application_id, "applied", [], [], [], "", None, True)
+    kept = {j.title for j in jarvis.not_repeated([db.get_job(again.id), db.get_job(other.id)])}
+    assert kept == {"Product Designer"}
+    # Level variants of one role: once one was sent, the others are left alone.
+    twin = job(203, 90)
+    twin.company, twin.title = "Example Co", "Data Analyst II"
+    twin2 = job(204, 89)
+    twin2.company, twin2.title = "Example Co", "Data Analyst III"
+    save([twin, twin2])
+    assert len(jarvis.not_repeated([db.get_job(twin.id), db.get_job(twin2.id)])) == 2   # nothing sent yet
+    sent_id = scheduler.queue_application(twin.id, parallel=4)
+    db.finish_application(sent_id, "applied", [], [], [], "", None, True)
+    assert jarvis.not_repeated([db.get_job(twin2.id)]) == []
+
+
+def test_an_employer_mid_interview_gets_no_more_automatic_applications(running, monkeypatch):
+    sent = job(210, 90)
+    sent.company, sent.title = "Endeavorai", "Forward Deployed Engineer"
+    fresh = job(211, 90)
+    fresh.company, fresh.title = "Endeavorai", "Software Engineer, Agents"
+    save([sent, fresh])
+    application_id = scheduler.queue_application(sent.id, parallel=4)
+    db.finish_application(application_id, "applied", [], [], [], "", None, True)
+    db.set_application_stage(application_id, "interview")
+    assert jarvis.not_repeated([db.get_job(fresh.id)]) == []
+    monkeypatch.setattr(scheduler, "apply_to_job", lambda *a, **kw: pytest.fail("applied mid-interview"))
+    monkeypatch.setattr(prepare, "send_draft", lambda *a, **kw: pytest.fail("applied mid-interview"))
+    assert scheduler.auto_apply_batch() == []
+
+
+def test_role_key_keeps_real_differences():
+    assert jarvis.role_key("Forward Deployed Engineer") == jarvis.role_key("Forward Deployed Engineer, Early Career")
+    assert jarvis.role_key("Software Engineer, Backend") != jarvis.role_key("Software Engineer, Frontend")
+    assert jarvis.role_key("Software Engineer") != jarvis.role_key("Senior Software Engineer")

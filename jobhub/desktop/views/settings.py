@@ -131,9 +131,12 @@ class SettingsView(QWidget):
         workday.add_row("Send Workday applications", self.workday_send,
                         "Approve & send, Send ready, and automatic runs fill each Workday page, save it, and submit. "
                         "A page asking something you have no saved answer for comes back to you.")
-        passwords = button("Show saved sign-ins", "secondary")
+        passwords = button("Manage sign-ins…", "secondary")
         passwords.clicked.connect(self.passwords_requested)
-        workday.add_row("Saved sign-ins", passwords, "Showing a password asks for Touch ID.")
+        workday.add_row("Saved sign-ins", passwords,
+                        "See, add, or change each employer's Workday sign-in, and export them to the macOS "
+                        "Passwords app. Showing, copying, or exporting a password asks for Touch ID. Also in "
+                        "File → Workday Sign-ins.")
         groups.addWidget(workday)
 
         # Automation -------------------------------------------------------------

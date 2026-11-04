@@ -1,6 +1,8 @@
 """Workday: public board scanning and the sign-in-first browser filler. Never contacts an employer."""
 import json
 
+import time
+
 import pytest
 from playwright.sync_api import sync_playwright
 
@@ -192,3 +194,78 @@ def test_workday_settings_validate():
     settings = config.merge_settings(config.DEFAULT_SETTINGS, {"companies": {"workday": ["citi.wd5/2"]}})
     assert config.validate_settings(settings)["companies"]["workday"] == ["citi.wd5/2"]
     assert json.dumps(config.DEFAULT_SETTINGS["sources"]).count("workday") == 1
+
+
+def test_a_closed_workday_posting_stops_before_the_submit_boundary(tmp_path, monkeypatch, browser):
+    page_path = tmp_path / "closed.html"
+    page_path.write_text("<!doctype html><html><body><a>Sign In</a><h2>The page you are looking for doesn't exist."
+                         "</h2><button>Search for Jobs</button></body></html>")
+    url = page_path.as_uri()
+    monkeypatch.setattr(engine_module.config, "SCREENSHOTS", tmp_path / "shots")
+    attempted = []
+    monkeypatch.setattr(workday_module.db, "mark_submission_attempted", attempted.append)
+    resume = tmp_path / "resume.pdf"
+    resume.write_bytes(b"%PDF-1.4\n")
+    job = Job(source="fixture", ats="workday", company="Bank", title="Analyst", url=url, apply_url=url)
+    engine = workday_module.WorkdayEngine(job, Profile(email="ada@example.test"),
+                                          {"workday": {"send": True, "create_accounts": True}}, str(resume),
+                                          Adapter("workday", url, assist_only=True), False)
+    context = browser.new_context()
+    page = context.new_page()
+    try:
+        started = time.monotonic()
+        result = engine._run_page(context, page, url)
+        assert result.status == "failed" and "closed this posting" in result.message
+        assert not result.submission_attempted and attempted == []
+        assert time.monotonic() - started < 30
+    finally:
+        context.close()
+
+
+def test_a_shared_myworkdaysite_link_opens_the_employers_own_workday():
+    url = "https://wd1.myworkdaysite.com/recruiting/fmr/FidelityCareers/job/Westlake-TX/Full-Stack-Developer_2134996-1"
+    adapter = adapter_for(_workday_job(url))
+    assert adapter is not None and adapter.name == "workday"
+    assert adapter.apply_url == "https://fmr.wd1.myworkdayjobs.com/FidelityCareers/job/Westlake-TX/Full-Stack-Developer_2134996-1"
+    from jobhub import vault
+    assert vault.tenant_of(adapter.apply_url) == "fmr"
+
+
+EXPERIENCE_PAGE = """<!doctype html><html><body><div data-automation-id="applyFlowPage">
+<div data-automation-id="progressBarActiveStep">My Experience</div>
+<div id="work"><h4>Work Experience 1</h4>
+  <div data-automation-id="formField-jobTitle"><label for="jt">Job Title*</label><input id="jt" type="text"></div>
+  <div data-automation-id="formField-companyName"><label for="co">Company*</label><input id="co" type="text"></div>
+  <div data-automation-id="formField-currentlyWorkHere"><label for="cw">I currently work here</label><input id="cw" type="checkbox"></div>
+  <div data-automation-id="formField-startDate"><label>From*</label>
+    <input data-automation-id="dateSectionMonth-input" id="fm"><input data-automation-id="dateSectionYear-input" id="fy"></div>
+</div>
+<div id="edu"><h4>Education 1</h4>
+  <div data-automation-id="formField-school"><label for="sc">School or University*</label><input id="sc" type="text"></div>
+  <div data-automation-id="formField-firstYearAttended"><label>From*</label>
+    <input data-automation-id="dateSectionMonth-input" id="em"><input data-automation-id="dateSectionYear-input" id="ey"></div>
+</div></div></body></html>"""
+
+
+def test_work_experience_comes_from_the_resume_and_education_dates_are_left_alone(tmp_path, monkeypatch, browser):
+    from jobhub.models import Experience
+    page_path = tmp_path / "exp.html"
+    page_path.write_text(EXPERIENCE_PAGE)
+    url = page_path.as_uri()
+    monkeypatch.setattr(workday_module, "rule_answer", lambda *a: None)
+    profile = Profile(email="ada@example.test", experience=[
+        Experience(title="Data Analyst", company="Example Co", start="October 2024", end="Present")])
+    job = Job(source="fixture", ats="workday", company="Bank", title="Analyst", url=url, apply_url=url)
+    engine = workday_module.WorkdayEngine(job, profile, {}, "", Adapter("workday", url, assist_only=True), False)
+    engine._tried, engine._failures, engine.answered, engine.log = set(), {}, {}, []
+    context = browser.new_context()
+    page = context.new_page()
+    try:
+        page.goto(url)
+        engine._fill_step(page)
+        assert page.input_value("#jt") == "Data Analyst" and page.input_value("#co") == "Example Co"
+        assert page.is_checked("#cw")
+        assert page.input_value("#fm") == "10" and page.input_value("#fy") == "2024"
+        assert page.input_value("#em") == "" and page.input_value("#ey") == ""   # school years untouched
+    finally:
+        context.close()

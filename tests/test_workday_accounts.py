@@ -292,3 +292,68 @@ def test_settings_and_sign_ins_sheet():
     assert row.secret.text() == "S3cret!pass"
     row.hide_password()
     assert row.secret.text() == HIDDEN
+
+
+def test_own_sign_ins_are_added_and_exported_for_passwords(store):
+    import csv
+    record = vault.add_own("https://bank.wd5.myworkdayjobs.com/External", "Ada@Example.test", "Mine-pass1!", "Bank")
+    assert record["tenant"] == "bank" and record["host"] == "bank.wd5.myworkdayjobs.com"
+    assert record["email"] == "ada@example.test" and vault.password_for("bank") == "Mine-pass1!"
+    assert vault.site_url(record) == "https://bank.wd5.myworkdayjobs.com/"
+    with pytest.raises(ValueError):
+        vault.add_own("https://example.test/jobs", "ada@example.test", "x")      # not a Workday address
+    vault.add_own("bank.wd5.myworkdayjobs.com", "ada@example.test", "Changed-pass2!")  # change the password
+    assert vault.password_for("bank") == "Changed-pass2!" and len(vault.list_accounts()) == 1
+    path, count = vault.export_for_passwords()
+    assert count == 1 and stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    rows = list(csv.reader(path.open(encoding="utf-8")))
+    assert rows[0] == list(vault.PASSWORDS_HEADER)
+    assert rows[1][:4] == ["Bank (Workday)", "https://bank.wd5.myworkdayjobs.com/", "ada@example.test", "Changed-pass2!"]
+    vault.clear_export()
+    assert not path.exists() and not path.parent.exists()
+    assert "Changed-pass2!" not in (config.DATA / "accounts.json").read_text()
+
+
+def test_sign_ins_sheet_adds_and_edits_without_showing_the_password(store):
+    import os
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])  # noqa: F841
+    from jobhub.desktop.views.passwords import PasswordsSheet
+    sheet = PasswordsSheet(default_email="ada@example.test")
+    sheet.set_accounts([])
+    assert not sheet.export_button.isEnabled()
+    saved = []
+    sheet.save_requested.connect(saved.append)
+    sheet.add_button.click()
+    assert sheet.form.isVisibleTo(sheet) and sheet.form.email.text() == "ada@example.test"
+    sheet.form.save.click()
+    assert saved == [] and "Enter the Workday address" in sheet.message.text()
+    sheet.form.address.setText("https://bank.wd5.myworkdayjobs.com")
+    sheet.form.password.setText("Mine-pass1!")
+    sheet.form.save.click()
+    assert saved[-1] == {"address": "https://bank.wd5.myworkdayjobs.com", "company": "",
+                         "email": "ada@example.test", "password": "Mine-pass1!"}
+    sheet.saved()
+    assert not sheet.form.isVisibleTo(sheet) and sheet.form.password.text() == ""
+    account = {"tenant": "bank", "company": "Bank", "email": "ada@example.test", "status": "exists",
+               "host": "bank.wd5.myworkdayjobs.com"}
+    sheet.set_accounts([account])
+    assert sheet.export_button.isEnabled() and sheet._rows["bank"].open.isVisibleTo(sheet._rows["bank"])
+    sheet._rows["bank"].edit.click()
+    assert sheet.form.address.isReadOnly() and sheet.form.password.text() == ""
+
+
+def test_a_tenant_naming_its_footer_button_page_footer_next_still_moves_on(tmp_path, monkeypatch, store, browser):
+    html = ACCOUNT_PAGE.replace("__EXTRA__", "").replace('data-automation-id="bottom-navigation-next-button"',
+                                                          'data-automation-id="pageFooterNextButton"')
+    engine, url, attempted = _engine(tmp_path, monkeypatch, html, SEND)
+    context = browser.new_context()
+    page = context.new_page()
+    try:
+        result = engine._run_page(context, page, url)
+        assert result.status == "applied", (result.message, engine.log)
+        assert page.evaluate("window.submitted") == 1 and page.evaluate("window.saved") == 2
+    finally:
+        context.close()

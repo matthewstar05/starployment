@@ -28,6 +28,7 @@ def quit_on_termination(app: QApplication) -> None:
     wake.start(500)
 
 
+NETWORK_TIMEOUT_SECONDS = 120
 SEND_GRACE_SECONDS = 900     # a send's own timeouts end it well before this
 
 
@@ -106,6 +107,10 @@ def main(argv: list[str] | None = None) -> int:
         fault_log = Path(args.smoke_test).with_suffix(".fault.txt")
         fault_log.parent.mkdir(parents=True, exist_ok=True)
         faulthandler.enable(open(fault_log, "w", encoding="utf-8"), all_threads=True)  # noqa: SIM115 - lives for the process
+    # A network read with no timeout of its own (a scraping library, a mail check) gives up after
+    # this long instead of waiting forever when the connection drops mid-reply (sleep, Wi-Fi).
+    import socket
+    socket.setdefaulttimeout(NETWORK_TIMEOUT_SECONDS)
     if args.native_glass_check:
         # This must stay before source-data migration and all application/controller imports.
         from jobhub.desktop.native_glass_check import run

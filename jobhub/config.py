@@ -173,7 +173,7 @@ ASHBY_COMPANIES = [
 # Boards added to the bundled catalog in version 2. Each one was checked
 # against its public API when added. Existing installs receive these once
 # (see db._upgrade_settings), so a board the candidate removes stays removed.
-CATALOG_VERSION = 3
+CATALOG_VERSION = 4
 CATALOG_ADDITIONS = {
     "greenhouse": [
         "airtable", "cockroachlabs", "coursera", "faire", "fivetran", "gemini", "intercom", "lattice",
@@ -193,9 +193,13 @@ CATALOG_ADDITIONS = {
         "wise", "sezzle", "payoneer", "zuora", "highradius", "anaplan", "datarails", "a16z", "iconiq",
         "exoduspoint", "optiverus", "bitgo", "consensys", "thoughtworks", "amwins", "costar", "coalition",
         "ethoslife", "pieinsurance", "counterpart", "insurify", "federato",
+        # Version 4: wealth and asset management (advisory platforms, RIAs, private markets).
+        "altruist", "artisanpartners", "focusfinancialpartners", "stepstone", "vestwell", "humaninterest",
+        "public",
     ],
     "lever": ["spotify", "outreach", "gopuff", "ro", "binance", "offchainlabs",
-              "anchorage", "finix", "dlocal", "nium"],
+              "anchorage", "finix", "dlocal", "nium",
+              "fundrise"],
     "ashby": [
         "cohere", "posthog", "render", "railway", "neon", "clickhouse", "airbyte", "prefect", "astronomer",
         "weaviate", "pinecone", "langchain", "llamaindex", "baseten", "lambda", "crusoe", "cerebras", "etched",
@@ -204,6 +208,7 @@ CATALOG_ADDITIONS = {
         "cursor", "warp", "saronic",
         "voleon", "lemonade", "openly", "kin", "bestow", "dave", "nubank", "nerdwallet", "moderntreasury",
         "column", "circle", "acorns", "rho", "cube", "airwallex", "pleo", "ramp",
+        "savvy", "range", "titan", "compound", "artafinance", "frec", "wealthsimple",
     ],
 }
 # Workday boards, written tenant.wdN/site (see sources/workday.py). Each was
@@ -247,6 +252,13 @@ ROLE_PRESETS: dict[str, list[str]] = {
                        "revenue analyst", "treasury analyst", "investment analyst", "investment banking analyst",
                        "equity research", "credit analyst", "valuation analyst", "corporate development analyst",
                        "finance rotational", "finance development program", "investment operations"],
+    "Wealth & asset management": ["wealth management", "wealth management analyst", "wealth management associate",
+                                  "private wealth", "private wealth management", "private banking analyst",
+                                  "wealth advisor associate", "associate wealth advisor", "wealth planning",
+                                  "financial planning associate", "paraplanner", "asset management analyst",
+                                  "asset management associate", "investment management analyst",
+                                  "portfolio associate", "portfolio operations", "trust analyst",
+                                  "investment consultant analyst"],
     "Accounting": ["accountant", "staff accountant", "accounting analyst", "accounting associate",
                    "revenue accountant", "financial reporting", "technical accounting", "fund accountant",
                    "fund accounting", "tax analyst", "tax associate", "audit associate", "internal audit",
@@ -348,6 +360,18 @@ DEFAULT_SETTINGS: dict = {
         "preferred_name": "",
         "pronouns": "",
         "years_experience": "",
+        # Standing answers for every employer (Profile → Answers → Standing answers; answers.py).
+        "over_18": "",
+        "relatives_at_employer": "",
+        "non_compete": "",
+        "security_clearance": "",
+        "former_employee": "",           # "No": no, unless the employer is in the resume's work history
+        "application_terms_consent": "",  # "Yes": tick Workday's application-terms box
+        "accuracy_certification": "",    # "Yes": tick Workday's "the information provided is accurate" box
+        "workday_how_heard": "",         # a specific source for Workday's "How did you hear" picker, e.g. LinkedIn
+        "phone_type": "",                # Mobile | Home | Business
+        "native_language": "",           # e.g. English: Workday's Languages block, at the top proficiency
+        "pay_range_target": "",          # e.g. 100000: a required pay-range list picks the range containing it
         "cover_letter_mode": "auto",     # auto | none
         "confirmed_fields": [],          # values explicitly saved by the candidate
         "field_answers": {},             # exact question label -> candidate answer
@@ -407,6 +431,17 @@ def validate_settings(settings: dict) -> dict:
         preferred_name: StrictStr
         pronouns: StrictStr
         years_experience: StrictStr
+        over_18: Literal["", "Yes", "No"] = ""
+        relatives_at_employer: Literal["", "Yes", "No"] = ""
+        non_compete: Literal["", "Yes", "No"] = ""
+        security_clearance: Literal["", "Yes", "No"] = ""
+        former_employee: Literal["", "No"] = ""
+        application_terms_consent: Literal["", "Yes"] = ""
+        accuracy_certification: Literal["", "Yes"] = ""
+        workday_how_heard: StrictStr = ""
+        phone_type: StrictStr = ""
+        native_language: StrictStr = ""
+        pay_range_target: StrictStr = ""
         cover_letter_mode: Literal["auto", "none"]
         confirmed_fields: list[StrictStr]
         field_answers: dict[StrictStr, StrictStr | StrictBool]

@@ -162,6 +162,8 @@ class DesktopController(QObject):
         files.strategy_changed.connect(self.set_resume_strategy)
         window.settings.resume_strategy_changed.connect(self.set_resume_strategy)
         window.settings.passwords_requested.connect(self.show_saved_sign_ins)
+        from .. import vault
+        vault.clear_export()   # an export file left by a closed session never lingers
         # Connections
         self._wire_connections(window.settings.luna, window.settings.email)
         self.refresh(include_account=True)
@@ -691,13 +693,53 @@ class DesktopController(QObject):
         """The vault's Workday accounts; a password only after Touch ID (vault.authenticate)."""
         from .. import vault
         from .views.passwords import PasswordsSheet
-        sheet = PasswordsSheet(self.window)
+        profile = db.get_profile()
+        sheet = PasswordsSheet(self.window, default_email=(profile.email if profile else "") or "")
         sheet.set_accounts(vault.list_accounts())
         sheet.unlocked_until = 0.0
         sheet.reveal_requested.connect(lambda tenant: self._unlock_sign_in(sheet, tenant, False))
         sheet.copy_requested.connect(lambda tenant: self._unlock_sign_in(sheet, tenant, True))
         sheet.forget_requested.connect(lambda tenant: self._forget_sign_in(sheet, tenant))
+        sheet.save_requested.connect(lambda details: self._save_sign_in(sheet, details))
+        sheet.open_requested.connect(self._open_sign_in_site)
+        sheet.export_requested.connect(lambda: self._unlock_sign_in(sheet, "", "export"))
+        self._sign_ins_sheet = sheet
         sheet.exec()
+
+    def _save_sign_in(self, sheet, details: dict) -> None:
+        """A sign-in the candidate typed: stored in the vault, never in SQLite or logs."""
+        from .. import vault
+        try:
+            record = vault.add_own(details["address"], details["email"], details["password"], details.get("company", ""))
+        except Exception as exc:  # noqa: BLE001 - a bad address or a locked vault
+            sheet.set_message(str(exc)[:200])
+            return
+        db.release_workday_holds(record.get("host", ""))   # JARVIS may apply there again
+        sheet.saved()
+        sheet.set_accounts(vault.list_accounts())
+        sheet.set_message(f"Saved. Starployment signs in to {record['company']}'s Workday with it.")
+
+    def _open_sign_in_site(self, tenant: str) -> None:
+        from .. import vault
+        url = vault.site_url(vault.get_account(tenant) or {})
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
+
+    def _export_sign_ins(self, sheet) -> None:
+        """Hand every sign-in to the macOS Passwords app through its CSV import, then delete the file."""
+        from .. import vault
+        try:
+            path, count = vault.export_for_passwords()
+        except Exception as exc:  # noqa: BLE001
+            sheet.set_message(str(exc)[:200])
+            return
+        if sys.platform == "darwin":
+            subprocess.run(["/usr/bin/open", "-a", "Passwords"], check=False)
+            subprocess.run(["/usr/bin/open", "-R", str(path)], check=False)
+        QTimer.singleShot(vault.EXPORT_SECONDS * 1000, vault.clear_export)
+        sheet.set_message(f"{count} sign-in{'s' if count != 1 else ''} ready for Passwords. In Passwords choose "
+                          "File → Import Passwords… and pick the file Finder is showing. Starployment deletes "
+                          f"that file in {vault.EXPORT_SECONDS // 60} minutes.")
 
     def _unlock_sign_in(self, sheet, tenant: str, copy: bool) -> None:
         from .. import vault
@@ -706,10 +748,14 @@ class DesktopController(QObject):
             return
         sheet.set_message("Waiting for Touch ID…")
         self._submit_assist("vault_auth", vault.authenticate, (sheet, tenant, copy),
-                            "show a saved Workday password")
+                            "export your Workday sign-ins to Passwords" if copy == "export"
+                            else "show a saved Workday password")
 
-    def _vault_unlocked(self, sheet, tenant: str, copy: bool) -> None:
+    def _vault_unlocked(self, sheet, tenant: str, copy) -> None:
         from .. import vault
+        if copy == "export":
+            self._export_sign_ins(sheet)
+            return
         password = vault.password_for(tenant)
         if not password:
             sheet.set_message("That password could not be read from the vault.")

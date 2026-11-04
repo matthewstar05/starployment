@@ -522,6 +522,8 @@ class JobHubWindow(QMainWindow):
         self.add_posting_action = action("Add Posting…", "Ctrl+N", self._add_posting)
         self.find_action = action("Find Jobs", QKeySequence.StandardKey.Find, self._find_jobs)
         self.setup_action = action("Edit Setup…", "Ctrl+Shift+E", self.setup_requested.emit)
+        self.sign_ins_action = action("Workday Sign-ins…", "Ctrl+Shift+P",
+                                      lambda: self.settings.passwords_requested.emit())
         self.save_action = action("Save", QKeySequence.StandardKey.Save, self._save_current)
         self.preferences_action = action("Settings…", QKeySequence.StandardKey.Preferences,
                                          lambda: self.nav.setCurrentRow(SETTINGS),
@@ -535,7 +537,8 @@ class JobHubWindow(QMainWindow):
         if sys.platform == "darwin" and QGuiApplication.platformName() == "cocoa":
             bar = self.menuBar()
             file_menu = bar.addMenu("File")
-            for item in (self.refresh_action, self.apply_action, self.add_posting_action, self.setup_action, self.save_action):
+            for item in (self.refresh_action, self.apply_action, self.add_posting_action, self.setup_action,
+                         self.sign_ins_action, self.save_action):
                 file_menu.addAction(item)
             file_menu.addAction(self.preferences_action)
             edit_menu = bar.addMenu("Edit")

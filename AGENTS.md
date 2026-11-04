@@ -109,6 +109,22 @@ them to make a feature easier.
    runs when the candidate clicks it, and during preparation when
    `settings.luna.autofill_on_prepare` is on (the default; Settings →
    Connections → "Autofill prepared applications").
+   **Standing answers** (Profile → Answers → Standing answers; `answers._standing_answer`)
+   are the candidate's own once-for-every-employer facts: 18 or older, relatives at the
+   employer, a non-compete, an active clearance (choice questions only; inverted or
+   conditional wording such as "under 18" or "willing to obtain" stays open), "worked for
+   the employer before" saved as No (no only when the employer is absent from the resume's
+   work history), and consent to Workday's application-terms box
+   (`application_terms_consent`, Workday only; never a certification of accuracy, a
+   signature, or an arbitration agreement), and, separately, Workday's "the information
+   provided is accurate" box (`accuracy_certification`; never a background-check, drug-test,
+   or credit consent). Also saved there: a specific source for Workday's "How did you hear"
+   picker (`workday_how_heard`), phone device type, a native language (Workday's Languages
+   block at its top proficiency), and a pay figure (`pay_range_target`) that picks the one
+   range containing it from a required pay-range list. Each applies only when the candidate
+   set it. With JARVIS ALL or ALL+ on, an open Workday text question that saved answers cannot
+   settle is written by Luna (`WorkdayEngine._luna_answer`, never a `luna.SENSITIVE_RE`
+   question, kept with that application), the same standing permission as AI Autofill.
    The submit boundary (rule 3) has two narrow, user-initiated exceptions.
    `prepare.reopen_rejected` → `db.mark_not_received` clears an unconfirmed
    attempt only when the employer explicitly refused it (`prepare.refused`: a
@@ -137,7 +153,7 @@ them to make a feature easier.
    for one posting at once. Sends may run side by side up to
    `settings.parallel_sends` (its `limit`; default 1 for every other caller),
    each in its own browser profile slot (`engine.browser_profile_slot`); the
-   desktop send pool never runs two to one employer at once. Automatic runs
+   desktop send pool and JARVIS ALL/ALL+ batches (`scheduler.jarvis_batch`, side by side up to their send concurrency) never run two to one employer at once. Automatic runs
    are capped per run, at one attempt per employer per cycle, and at
    `company_cap.count` attempts per employer in `company_cap.days`
    (`jarvis.diversify`, default 3 in 30 days; JARVIS ALL+ allows twice the count, `jarvis.company_limit`); with `mix_role_families` they
@@ -246,7 +262,20 @@ them to make a feature easier.
    guards `_press`; account and navigation buttons go through
    `_click_control` by automation id). Practice runs create no account and
    save no page. The submit boundary is recorded before the form is touched,
-   and only Workday's own confirmation marks it applied.
+   and only Workday's own confirmation marks it applied. The engine waits for a live
+   application (Apply, a start choice, or a sign-in) before the submit boundary, so a
+   closed posting (`workday.CLOSED_RE`) ends with nothing recorded as sent (an automatic run
+   hides it and skips the job, like any closed posting); it
+   never fills the "Create Account/Sign In" progress step as a form. Sign-ups that may wait
+   for a verification email take turns (`workday._SIGNUP_LOCK`) and read links only, so
+   side-by-side sends never open each other's link. JARVIS sends Workday only with both
+   switches on (`jarvis.workday_on`) and skips an employer whose saved sign-in is
+   `exists` or `failed` (`vault.sign_in_blocker`) until the candidate fixes it in
+   **File → Workday Sign-ins** (⌘⇧P; also Settings → Workday → Manage sign-ins), which
+   lists, adds, edits, opens, and forgets sign-ins and exports them to the macOS
+   Passwords app (`vault.export_for_passwords`: an owner-only CSV for Passwords' own
+   import, deleted after ten minutes; Starployment is not signed with an Apple keychain
+   entitlement, so it cannot write into the Passwords keychain directly).
    **The vault** (`jobhub/vault.py`): passwords go through
    `email_verification._keyring()` (rule 9) under service "Starployment
    Workday accounts"; `accounts.json` (owner-only) holds only employer, email,

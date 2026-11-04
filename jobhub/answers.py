@@ -16,7 +16,8 @@ if TYPE_CHECKING:
     from datetime import date
 
 DECLINE_RE = re.compile(r"decline|prefer not|don'?t wish|do not wish|not to (answer|say|disclose)|rather not|"
-                        r"not specified|choose not|i don'?t want|do not want to (answer|disclose)", re.I)
+                        r"not specified|choose not|i don'?t want|do not want to (answer|disclose)|"
+                        r"undeclared|not declared|not disclosed|no answer|unspecified", re.I)
 YES_RE = re.compile(r"^\s*yes\b", re.I)
 NO_RE = re.compile(r"^\s*no\b", re.I)
 
@@ -511,6 +512,114 @@ def _education_answer(q: Q, entry) -> Answer | None:
     return Answer(matches[0], "rule") if len(matches) == 1 else None
 
 
+TERMS_CONSENT_RE = (r"terms and conditions|terms of (?:use|service)|privacy (?:notice|policy|statement)|"
+                    r"read and (?:agree|accept|consent|acknowledge)|i consent|consent to|data (?:privacy|protection)")
+# Standing answers (Profile → Answers → Standing answers), each the candidate's own saved fact.
+STANDING_KEYS = ("over_18", "relatives_at_employer", "non_compete", "security_clearance", "former_employee",
+                 "application_terms_consent", "accuracy_certification")
+
+
+def _money(text: str) -> float | None:
+    """Dollars in "$100,000", "100k", or "100000" (None when there is no figure)."""
+    found = re.search(r"\$?\s*(\d[\d,]*(?:\.\d+)?)\s*([kK])?", text or "")
+    if not found:
+        return None
+    value = float(found.group(1).replace(",", ""))
+    return value * 1000 if found.group(2) else value
+
+
+def _money_range(option: str) -> tuple[float, float] | None:
+    """(low, high) for "$100,000-$124,999", "$500,000+", or "Under $50,000"; None when not a range."""
+    figures = [float(f.replace(",", "")) * (1000 if k else 1)
+               for f, k in re.findall(r"\$\s*(\d[\d,]*(?:\.\d+)?)\s*([kK])?", option or "")]
+    if len(figures) >= 2:
+        return min(figures[:2]), max(figures[:2])
+    if len(figures) == 1:
+        if re.search(r"\+|or more|and above|over|greater", option, re.I):
+            return figures[0], float("inf")
+        if re.search(r"under|less than|below|up to", option, re.I):
+            return 0.0, figures[0]
+    return None
+
+
+def _standing(answers: dict, confirmed: list, key: str) -> str:
+    return str(answers.get(key) or "").strip().casefold() if key in confirmed else ""
+
+
+def _worked_for(profile: Profile, company: str) -> bool:
+    """Whether the employer appears anywhere in the resume's work history."""
+    from .priority import normalize_company
+    wanted = normalize_company(company or "")
+    if not wanted:
+        return True    # no employer name to compare: treat as possibly worked there
+    for entry in getattr(profile, "experience", []) or []:
+        have = normalize_company(getattr(entry, "company", "") or "")
+        if have and (have == wanted or wanted in have or have in wanted):
+            return True
+    return False
+
+
+def _standing_answer(q: Q, label: str, answers: dict, confirmed: list, profile: Profile,
+                     job: Job | None) -> Answer | None:
+    """Yes/no questions the candidate answered once for every employer. Choice questions only:
+    a free-text box ("If yes, list them") stays with the candidate."""
+    if not (q.options or q.kind in {"radio", "select", "combobox"}) or q.kind == "checkbox":
+        return None
+
+    def matches(pattern: str) -> bool:
+        return bool(re.search(pattern, label))
+
+    def saved(key: str) -> Answer | None:
+        text = _standing(answers, confirmed, key)
+        return _explicit_answer(q, "Yes" if text == "yes" else "No") if text in {"yes", "no"} else None
+
+    # Inverted or conditional wording keeps the question with the candidate.
+    # ("including but not limited to" is a list, not a negation.)
+    plain = re.sub(r"\b(?:including )?but not limited to\b", "", label)
+    if re.search(r"\bnot\b|\bnever\b|\bunder (?:the age of )?18\b|younger than|\bminor\b|^if\b|willing|"
+                 r"able to obtain|eligible (?:for|to obtain)|obtain (?:a|an)\b", plain):
+        return None
+    if matches(r"\b18\b|legal age|age of majority|over the age|at least (?:the age of )?18"):
+        return saved("over_18")
+    if matches(r"relative|family member|related to (?:an? )?(?:current )?(?:employee|member)|immediate family|"
+               r"spouse|domestic partner"):
+        return saved("relatives_at_employer")
+    if matches(r"non.?compete|non.?solicit|restrictive covenant|non.?disclosure agreement"):
+        return saved("non_compete")
+    if matches(r"clearance") and matches(r"\b(?:have|hold|possess|currently|active|current)\b"):
+        return saved("security_clearance")
+    if matches(r"previously (?:been )?(?:worked|employed)|former (?:employee|worker)|worked (?:here|for us|for (?:this|the) "
+               r"company)|ever (?:been )?(?:worked|employed) (?:for|by|at|with)|(?:have|had) you (?:ever )?worked (?:for|at)|"
+               r"prior (?:employee|employment with)|(?:currently|presently) (?:employed by|work(?:ing)? (?:for|at))|"
+               r"current (?:employee|worker)|been employed by|accepted an offer (?:of employment )?(?:to work )?(?:at|with|from)"):
+        # "No" was saved as "no, unless the employer is in my resume's work history".
+        if _standing(answers, confirmed, "former_employee") == "no" and job is not None \
+                and not _worked_for(profile, job.company):
+            return _explicit_answer(q, "No")
+        return None
+    # "Have you ever worked for PwC or Deloitte?": other named firms, answered by the same saved
+    # "no, unless it is in my resume" (the candidate's resume lists every employer).
+    if matches(r"(?:currently|ever)[^?]{0,30}\bwork(?:ed)? (?:for|at|with)\b") and \
+            _standing(answers, confirmed, "former_employee") == "no":
+        firms = re.findall(r"\b[A-Z][A-Za-z&.]{1,}(?:\s+[A-Z][A-Za-z&.]+)*", q.label.split("worked", 1)[-1])
+        firms = [f for f in firms if f.casefold() not in {"or", "and", "either", "any", "their", "the", "inc", "llc"}]
+        if firms and not any(_worked_for(profile, firm) for firm in firms):
+            return _explicit_answer(q, "No")
+        return None
+    if matches(r"(?:interested in|able to|willing to)[^?]{0,40}\bwork (?:at|in|from) the location"):
+        # Automatic runs pick only postings in places the candidate accepts; a saved yes to
+        # relocating covers the rest.
+        return _explicit_answer(q, "Yes") if _standing(answers, confirmed, "willing_to_relocate") == "yes" else None
+    if matches(r"\b(?:are|were) you (?:a |being )?referr(?:al|ed)\b"):
+        # The candidate's own saved source says how they came to the role; a non-referral source
+        # answers "were you referred" with no.
+        heard = [str(answers.get(key) or "") for key in ("workday_how_heard", "how_heard") if key in confirmed]
+        if heard and not any(re.search(r"referr", text, re.I) for text in heard):
+            return _explicit_answer(q, "No")
+        return None
+    return None
+
+
 def rule_answer(q: Q, profile: Profile, settings: dict, job: Job | None) -> Answer | None:  # noqa: C901
     """Resolve verified facts or explicit per-question answers; leave unknowns open."""
     label = _normalized(q.label)
@@ -550,7 +659,23 @@ def rule_answer(q: Q, profile: Profile, settings: dict, job: Job | None) -> Answ
         declined = pick_option(q.options, "No")
         if declined:
             return Answer(declined, "rule")
-    # No general checkbox rule may accept a new attestation or legal consent.
+    # No general checkbox rule may accept a new attestation or legal consent. The one standing
+    # exception is Workday's application-terms box, and only with the candidate's own saved
+    # consent (Profile → Answers → Standing answers); a certification of accuracy never counts.
+    if (q.kind == "checkbox" and job is not None and job.ats == "workday" and _standing(answers, confirmed,
+                                                                                         "application_terms_consent") == "yes"
+            and matches(TERMS_CONSENT_RE) and not matches(r"certif|attest|true and (?:correct|complete)|accurate|"
+                                                          r"signature|e-?sign|background check|drug|arbitration")):
+        return Answer(True, "user")
+    # Workday answers come only from the candidate's own saved answers and resume, so with their
+    # saved say-so a Workday box confirming that information is accurate may be ticked too.
+    if (q.kind == "checkbox" and job is not None and job.ats == "workday"
+            and _standing(answers, confirmed, "accuracy_certification") == "yes"
+            and matches(r"(?:information|answers?|application|statements?)[^.]{0,80}\b(?:accurate|true|correct|complete)\b|"
+                        r"\bcertify\b|\battest\b")
+            and not matches(r"signature|e-?sign|arbitration|background (?:check|investigation)|drug|credit check|"
+                            r"polygraph|consent to (?:a |the )?(?:background|credit|drug)")):
+        return Answer(True, "user")
     if q.kind == "checkbox":
         if matches(r"undergrad(?:uate)?.*discipline") and " - " in q.label:
             subject = q.label.rpartition(" - ")[-1].strip()
@@ -566,6 +691,9 @@ def rule_answer(q: Q, profile: Profile, settings: dict, job: Job | None) -> Answ
             if entry and _degree_status(entry) != "unknown":
                 return Answer(_degree_status(entry) == "in progress", "resume")
         return None
+    standing = _standing_answer(q, label, answers, confirmed, profile, job)
+    if standing is not None:
+        return standing
     graduation_window = re.fullmatch(
         r"i confirm that my graduation date will be either (fall|spring) (20\d\d) "
         r"or (fall|spring) (20\d\d)", label,
@@ -614,7 +742,9 @@ def rule_answer(q: Q, profile: Profile, settings: dict, job: Job | None) -> Answ
             return None
         return eligibility("requires_sponsorship")
     if matches(r"authori[sz]ed|legally (able|permitted|eligible)|eligible to work|work permit|right to work"):
-        refers_to_job_country = matches(r"\b(?:country|location)\s+where\s+(?:the\s+)?job\s+is\s+located\b")
+        refers_to_job_country = matches(r"\b(?:country|location|jurisdiction)(?:\s+or\s+(?:jurisdiction|region|location))?"
+                                        r"\s+(?:where|in which)\s+(?:the\s+|this\s+)?(?:job|position|role)\b(?:[^?]{0,60}?)"
+                                        r"\s+is\s+located\b")
         if (matches(r"united states|\bu\.?s\.?a?\b") or
                 (refers_to_job_country and _posting_is_in_us(job))) and not matches(r"not authori|unauthori"):
             return eligibility("work_authorized_us")
@@ -626,6 +756,15 @@ def rule_answer(q: Q, profile: Profile, settings: dict, job: Job | None) -> Answ
                    r"los angeles|san francisco"):
             return None
         return known("willing_to_relocate")
+    if matches(r"salary|compensation|pay expectation|desired pay") and q.options and "pay_range_target" in confirmed:
+        # A list of pay ranges: the one containing the candidate's saved figure, else none.
+        target = _money(str(answers.get("pay_range_target") or ""))
+        ranges = [(option, _money_range(option)) for option in q.options]
+        containing = [option for option, span in ranges if span and target and span[0] <= target <= span[1]]
+        if len(containing) == 1:
+            return Answer(containing[0], "user")
+        if any(span for _, span in ranges):
+            return None
     if matches(r"salary|compensation|pay expectation|desired pay"):
         return known("salary_expectation")
     if matches(r"available to start|availability|earliest|notice period|when (can|could) you"):
@@ -634,8 +773,17 @@ def rule_answer(q: Q, profile: Profile, settings: dict, job: Job | None) -> Answ
                r"where did you (?:first\s+)?(?:hear|find|learn)|"
                r"(?:please\s+)?tell us how you (?:first\s+)?(?:heard|found|learned)|"
                r"^(?:application source|job source|source|how heard)\b"):
+        # Workday's picker needs a specific source ("LinkedIn"), not a category ("Job board").
+        if job is not None and job.ats == "workday" and known("workday_how_heard"):
+            return known("workday_how_heard")
         return known("how_heard")
-    if matches(r"years? of (relevant |professional |work )?experience"):
+    if matches(r"\bextension\b|^ext\.?$"):
+        return None   # a phone extension is never the phone number; only an exact saved answer fills it
+    if matches(r"^phone (?:device )?type$|^type of phone$|^phone number type$"):
+        return known("phone_type")
+    if matches(r"language preference|preferred language") and matches(r"communicat|correspond|contact"):
+        return known("native_language")
+    if matches(r"years? (?:of )?(relevant |professional |work )?experience"):
         return known("years_experience")
     if matches(r"employment type|full[- ]time|part[- ]time|contract") and q.options:
         return known("employment_type")

@@ -163,6 +163,18 @@ def enrich_job(job: Job) -> Job:
         raise PostingRefreshError("Could not verify the current public posting. Review the listing before continuing.") from error
 
 
+SCAN_SECONDS = 15 * 60
+
+
+def _until_timeout(iterator):
+    """Yield from an ``as_completed`` iterator, stopping quietly at its timeout."""
+    from concurrent.futures import TimeoutError as FuturesTimeout
+    try:
+        yield from iterator
+    except FuturesTimeout:
+        return
+
+
 def scan_once() -> dict:
     if not _scan_lock.acquire(blocking=False):
         return {"skipped": "scan already running"}
@@ -184,10 +196,15 @@ def scan_once() -> dict:
         t0 = time.time()
         successful = 0
         boards_read: dict[str, set[str]] = {}
-        with ThreadPoolExecutor(max_workers=jarvis.parallel(settings, "_source_workers", 6, 6),
-                                initializer=governor.same_qos()) as ex:
-            futures = {ex.submit(SOURCES[n], settings): n for n in enabled}
-            for future in as_completed(futures):
+        # A scan always finishes: a source still running after SCAN_SECONDS (a read the network
+        # dropped mid-reply, say) is reported and left behind, so it cannot hold up every later
+        # cycle. The pool is not waited on for the same reason.
+        ex = ThreadPoolExecutor(max_workers=jarvis.parallel(settings, "_source_workers", 6, 6),
+                                initializer=governor.same_qos(), thread_name_prefix="source")
+        futures = {ex.submit(SOURCES[n], settings): n for n in enabled}
+        try:
+            finished = as_completed(futures, timeout=SCAN_SECONDS)
+            for future in _until_timeout(finished):
                 name = futures[future]
                 try:
                     result = future.result()
@@ -209,6 +226,14 @@ def scan_once() -> dict:
                     status = "partial"
                     log.append(f"{name}: ERROR {error}")
                     db.add_event(f"Source {name} failed: {error}", "warn")
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)
+        stuck = [name for future, name in futures.items() if not future.done()]
+        if stuck:
+            status = "partial"
+            log.append(f"{', '.join(stuck)}: ERROR still running after {SCAN_SECONDS // 60} minutes")
+            db.add_event(f"Scan went ahead without {', '.join(stuck)}: no reply within {SCAN_SECONDS // 60} "
+                         "minutes", "warn")
         if enabled and not successful:
             status = "error"
         try:
@@ -354,6 +379,12 @@ def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | No
             else:
                 result = ApplyResult(status="failed", message=str(error), resume_path=resume,
                                      log=[traceback.format_exc()[-2000:]])
+        # A browser engine that found the posting closed (Workday's "page doesn't exist") before
+        # anything was sent: an automatic run skips it, like a closed board posting, instead of
+        # leaving an Issue for the morning.
+        if (require_eligible and not skipped and result.status == "failed" and not result.submission_attempted
+                and str(result.message).startswith("The employer has closed this posting")):
+            skipped = True
         try:
             # If an exception follows a submit click, preserve the uncertainty rather than offering a retry.
             record = db.get_application(application_id)
@@ -428,7 +459,7 @@ def auto_apply_batch() -> list[dict]:
                       or (job.ats == "workday" and (settings.get("workday") or {}).get("send")))
                   and job.score_json.get("auto_apply_eligible", True)
                   and not held_from_automation(job, priority)]
-    candidates = jarvis.diversify(candidates, settings)
+    candidates = jarvis.diversify(jarvis.not_repeated(candidates), settings)
     results = []
     attempted_companies: set[str] = set()
     max_applications = int(settings.get("max_apply_per_run", 3))
@@ -445,12 +476,17 @@ def auto_apply_batch() -> list[dict]:
         company_key = job.company.strip().casefold()
         if company_key and company_key in attempted_companies:
             continue
+        if job.ats == "workday":
+            from . import vault
+            if vault.sign_in_blocker(job.apply_url or job.url) or jarvis.set_aside([job.id]):
+                continue   # it would only record an attempt that stops where the last one did
         readiness = preflight_job(job, profile, settings)
         if readiness.status == "missing_facts":
             log.info("Skipped %s before application: required answers missing for %s",
                      job.id, ", ".join(readiness.missing))
             continue
         result = apply_one(job.id, require_eligible=True)
+        _after_workday(job, result)
         if result.get("status") == "skipped":
             continue   # a closed posting uses neither this run's budget nor the employer's turn
         results.append(result)
@@ -497,6 +533,86 @@ def _headroom_for(mode: str) -> bool:
         time.sleep(jarvis.WAIT_POLL_SECONDS)
 
 
+def _after_workday(job: Job, result: dict) -> None:
+    """A Workday send that stopped for the candidate (an employer-wide page or question, a sign-in)
+    would most likely stop the same way at that employer's other postings: set them aside, so an
+    employer costs one attempt, not one per posting. They come back after
+    jarvis.SET_ASIDE_SECONDS or when the candidate fixes the sign-in."""
+    if job.ats != "workday" or result.get("status") != "needs_human":
+        return
+    message = str(result.get("message") or "")
+    from urllib.parse import urlparse
+    from .apply.adapters import adapter_for
+    adapter = adapter_for(job)
+    host = (urlparse(adapter.apply_url if adapter else job.apply_url).hostname or "").casefold()
+    others = [job_id for job_id in db.workday_jobs_at(host) if job_id != job.id]
+    reason = (f"Every {job.company} Workday application stops at the same place: {message[:220]}")
+    seconds = jarvis.set_aside_seconds("candidate")
+    fresh = sum(db.hold_for_jarvis(job_id, reason, seconds) for job_id in others)
+    if fresh:
+        db.add_event(f"JARVIS set aside {fresh} more {job.company} posting(s): {message[:200]}", "warn", job.id)
+
+
+def _jarvis_attempt(job: Job, mode: str, sweep: bool, profile) -> tuple[str, dict | None]:
+    """One JARVIS application: ("result", outcome), ("skip", None) to try another, or ("stop", None)."""
+    from . import prepare
+    current = db.get_settings()
+    job = db.get_job(job.id)
+    if job is None or not jarvis.eligible(job, current) or not jarvis.not_repeated([job]):
+        return "skip", None
+    if job.ats == "workday":
+        from . import vault
+        blocker = vault.sign_in_blocker(job.apply_url or job.url)
+        if blocker:
+            _set_aside(job, blocker, "candidate")
+            return "skip", None
+    if not sweep:
+        readiness = preflight_job(job, profile, current)
+        if readiness.status == "missing_facts":
+            _set_aside(job, "Saved answers are missing for: " + ", ".join(readiness.missing or ())[:250],
+                       "candidate")
+            return "skip", None
+        result = apply_one(job.id, require_eligible=True, required_jarvis_mode=mode)
+        _after_workday(job, result)
+        return ("skip", None) if result.get("status") == "skipped" else ("result", result)
+    try:
+        draft = db.draft_for_job(job.id)
+        # Errors, interrupted preparations, and uncertain submissions wait for the owner.
+        if draft and (draft["status"] not in ("ready", "needs_answers", "approved")
+                      or draft.get("application_id")):
+            return "skip", None
+        if draft is None:
+            job = enrich_job(job)
+            if not jarvis.eligible(job, db.get_settings()):
+                return "skip", None
+            draft_id = prepare.prepare_job(job, profile, current)
+        else:
+            draft_id = draft["id"]
+        if not _headroom_for(mode):
+            return "stop", None
+        draft = db.get_draft(draft_id)
+        if any(prepare._open(q) for q in draft["questions"]):
+            prepare.autofill(draft_id, current)
+        if not _headroom_for(mode):
+            return "stop", None
+        current = db.get_settings()
+        if not jarvis.eligible(db.get_job(job.id), current):
+            return "skip", None
+        prepare.approve_and_queue(draft_id)
+        db.add_event(f"JARVIS {jarvis.label(mode)} authorized this draft, including its application-only "
+                     "AI Autofill answers", "info", job.id)
+        result = prepare.send_draft(draft_id, parallel=jarvis.parallel(current, "parallel_sends", 4, 24),
+                                    unattended=True)
+    except PostingGone:
+        db.set_job_status(job.id, "skipped")
+        return "skip", None
+    except Exception as error:  # one unavailable form/agent must not stop the overnight cycle
+        _set_aside(job, str(error), _set_aside_kind(job, error))
+        return "skip", None
+    _after_workday(job, result)
+    return ("skip", None) if result.get("status") == "skipped" else ("result", result)
+
+
 def jarvis_batch() -> list[dict]:
     """Standing, mode-scoped authorization, always through the durable send pipeline.
 
@@ -505,7 +621,6 @@ def jarvis_batch() -> list[dict]:
     it had to leave for the candidate is set aside (``jarvis.set_aside``), so later
     cycles spend their time on postings that can still go, not the same blocked ones.
     """
-    from . import prepare
     settings = db.get_settings()
     mode = jarvis.mode_of(settings)
     if not jarvis.active(settings) or not settings.get("setup_complete") or STATE.stop:
@@ -527,69 +642,60 @@ def jarvis_batch() -> list[dict]:
     if sweep:
         candidates = jarvis.still_listed(candidates)
     waiting = jarvis.set_aside(job.id for job in candidates)
-    candidates = jarvis.diversify(jarvis.rank([job for job in candidates if job.id not in waiting], mode), settings)
-    results, employers = [], set()
+    candidates = jarvis.diversify(jarvis.not_repeated(
+        jarvis.rank([job for job in candidates if job.id not in waiting], mode)), settings)
     maximum = int(settings.get("max_apply_per_run", 3))
+    # NEW sends one at a time. ALL and ALL+ run whole applications (prepare, AI Autofill,
+    # send) side by side, up to their send concurrency (ALL half of parallel_sends, ALL+ all
+    # of it), each in its own browser; one employer at a time, as before.
+    workers = jarvis.parallel(settings, "parallel_sends", 4, MAX_PARALLEL_SENDS) if sweep else 1
+    results: list[dict] = []
+    employers: set[str] = set()
+    stop = threading.Event()
+    lock = threading.Lock()
+
+    def attempt(job: Job, company: str) -> None:
+        try:
+            outcome = _jarvis_attempt(job, mode, sweep, profile)
+        except Exception:  # noqa: BLE001 - one failure never ends the overnight cycle
+            log.exception("JARVIS attempt failed")
+            outcome = ("skip", None)
+        with lock:
+            kind, result = outcome
+            if kind == "stop":
+                stop.set()
+            if kind != "result":
+                employers.discard(company)   # nothing went to this employer: another role may go
+                return
+            results.append(result)
+            if result.get("status") in ("blocked", "busy"):
+                stop.set()
+
     # Set-aside postings are already gone, so take the ranking in order (newest and best
     # first); the probe bound keeps one cycle's public requests and agent calls in check.
-    for job in candidates[:max(24, maximum * 8)]:
-        current = db.get_settings()
-        if len(results) >= maximum or not _headroom_for(mode):
-            break
-        job = db.get_job(job.id)
-        if job is None or not jarvis.eligible(job, current):
-            continue
-        company = job.company.strip().casefold()
-        if company in employers:
-            continue
-        if not sweep:
-            readiness = preflight_job(job, profile, current)
-            if readiness.status == "missing_facts":
-                _set_aside(job, "Saved answers are missing for: " + ", ".join(readiness.missing or ())[:250],
-                           "candidate")
-                continue
-            result = apply_one(job.id, require_eligible=True, required_jarvis_mode=mode)
-        else:
-            try:
-                draft = db.draft_for_job(job.id)
-                # Errors, interrupted preparations, and uncertain submissions wait for the owner.
-                if draft and (draft["status"] not in ("ready", "needs_answers", "approved")
-                              or draft.get("application_id")):
-                    continue
-                if draft is None:
-                    job = enrich_job(job)
-                    if not jarvis.eligible(job, db.get_settings()):
-                        continue
-                    draft_id = prepare.prepare_job(job, profile, current)
-                else:
-                    draft_id = draft["id"]
-                if not _headroom_for(mode):
+    from concurrent.futures import FIRST_COMPLETED, wait as wait_for
+    inflight: set = set()
+    with ThreadPoolExecutor(max_workers=workers, initializer=governor.same_qos(),
+                            thread_name_prefix="jarvis") as pool:
+        for job in candidates[:max(24, maximum * 8)]:
+            # Wait for a free worker and a place in this run's budget; an attempt that ends
+            # without sending (skipped, set aside) gives its place back.
+            while True:
+                inflight = {future for future in inflight if not future.done()}
+                with lock:
+                    room = not stop.is_set() and len(results) + len(inflight) < maximum
+                if (room and len(inflight) < workers) or not inflight:
                     break
-                draft = db.get_draft(draft_id)
-                if any(prepare._open(q) for q in draft["questions"]):
-                    prepare.autofill(draft_id, current)
-                if not _headroom_for(mode):
-                    break
-                current = db.get_settings()
-                if not jarvis.eligible(db.get_job(job.id), current):
+                _done, inflight = wait_for(inflight, return_when=FIRST_COMPLETED)
+            if not room or not _headroom_for(mode):
+                break
+            company = job.company.strip().casefold()
+            with lock:
+                if company in employers:
                     continue
-                prepare.approve_and_queue(draft_id)
-                db.add_event(f"JARVIS {jarvis.label(mode)} authorized this draft, including its application-only "
-                             "AI Autofill answers", "info", job.id)
-                result = prepare.send_draft(draft_id, parallel=jarvis.parallel(current, "parallel_sends", 4, 24),
-                                            unattended=True)
-            except PostingGone:
-                db.set_job_status(job.id, "skipped")
-                continue
-            except Exception as error:  # one unavailable form/agent must not stop the overnight cycle
-                _set_aside(job, str(error), _set_aside_kind(job, error))
-                continue
-        if result.get("status") == "skipped":
-            continue
-        results.append(result)
-        employers.add(company)
-        if result.get("status") in ("blocked", "busy"):
-            break
+                employers.add(company)
+            inflight.add(pool.submit(attempt, job, company))
+        wait_for(inflight)
     db.add_event(f"JARVIS {jarvis.label(mode)} finished: {len(results)} attempt(s), "
                  f"{sum(r.get('status') == 'applied' for r in results)} confirmed"
                  + (f"; {len(waiting)} set aside for you" if waiting else ""))

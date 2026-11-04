@@ -77,6 +77,13 @@ def adapter_for(job: Job) -> Adapter | None:
         )
     if host.endswith(".myworkdayjobs.com") and host.count(".") == 3 and "/job/" in parsed.path:
         return Adapter("workday", url, assist_only=True, settle_ms=1500)
+    # Workday's shared host for the same postings: wd1.myworkdaysite.com/recruiting/<tenant>/<site>/job/…
+    # is <tenant>.wd1.myworkdayjobs.com/<site>/job/…, the employer's own address (and its own account).
+    shared = re.fullmatch(r"(wd\d+)\.myworkdaysite\.com", host)
+    recruiting = re.match(r"/recruiting/([A-Za-z0-9_-]+)/(.+/job/.+)", parsed.path)
+    if shared and recruiting:
+        own = f"https://{recruiting.group(1).lower()}.{shared.group(1)}.myworkdayjobs.com/{recruiting.group(2)}"
+        return Adapter("workday", own + (f"?{parsed.query}" if parsed.query else ""), assist_only=True, settle_ms=1500)
     if host == "ats.rippling.com" and re.fullmatch(r"/[^/]+/jobs/[0-9a-fA-F-]{36}(?:/apply)?/?", parsed.path):
         return Adapter("rippling", _with_suffix(url, "/apply"),
                        submit_selectors=["button[type=submit]:has-text('Apply')"],

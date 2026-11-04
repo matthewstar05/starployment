@@ -257,3 +257,104 @@ def _la_evaluate(policy: int, reason: str, timeout: float, interactive: bool = T
     finally:
         send(None, [])(context, sel("release"))
     return bool(outcome.get("ok")), outcome.get("message", "")
+
+
+# ------------------------------------------------------------------ your own sign-ins
+def parse_site(address: str) -> tuple[str, str]:
+    """(tenant, host) from an employer's Workday address or host, e.g.
+    ``https://citi.wd5.myworkdayjobs.com/2`` → ("citi", "citi.wd5.myworkdayjobs.com")."""
+    from urllib.parse import urlparse
+    text = (address or "").strip()
+    host = (urlparse(text if "//" in text else f"https://{text}").hostname or "").casefold()
+    return tenant_of(host), host
+
+
+def add_own(address: str, email: str, password: str, company: str = "") -> dict:
+    """A sign-in the candidate already has (or just changed), entered by hand."""
+    tenant, host = parse_site(address)
+    if "@" not in (email or ""):
+        raise ValueError("Enter the email you sign in with")
+    return save_account(tenant, email, password, company=company.strip() or tenant.title(), host=host,
+                        status="active", note="Added by you")
+
+
+def site_url(record: dict) -> str:
+    """The employer's Workday address for a saved account ('' when unknown)."""
+    host = record.get("host") or ""
+    return f"https://{host}/" if host else ""
+
+
+# ------------------------------------------------------------------ macOS Passwords
+# The Passwords app imports this CSV layout (File → Import Passwords…). Starployment is signed
+# on this Mac without an Apple-issued keychain entitlement, so it cannot write into the
+# Passwords keychain itself; an import is the supported way in, and Passwords then syncs the
+# sign-ins with iCloud Keychain and fills them in Safari on each employer's Workday.
+PASSWORDS_HEADER = ("Title", "URL", "Username", "Password", "Notes", "OTPAuth")
+EXPORT_NAME = "Starployment Workday sign-ins.csv"
+EXPORT_SECONDS = 10 * 60
+
+
+def export_dir():
+    return config.DATA / "passwords-export"
+
+
+def export_for_passwords() -> tuple[object, int]:
+    """Write every saved sign-in to an owner-only CSV for the Passwords app. Returns (path, count).
+
+    Callers ask for Touch ID first and remove the file with ``clear_export`` soon after.
+    """
+    import csv
+    import io
+    rows = []
+    for record in list_accounts():
+        password = password_for(record["tenant"])
+        if not password:
+            continue
+        rows.append((f"{record.get('company') or record['tenant']} (Workday)", site_url(record),
+                     record["email"], password, "Saved by Starployment", ""))
+    if not rows:
+        raise ValueError("There are no saved sign-ins with a password to export yet.")
+    folder = export_dir()
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(folder, 0o700)
+    path = folder / EXPORT_NAME
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(PASSWORDS_HEADER)
+    writer.writerows(rows)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+        handle.write(buffer.getvalue())
+    return path, len(rows)
+
+
+def clear_export() -> None:
+    """Delete an export file (after the import, on a timer, and at startup)."""
+    folder = export_dir()
+    try:
+        for item in folder.iterdir():
+            item.unlink(missing_ok=True)
+        folder.rmdir()
+    except OSError:
+        pass
+
+
+def sign_in_blocker(apply_url: str) -> str:
+    """Why an unattended Workday send to this posting would stop at sign-in ('' when it would not).
+
+    An account Starployment could not sign in to (one that already existed, or a refused
+    password) needs the candidate once, in Workday sign-ins; trying anyway would only record
+    an attempt that cannot go anywhere.
+    """
+    import re
+    shared = re.match(r"https?://wd\d+\.myworkdaysite\.com/recruiting/([A-Za-z0-9_-]+)/", apply_url or "", re.I)
+    try:
+        tenant = shared.group(1).casefold() if shared else tenant_of(apply_url)
+    except ValueError:
+        return ""
+    record = get_account(tenant)
+    if not record or record.get("status") not in ("exists", "failed"):
+        return ""
+    company = record.get("company") or tenant
+    return (f"Starployment cannot sign in to {company}'s Workday yet. Open File → Workday Sign-ins, choose Edit "
+            f"for {company}, and enter your password; JARVIS applies there again after that.")

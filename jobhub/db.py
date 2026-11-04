@@ -469,6 +469,29 @@ def jarvis_holds(job_ids) -> dict[str, tuple[float, str]]:
     return found
 
 
+def workday_jobs_at(host: str) -> list[str]:
+    """Workday postings at one employer's address (both of Workday's URL forms)."""
+    host = (host or "").strip().casefold()
+    tenant = host.split(".")[0] if host else ""
+    if not tenant:
+        return []
+    with reader() as c:
+        return [r[0] for r in c.execute(
+            "SELECT id FROM jobs WHERE ats='workday' AND (lower(apply_url) LIKE ? OR lower(url) LIKE ? OR "
+            "lower(apply_url) LIKE ?)", (f"%//{host}/%", f"%//{host}/%", f"%/recruiting/{tenant}/%"))]
+
+
+def release_workday_holds(host: str) -> int:
+    """Let JARVIS try an employer's Workday postings again (the candidate fixed its sign-in)."""
+    host = (host or "").strip().casefold()
+    if not host:
+        return 0
+    with conn() as c:
+        cur = c.execute("DELETE FROM jarvis_holds WHERE job_id IN (SELECT id FROM jobs WHERE ats='workday' AND "
+                        "(lower(apply_url) LIKE ? OR lower(url) LIKE ?))", (f"%//{host}/%", f"%//{host}/%"))
+        return cur.rowcount
+
+
 def draft_stamps(job_ids) -> dict[str, str]:
     """Each draft's updated_at by job, so a set-aside posting returns once the candidate edits it."""
     ids = list(job_ids)
@@ -479,6 +502,27 @@ def draft_stamps(job_ids) -> dict[str, str]:
             found.update((r[0], r[1] or "") for r in c.execute(
                 f"SELECT job_id, updated_at FROM drafts WHERE job_id IN ({','.join('?' * len(chunk))})", chunk))
     return found
+
+
+def automation_history() -> tuple[set[tuple[str, str]], set[str]]:
+    """(roles already applied to, employers in an active process), for ``jarvis.not_repeated``.
+
+    Roles are (normalized company, ``jarvis.role_key``) of every attempt that reached the
+    employer or was sent by hand; employers are those with an application at assessment,
+    interview, or offer."""
+    from .jarvis import role_key
+    from .priority import normalize_company
+    roles: set[tuple[str, str]] = set()
+    engaged: set[str] = set()
+    with reader() as c:
+        for row in c.execute("SELECT j.company, j.title, a.stage, a.status, a.submission_attempted, a.method "
+                             "FROM applications a JOIN jobs j ON j.id=a.job_id").fetchall():
+            company = normalize_company(row["company"] or "")
+            if (row["submission_attempted"] or row["status"] == "applied" or row["method"] == "manual"):
+                roles.add((company, role_key(row["title"] or "")))
+            if (row["stage"] or "") in ("assessment", "interview", "offer"):
+                engaged.add(company)
+    return roles, engaged
 
 
 def recent_company_attempts(days: float) -> dict[str, int]:
@@ -931,14 +975,15 @@ def hide_closed_posting_attempts() -> int:
     hidden = 0
     with conn() as c:
         rows = c.execute(
-            "SELECT a.id, a.job_id, a.error, a.log FROM applications a WHERE a.status='needs_human' "
-            "AND a.submission_attempted=0 AND a.hidden=0 AND (a.error LIKE '%no longer meets your automatic%' "
+            "SELECT a.id, a.job_id, a.error, a.log FROM applications a WHERE a.submission_attempted=0 AND a.hidden=0 "
+            "AND ((a.status='failed' AND a.error LIKE 'The employer has closed this posting%') OR a.status='needs_human') "
+            "AND (a.error LIKE 'The employer has closed this posting%' OR a.error LIKE '%no longer meets your automatic%' "
             "OR (a.error LIKE 'Could not verify the current public posting%' "
             "    AND (a.log LIKE '%404 Not Found%' OR a.log LIKE '%410 Gone%' "
             "         OR a.log LIKE '%Public posting was not found%')))").fetchall()
         for row in rows:
             c.execute("UPDATE applications SET hidden=1 WHERE id=?", (row["id"],))
-            c.execute("UPDATE jobs SET status='skipped', updated_at=? WHERE id=? AND status='needs_human'",
+            c.execute("UPDATE jobs SET status='skipped', updated_at=? WHERE id=? AND status IN ('needs_human', 'failed')",
                       (now_iso(), row["job_id"]))
             hidden += 1
     return hidden

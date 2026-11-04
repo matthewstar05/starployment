@@ -42,11 +42,33 @@ YES_NO_ANSWERS = (
     ("us_citizen_or_permanent_resident", "US citizen or permanent resident"),
     ("willing_to_relocate", "Willing to relocate"),
 )
+# Answered once for every employer (answers._standing_answer). Each choice is the candidate's own.
+STANDING_ANSWERS = (
+    ("over_18", "18 or older", ("Yes", "No")),
+    ("relatives_at_employer", "Relatives work at the employer", ("Yes", "No")),
+    ("non_compete", "Bound by a non-compete", ("Yes", "No")),
+    ("security_clearance", "Hold an active security clearance", ("Yes", "No")),
+    ("former_employee", "Worked for the employer before", ("No",)),
+    ("application_terms_consent", "Agree to Workday application terms", ("Yes",)),
+    ("accuracy_certification", "Certify Workday answers are accurate", ("Yes",)),
+)
+STANDING_NOTES = {
+    "former_employee": "No means: no, unless the employer is in your resume's work history (then it asks you).",
+    "application_terms_consent": "Yes ticks a Workday application's terms and privacy consent box. A signature or "
+                                 "an arbitration agreement still waits for you.",
+    "accuracy_certification": "Yes ticks Workday's \"the information provided is accurate\" box. Workday answers "
+                              "come only from your saved answers and resume.",
+}
 TEXT_ANSWERS = (
     ("salary_expectation", "Salary expectation", "e.g. $120,000 or Negotiable", ()),
     ("available_start", "Available to start", "e.g. June 2026", ()),
     ("how_heard", "How you heard about roles", "", ("Company website", "LinkedIn", "Job board", "Referral",
                                                     "University career site", "Recruiter")),
+    ("workday_how_heard", "How you heard (Workday)", "A specific source Workday's list offers, e.g. LinkedIn",
+     ("LinkedIn", "Indeed", "Company website")),
+    ("phone_type", "Phone device type", "", ("Mobile", "Home", "Business")),
+    ("native_language", "Native or fluent language", "Entered with the top proficiency, e.g. English", ("English",)),
+    ("pay_range_target", "Pay to look for in a range list", "e.g. 100000: picks the range that contains it", ()),
     ("preferred_name", "Preferred name", "Only if different from your first name", ()),
     ("pronouns", "Pronouns", "Optional", ("she/her", "he/him", "they/them")),
 )
@@ -177,6 +199,16 @@ class ProfileView(QWidget):
             control.setAccessibleName(title)
             self.yes_no[key] = control
             eligibility.add_row(title, control)
+        standing = FormGroup("Standing answers", "Questions many employers ask, Workday especially, answered "
+                                                  "once. Leave “Not set” to be asked each time.")
+        for key, title, choices in STANDING_ANSWERS:
+            control = SegmentedControl(compact=True)
+            control.addItem("Not set", "")
+            for choice in choices:
+                control.addItem(choice, choice)
+            control.setAccessibleName(title)
+            self.yes_no[key] = control
+            standing.add_row(title, control, STANDING_NOTES.get(key, ""))
         common = FormGroup("Common questions")
         self.answer_fields: dict[str, QComboBox | QLineEdit] = {}
         for key, title, placeholder, suggestions in TEXT_ANSWERS:
@@ -197,7 +229,7 @@ class ProfileView(QWidget):
                                             key_placeholder="Question", value_placeholder="Your answer",
                                             add_text="Add a question")
         bank.add_widget(self.question_bank)
-        for group in (eligibility, common, bank):
+        for group in (eligibility, standing, common, bank):
             answers_layout.addWidget(group)
         answers_layout.addStretch(1)
         self.pages.addWidget(_scroll(answers_page))
