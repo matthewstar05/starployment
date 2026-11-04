@@ -88,6 +88,13 @@ class StatTile(GlassPanel):
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setToolTip(tooltip)
 
+    def mousePressEvent(self, event) -> None:  # noqa: N802
+        # Accepting the press is what routes the release here; the labels inside pass it up.
+        if self._clickable and event.button() == Qt.MouseButton.LeftButton:
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if self._clickable and event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.pos()):
             self.clicked.emit()

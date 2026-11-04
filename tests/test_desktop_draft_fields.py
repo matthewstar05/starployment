@@ -116,7 +116,11 @@ def test_tracker_count_tiles_pick_the_matching_filter(app):
     def visible():
         return [view.table.item(r, view.ROLE).data(SUBTITLE_ROLE) for r in range(view.table.rowCount())
                 if not view.table.isRowHidden(r)]
-    QTest.mouseClick(view.tiles["interview"], Qt.MouseButton.LeftButton, pos=QPoint(10, 10))
+    # A real click lands on the tile's number label and goes through the window, not the tile itself.
+    window = view.window().windowHandle()
+    number = view.tiles["interview"].value
+    spot = number.mapTo(view.window(), number.rect().center())
+    QTest.mouseClick(window, Qt.MouseButton.LeftButton, pos=spot)
     assert view.filter.currentData() == "interview" and visible() == ["C2"]
     QTest.mouseClick(view.tiles["assessment"], Qt.MouseButton.LeftButton, pos=QPoint(10, 10))
     assert view.filter.currentData() == "assessment" and visible() == ["C1"]
