@@ -62,6 +62,14 @@ CREATE TABLE IF NOT EXISTS jarvis_holds (
 CREATE TABLE IF NOT EXISTS mail_luna (
   message_key TEXT PRIMARY KEY, stage TEXT, company TEXT, read_at TEXT
 );
+-- What each employer's Workday Candidate Home last said about an application, so a check
+-- reports only changes. Status text and flags only; nothing the candidate entered.
+CREATE TABLE IF NOT EXISTS workday_portal (
+  application_id INTEGER PRIMARY KEY, tenant TEXT, status TEXT DEFAULT '', draft INTEGER DEFAULT 0,
+  tasks INTEGER DEFAULT 0, stage TEXT DEFAULT '', checked_at TEXT, changed_at TEXT
+);
+-- When each employer's Candidate Home was last read, and how it went.
+CREATE TABLE IF NOT EXISTS workday_portal_checks (tenant TEXT PRIMARY KEY, checked_at TEXT, outcome TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS resume_files (
   id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT UNIQUE, label TEXT, category TEXT DEFAULT 'general',
   is_default INTEGER DEFAULT 0, added_at TEXT, enabled INTEGER DEFAULT 1, removed INTEGER DEFAULT 0
@@ -348,6 +356,12 @@ def upsert_jobs(jobs: list[Job]) -> int:
                 "SELECT id, company, title, location, remote, posted_at, posted_ts, salary_min, salary_max, "
                 "description, ats, apply_url FROM jobs WHERE id = ? OR url = ? OR canonical_key = ? LIMIT 1",
                 (j.id, j.url, key)).fetchone()
+            if exists and c.execute("SELECT 1 FROM applications WHERE job_id=? AND (status='applied' "
+                                    "OR submission_attempted=1) LIMIT 1", (exists["id"],)).fetchone():
+                # Once an application went out, the posting keeps the employer and title it was sent
+                # under. Two sources name some postings differently ("Netic" and "Cybernetic Labs"),
+                # and taking whichever was read last renamed sent applications on every scan.
+                j.company, j.title = exists["company"] or j.company, exists["title"] or j.title
             if exists and not _upsert_changes(exists, j):
                 # Unchanged: rewriting the row (and its long description) on every scan
                 # held the database for seconds and grew the write-ahead log.
@@ -1370,11 +1384,99 @@ def list_tracker(limit: int = 5000) -> list[dict]:
     return out
 
 
+def workday_applications() -> list[dict]:
+    """The latest visible attempt at each Workday vacancy that reached the submit boundary."""
+    with reader() as c:
+        rows = c.execute(
+            "SELECT a.id, a.job_id, a.status, a.stage, a.stage_source, a.started_at, a.finished_at, "
+            "j.company, j.title, j.url, j.apply_url FROM applications a JOIN jobs j ON j.id=a.job_id "
+            "WHERE j.ats='workday' AND COALESCE(a.hidden,0)=0 AND (a.status='applied' OR a.submission_attempted=1 "
+            "OR a.status IN ('queued','running')) "
+            "AND a.id=(SELECT MAX(a2.id) FROM applications a2 WHERE a2.job_id=a.job_id) ORDER BY a.id").fetchall()
+    return [dict(row) for row in rows]
+
+
+def portal_checked(tenant: str) -> str:
+    with reader() as c:
+        row = c.execute("SELECT checked_at FROM workday_portal_checks WHERE tenant=?", (tenant,)).fetchone()
+    return row["checked_at"] if row else ""
+
+
+def record_portal_check(tenant: str, outcome: str) -> None:
+    with conn() as c:
+        c.execute("INSERT INTO workday_portal_checks(tenant, checked_at, outcome) VALUES (?,?,?) "
+                  "ON CONFLICT(tenant) DO UPDATE SET checked_at=excluded.checked_at, outcome=excluded.outcome",
+                  (tenant, now_iso(), outcome[:300]))
+
+
+def portal_state(app_id: int) -> dict | None:
+    with reader() as c:
+        row = c.execute("SELECT * FROM workday_portal WHERE application_id=?", (app_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def save_portal_state(app_id: int, tenant: str, status: str, draft: bool, tasks: bool, stage: str) -> bool:
+    """Store what Candidate Home shows. Returns True when it differs from the last reading."""
+    stamp = now_iso()
+    with conn() as c:
+        row = c.execute("SELECT status, draft, tasks FROM workday_portal WHERE application_id=?", (app_id,)).fetchone()
+        changed = row is None or (row["status"], bool(row["draft"]), bool(row["tasks"])) != (status, draft, tasks)
+        c.execute("INSERT INTO workday_portal(application_id, tenant, status, draft, tasks, stage, checked_at, "
+                  "changed_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(application_id) DO UPDATE SET "
+                  "status=excluded.status, draft=excluded.draft, tasks=excluded.tasks, stage=excluded.stage, "
+                  "checked_at=excluded.checked_at, changed_at=CASE WHEN ? THEN excluded.changed_at "
+                  "ELSE workday_portal.changed_at END",
+                  (app_id, tenant, status[:120], int(draft), int(tasks), stage, stamp, stamp, int(changed)))
+    return changed
+
+
+def confirm_from_portal(app_id: int, status: str) -> bool:
+    """An unconfirmed Workday attempt that the employer's own Candidate Home lists as submitted.
+
+    That listing is the employer's record of a received application, the same evidence as a
+    confirmation page, so the attempt becomes Applied. Only an attempt that passed the submit
+    boundary and is not running is changed; returns whether it was."""
+    stamp = now_iso()
+    with conn() as c:
+        row = c.execute("SELECT job_id, status, submission_attempted, log FROM applications WHERE id=?",
+                        (app_id,)).fetchone()
+        if row is None or row["status"] != "needs_human" or not row["submission_attempted"]:
+            return False
+        try:
+            log = json.loads(row["log"] or "[]")
+        except ValueError:
+            log = []
+        log.append(f"Workday's Candidate Home lists this application as submitted ({status[:80]}).")
+        c.execute("UPDATE applications SET status='applied', error='', finished_at=COALESCE(finished_at, ?), "
+                  "log=?, stage=CASE WHEN COALESCE(stage,'')='' THEN 'applied' ELSE stage END, "
+                  "stage_source=CASE WHEN COALESCE(stage_source,'')='' THEN 'workday' ELSE stage_source END, "
+                  "stage_updated_at=? WHERE id=?", (stamp, json.dumps(log), stamp, app_id))
+        c.execute("UPDATE jobs SET status='applied', updated_at=? WHERE id=?", (stamp, row["job_id"]))
+        c.execute("UPDATE drafts SET status='sent', application_id=?, error='', updated_at=? WHERE job_id=? "
+                  "AND status IN ('unconfirmed','error','sending')", (app_id, stamp, row["job_id"]))
+    return True
+
+
+def tracked_application(app_id: int) -> dict | None:
+    """One application as ``list_tracker`` describes it, even when a newer attempt at the same
+    vacancy is the one the Tracker shows."""
+    with reader() as c:
+        row = c.execute(
+            "SELECT a.id, a.job_id, a.status, a.started_at, a.finished_at, a.stage, a.stage_source, "
+            "j.company, j.title, j.url, j.ats FROM applications a JOIN jobs j ON j.id=a.job_id WHERE a.id=?",
+            (app_id,)).fetchone()
+    if row is None:
+        return None
+    found = dict(row)
+    found["stage"] = found.get("stage") or ("applied" if found["status"] == "applied" else "")
+    return found
+
+
 def set_application_stage(app_id: int, stage: str, source: str = "manual") -> bool:
     """Record a hiring stage. Email updates only move forward and never override a manual choice."""
     if stage not in STAGES:
         raise ValueError(f"Unknown stage: {stage}")
-    if source not in ("manual", "email"):
+    if source not in ("manual", "email", "workday"):
         raise ValueError("Unknown stage source")
     with conn() as c:
         row = c.execute("SELECT stage, stage_source, status, submission_attempted FROM applications WHERE id=?",
@@ -1386,8 +1488,10 @@ def set_application_stage(app_id: int, stage: str, source: str = "manual") -> bo
         current = row["stage"] or ""
         # An inbox signal can only advance a record. It never reopens an
         # offer or a closed application, and never undoes a manual choice.
-        if source == "email" and (current in ("offer", "rejected", "withdrawn")
-                                  or STAGE_RANK[stage] <= STAGE_RANK.get(current, 0)):
+        # An employer's Workday Candidate Home is read the same way: forward only, never over
+        # the candidate's own choice.
+        if source in ("email", "workday") and (current in ("offer", "rejected", "withdrawn")
+                                               or STAGE_RANK[stage] <= STAGE_RANK.get(current, 0)):
             return False
         c.execute("UPDATE applications SET stage=?, stage_source=?, stage_updated_at=? WHERE id=?",
                   (stage, source, now_iso(), app_id))

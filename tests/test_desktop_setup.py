@@ -95,7 +95,6 @@ def test_setup_wizard_emits_candidate_owned_payload(local_store, monkeypatch):
     wizard.custom_answers.add_row("Preferred team", "Platform")
     wizard.target_titles.set_values(["product manager"])
     wizard.yes_no["requires_sponsorship"].setCurrentIndex(wizard.yes_no["requires_sponsorship"].findData("No"))
-    wizard.auto_apply.setChecked(True)
     wizard.years_experience.setValue(4)
     wizard.confirm_years_experience.setChecked(True)
     captured = []
@@ -103,7 +102,7 @@ def test_setup_wizard_emits_candidate_owned_payload(local_store, monkeypatch):
     wizard._submit()
     assert captured[0]["profile"]["custom_facts"] == {"Favorite domain": "accessibility"}
     assert captured[0]["settings"]["answers"]["field_answers"]["I agree to this notice"] is True
-    assert captured[0]["settings"]["auto_apply"] is True
+    assert "auto_apply" not in captured[0]["settings"]      # only JARVIS sends by itself
     assert captured[0]["settings"]["answers"]["years_experience"] == "4"
     assert "years_experience" in captured[0]["settings"]["answers"]["confirmed_fields"]
     assert captured[0]["settings"]["answers"]["requires_sponsorship"] == "No"

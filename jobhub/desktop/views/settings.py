@@ -131,6 +131,13 @@ class SettingsView(QWidget):
         workday.add_row("Send Workday applications", self.workday_send,
                         "Approve & send, Send ready, and automatic runs fill each Workday page, save it, and submit. "
                         "A page asking something you have no saved answer for comes back to you.")
+        self.workday_portal = ToggleSwitch()
+        self.workday_portal.setAccessibleName("Track Workday applications")
+        workday.add_row("Track Workday applications", self.workday_portal,
+                        "With each inbox check (every few hours per employer), sign in to each employer's Workday "
+                        "Candidate Home with the saved sign-in and read what it says about your applications: "
+                        "received, under review, a task waiting, or no longer under consideration. Many employers "
+                        "send no email until they decide. Nothing there is changed.")
         passwords = button("Manage sign-ins…", "secondary")
         passwords.clicked.connect(self.passwords_requested)
         workday.add_row("Saved sign-ins", passwords,
@@ -141,8 +148,6 @@ class SettingsView(QWidget):
 
         # Automation -------------------------------------------------------------
         automation = FormGroup("Automation", "Starployment scans while the app is open and the computer is awake.")
-        self.auto_apply = ToggleSwitch()
-        self.auto_apply.setAccessibleName("Automatic applications")
         self.dry_run = ToggleSwitch()
         self.dry_run.setAccessibleName("Practice mode")
         self.interval = QSpinBox()
@@ -172,8 +177,6 @@ class SettingsView(QWidget):
                            "AI Autofill gives each long answer its own call and runs them side by side.")
         automation.add_row("Show the browser while sending", self.show_browser,
                            "Off sends quietly in the background. Turn on to watch a send.")
-        automation.add_row("Automatic applications", self.auto_apply,
-                           "Also apply to eligible matches after each scan, without review.")
         self.interval.setSingleStep(5)
         automation.add_row("Scan every", Stepper(self.interval, width=104))
         automation.add_row("Applications per run", Stepper(self.max_apply), "At most one per employer each run.")
@@ -273,10 +276,10 @@ class SettingsView(QWidget):
         groups.addStretch(1)
 
         self.tracker.watch(
-            self.jarvis_mode, self.auto_apply, self.dry_run, self.interval, self.max_apply, self.min_score, self.luna, self.email,
+            self.jarvis_mode, self.dry_run, self.interval, self.max_apply, self.min_score, self.luna, self.email,
             self.parallel_sends, self.parallel_prepare, self.parallel_agent_calls,
             self.show_browser, self.keychain_protection, self.workday_accounts, self.workday_send,
-            self.company_cap, self.mix_families, self.prune,
+            self.workday_portal, self.company_cap, self.mix_families, self.prune,
             self.target_titles, self.locations, self.exclude_words, self.remote_ok, self.include_internships,
             self.min_salary, self.years_experience, self.max_skills, self.greenhouse, self.lever,
             self.ashby, self.workday, self.search_terms, self.priority_companies, self.discover_boards,
@@ -359,7 +362,6 @@ class SettingsView(QWidget):
             typeface = str(s.get("font", "Claude")).title()
             self.typeface.setCurrentIndex(max(0, self.typeface.findData(typeface)))
             self.jarvis_mode.setCurrentIndex(max(0, self.jarvis_mode.findData(s.get("jarvis_mode", "off"))))
-            self.auto_apply.setChecked(bool(s.get("auto_apply", False)))
             self.dry_run.setChecked(bool(s.get("dry_run", False)))
             self.interval.setValue(int(s.get("scan_interval_min", 60)))
             self.max_apply.setValue(int(s.get("max_apply_per_run", 3)))
@@ -375,6 +377,7 @@ class SettingsView(QWidget):
             workday = s.get("workday") or {}
             self.workday_accounts.setChecked(bool(workday.get("create_accounts", False)))
             self.workday_send.setChecked(bool(workday.get("send", False)))
+            self.workday_portal.setChecked(bool(workday.get("check_portal", True)))
             strat = str(s.get("resume_strategy", "tailored"))
             if strat == "bank":
                 strat = "library"
@@ -406,7 +409,6 @@ class SettingsView(QWidget):
             "appearance": self.appearance.currentData(),
             "font": self.typeface.currentData(),
             "jarvis_mode": self.jarvis_mode.currentData(),
-            "auto_apply": self.auto_apply.isChecked(),
             "dry_run": self.dry_run.isChecked(),
             "scan_interval_min": self.interval.value(),
             "max_apply_per_run": self.max_apply.value(),
@@ -419,7 +421,8 @@ class SettingsView(QWidget):
             "parallel_agent_calls": self.parallel_agent_calls.value(),
             "show_browser": self.show_browser.isChecked(),
             "keychain_protection": self.keychain_protection.isChecked(),
-            "workday": {"create_accounts": self.workday_accounts.isChecked(), "send": self.workday_send.isChecked()},
+            "workday": {"create_accounts": self.workday_accounts.isChecked(), "send": self.workday_send.isChecked(),
+                        "check_portal": self.workday_portal.isChecked()},
             "resume_strategy": self.strategy.currentData(),
             "resume_builder": {"one_page": True, "max_skills": self.max_skills.value(),
                                **luna.pop("resume_builder")},

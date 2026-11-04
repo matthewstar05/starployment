@@ -59,7 +59,10 @@ def plus(settings: dict) -> bool:
 
 
 def automatic(settings: dict) -> bool:
-    return active(settings) or bool(settings.get("auto_apply"))
+    """Whether anything may be sent without the candidate pressing send: only JARVIS. The older
+    "Automatic applications" switch (``auto_apply``) no longer sends on its own; with JARVIS
+    OFF, nothing goes out unattended."""
+    return active(settings)
 
 
 def hold(kind: str, settings: dict | None = None) -> bool:

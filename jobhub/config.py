@@ -392,7 +392,9 @@ DEFAULT_SETTINGS: dict = {
     # password kept in the local vault, and sign in with it.
     # send: Approve & send, Send ready, and automatic runs fill and submit
     # Workday applications, signing in with the vault's saved password.
-    "workday": {"create_accounts": False, "send": False},
+    # check_portal: read each employer's Workday Candidate Home with the saved sign-in to
+    # track the applications sent there (many employers send no email until a decision).
+    "workday": {"create_accounts": False, "send": False, "check_portal": True},
     # --- where saved passwords and API keys live ---
     # False keeps them in an owner-only file in the data folder, so a rebuilt
     # app never waits on a Keychain prompt. True uses the OS credential vault.
@@ -469,6 +471,7 @@ def validate_settings(settings: dict) -> dict:
     class Workday(StrictModel):
         create_accounts: StrictBool
         send: StrictBool
+        check_portal: StrictBool = True
 
     class CompanyCap(StrictModel):
         count: StrictInt = Field(ge=0, le=100)     # 0 turns the cap off

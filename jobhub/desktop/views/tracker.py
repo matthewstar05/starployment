@@ -38,6 +38,23 @@ SORT_ROLE = int(Qt.ItemDataRole.UserRole) + 40
 ID_ROLE = int(Qt.ItemDataRole.UserRole) + 41
 
 
+
+def _hide_rejections_pref() -> bool:
+    import os
+
+    from PySide6.QtCore import QSettings
+    if os.environ.get("JOBHUB_UI_PREFS") == "0":
+        return True
+    return str(QSettings("Starployment", "Starployment").value("tracker/hide_rejected", "1")).lower() in ("1", "true")
+
+
+def _save_hide_rejections_pref(on: bool) -> None:
+    import os
+
+    from PySide6.QtCore import QSettings
+    if os.environ.get("JOBHUB_UI_PREFS") != "0":
+        QSettings("Starployment", "Starployment").setValue("tracker/hide_rejected", "1" if on else "0")
+
 class SortItem(QTableWidgetItem):
     """A cell that sorts by a typed key (dates, money, stage order) instead of its text."""
 
@@ -52,6 +69,8 @@ class SortItem(QTableWidgetItem):
 
 
 class StatTile(GlassPanel):
+    clicked = Signal()
+
     def __init__(self, title: str, parent: QWidget | None = None):
         super().__init__(parent, radius=14)
         column = QVBoxLayout(self)
@@ -61,6 +80,20 @@ class StatTile(GlassPanel):
         self.caption = label(title, "statLabel", wrap=False)
         column.addWidget(self.value)
         column.addWidget(self.caption)
+        self._clickable = False
+
+    def make_clickable(self, tooltip: str) -> None:
+        """A tile that shows its applications in the table below when clicked."""
+        self._clickable = True
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip(tooltip)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802
+        if self._clickable and event.button() == Qt.MouseButton.LeftButton and self.rect().contains(event.pos()):
+            self.clicked.emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class AddApplicationSheet(QDialog):
@@ -170,8 +203,9 @@ class TrackerView(QWidget):
         column.setContentsMargins(30, 26, 30, 22)
         column.setSpacing(14)
         self.header = PageHeader("Tracker", "Every application you sent, its pay and place, and where it stands.")
-        self.sync_button = button("Check email", "secondary", icon="mail")
-        self.sync_button.setToolTip("Look for assessment, interview, offer, and rejection emails now")
+        self.sync_button = button("Check for updates", "secondary", icon="mail")
+        self.sync_button.setToolTip("Look for assessment, interview, offer, and rejection emails now, and read "
+                                    "each employer's Workday Candidate Home for the applications sent there")
         self.sync_button.clicked.connect(self.sync_email_requested)
         add = button("Add", "secondary", icon="plus")
         add.setToolTip("Track an application you sent yourself")
@@ -192,6 +226,13 @@ class TrackerView(QWidget):
             self.tiles[key] = tile
             stats.addWidget(tile, 1)
         column.addLayout(stats)
+        # A count tile picks the matching filter below, as if it were clicked there.
+        for key, wanted, tip in (("total", "all", "Show every application"),
+                                 ("assessment", "assessment", "Show applications with an assessment"),
+                                 ("interview", "interview", "Show applications at the interview stage"),
+                                 ("offer", "offer", "Show applications with an offer")):
+            self.tiles[key].make_clickable(tip)
+            self.tiles[key].clicked.connect(lambda wanted=wanted: self.show_stage(wanted))
 
         toolbar = QHBoxLayout()
         toolbar.setSpacing(10)
@@ -220,6 +261,10 @@ class TrackerView(QWidget):
         table_head.addStretch(1)
         self.hide_rejected = ToggleSwitch("Hide rejections")
         self.hide_rejected.setToolTip("Leave out applications the employer rejected")
+        # On unless the candidate turned it off; remembered in the user's macOS preferences,
+        # which a reinstall keeps.
+        self.hide_rejected.setChecked(_hide_rejections_pref())
+        self.hide_rejected.toggled.connect(_save_hide_rejections_pref)
         self.hide_rejected.toggled.connect(self._apply_filter)
         table_head.addWidget(self.hide_rejected)
         self.sort = ChoiceButton("sort", "Sort")
@@ -370,6 +415,13 @@ class TrackerView(QWidget):
             f"{plural(stats['total'], 'application')} sent · {stats['interview']} interviewing · "
             f"{stats['assessment']} with assessments" + mostly
             if stats["total"] else "Every application you sent, its pay and place, and where it stands.")
+
+    def show_stage(self, wanted: str) -> None:
+        """Select the filter for ``wanted`` (a FILTERS value) in the bar above the table."""
+        index = self.filter.findData(wanted)
+        if index >= 0:
+            self.filter.setCurrentIndex(index)
+            self._apply_filter()
 
     def _apply_filter(self, *_args) -> None:
         wanted = self.filter.currentData() or "all"

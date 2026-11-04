@@ -325,7 +325,13 @@ def _posting_is_in_us(job: Job | None) -> bool:
     }
     city = parts[0]
     if city not in city_states:
-        return False
+        # Workday writes "New York New York United States" or "CINCINNATI, OHIO": one place
+        # that names a US country or state, with no other country and no second location.
+        from .locations import _has_foreign_country_marker, is_us_location
+        raw = job.location or ""
+        if re.search(r"[/;|]|\bor\b|\band\b|\d+\s+locations?", raw, re.I) or _has_foreign_country_marker(raw):
+            return False
+        return is_us_location(raw)
     if len(parts) == 1:
         return True
     if len(parts) == 2:
@@ -423,6 +429,10 @@ def pick_option(options: list[str], intent: str | None) -> str | None:
     exact = [o for o in opts if _normalized(o) == wanted]
     if len(exact) == 1:
         return exact[0]
+    if exact:
+        # The same choice listed twice in different case ("LinkedIn" and "Linkedin"): either is
+        # the answer, so take the one spelled as saved, else the first.
+        return next((o for o in exact if o.strip() == intent.strip()), exact[0])
     # ATS catalogs sometimes replace commas with dashes in the same proper
     # name. Require the entire token sequence to match exactly and uniquely.
     def words(value: str) -> str:
@@ -745,7 +755,7 @@ def rule_answer(q: Q, profile: Profile, settings: dict, job: Job | None) -> Answ
     if matches(r"authori[sz]ed|legally (able|permitted|eligible)|eligible to work|work permit|right to work"):
         refers_to_job_country = matches(r"\b(?:country|location|jurisdiction)(?:\s+or\s+(?:jurisdiction|region|location))?"
                                         r"\s+(?:where|in which)\s+(?:the\s+|this\s+)?(?:job|position|role)\b(?:[^?]{0,60}?)"
-                                        r"\s+is\s+located\b")
+                                        r"\s+is\s+(?:located|posted|based)\b")
         if (matches(r"united states|\bu\.?s\.?a?\b") or
                 (refers_to_job_country and _posting_is_in_us(job))) and not matches(r"not authori|unauthori"):
             return eligibility("work_authorized_us")

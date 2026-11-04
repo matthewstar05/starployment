@@ -82,6 +82,8 @@ def test_tracker_priority_sort_and_hiding_rejections(app):
             for i, stage in ((1, "offer"), (2, "rejected"), (3, "applied"), (4, "interview"), (5, "assessment"),
                              (6, "interview"), (7, "withdrawn"))]
     view = TrackerView()
+    assert view.hide_rejected.isChecked()                         # rejections are hidden by default
+    view.hide_rejected.setChecked(False)
     view.set_rows(rows)
 
     def order():
@@ -96,3 +98,27 @@ def test_tracker_priority_sort_and_hiding_rejections(app):
     assert "C2" not in order() and len(order()) == 6
     view.table.sortItems(view.UPDATED, Qt.SortOrder.DescendingOrder)
     assert view.sort.value() == "updated"
+
+
+def test_tracker_count_tiles_pick_the_matching_filter(app):
+    from PySide6.QtCore import QPoint
+    from PySide6.QtTest import QTest
+
+    from jobhub.desktop.views.tracker import TrackerView
+    view = TrackerView()
+    view.hide_rejected.setChecked(False)
+    view.set_rows([{"id": i, "title": "Engineer", "company": f"C{i}", "status": "applied", "stage": stage,
+                    "finished_at": f"2026-10-0{i}T12:00:00Z"}
+                   for i, stage in ((1, "assessment"), (2, "interview"), (3, "applied"))])
+    view.resize(1200, 800)
+    view.show()
+
+    def visible():
+        return [view.table.item(r, view.ROLE).data(SUBTITLE_ROLE) for r in range(view.table.rowCount())
+                if not view.table.isRowHidden(r)]
+    QTest.mouseClick(view.tiles["interview"], Qt.MouseButton.LeftButton, pos=QPoint(10, 10))
+    assert view.filter.currentData() == "interview" and visible() == ["C2"]
+    QTest.mouseClick(view.tiles["assessment"], Qt.MouseButton.LeftButton, pos=QPoint(10, 10))
+    assert view.filter.currentData() == "assessment" and visible() == ["C1"]
+    QTest.mouseClick(view.tiles["total"], Qt.MouseButton.LeftButton, pos=QPoint(10, 10))
+    assert view.filter.currentData() == "all" and len(visible()) == 3

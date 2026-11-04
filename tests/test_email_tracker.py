@@ -418,11 +418,12 @@ def test_mail_read_and_set_aside_is_not_downloaded_again(store, monkeypatch):
 
     _Inbox.bodies = []
     email_tracker.sync(settings)
-    assert _Inbox.bodies == [b"2"]   # the newsletter is skipped; recorded mail is always read again
+    assert _Inbox.bodies == []   # the newsletter and the rejection already linked to its application
 
     _Inbox.bodies = []
-    email_tracker.sync({"email_tracking": {"lookback_days": 30, "use_luna": False}})
-    assert _Inbox.bodies == [b"2"]
+    email_tracker.sync({"email_tracking": {"lookback_days": 30, "use_luna": False,
+                                           "archive_rejections": True}}, archiver=lambda items: 0)
+    assert _Inbox.bodies == [b"2"]   # a rejection still waiting to be archived is read again
     monkeypatch.setattr(email_tracker, "RULES_VERSION", email_tracker.RULES_VERSION + 1)
     _Inbox.bodies = []
     email_tracker.sync(settings)
@@ -613,3 +614,76 @@ def test_an_email_stays_with_the_application_sent_before_it_arrived(store):
         email_tracker.sync({"email_tracking": {"lookback_days": 30}}, messages=feed)
     stages = {row["id"]: row["stage"] for row in db.list_tracker()}
     assert stages[first] == "assessment" and stages[later] == "applied"
+
+
+class _CountingInbox(_Inbox):
+    """Reports a UIDVALIDITY and counts header fetches."""
+    header_fetches: list[list[bytes]] = []
+
+    def response(self, code):
+        return code, [b"7"]
+
+    def uid(self, command, *args):
+        if command == "FETCH" and args[1] != "(BODY.PEEK[])":
+            type(self).header_fetches.append(args[0].split(b","))
+        return super().uid(command, *args)
+
+
+def test_settled_mail_is_not_even_fetched_again(store, monkeypatch):
+    submitted("Northwind Labs", "Software Engineer", "https://job-boards.greenhouse.io/nw/jobs/1")
+    news = message("Example Weekly <news@example.test>", "Ten tips for better sleep", "Sleep well.", "<n@x>")
+    invite = message("Northwind Labs <talent@northwindlabs.com>", "Interview with Northwind Labs",
+                     "We would like to schedule an interview.", "<i@x>")
+    unknown = message("Acme Recruiting <jobs@acme.test>", "Your application to Acme",
+                      "Thank you for applying to Acme.", "<u@x>")
+    mails = {b"1": news, b"2": invite, b"3": unknown}
+    monkeypatch.setattr(email_tracker, "_HEADERS", {})
+    box = email_tracker.Mailbox.__new__(email_tracker.Mailbox)
+    box.host, box.username = "imap.example.test", "candidate@example.test"
+    monkeypatch.setattr(box, "open", lambda: _CountingInbox(mails), raising=False)
+    monkeypatch.setattr(email_tracker, "Mailbox", lambda _settings: box)
+    settings = {"email_tracking": {"lookback_days": 30, "use_luna": False}}
+    _CountingInbox.bodies, _CountingInbox.header_fetches = [], []
+    first = email_tracker.sync(settings)
+    assert first.scanned == 3 and sorted(_CountingInbox.bodies) == [b"2", b"3"]
+    _CountingInbox.bodies, _CountingInbox.header_fetches = [], []
+    again = email_tracker.sync(settings)
+    assert again.scanned == 3 and again.updates == []
+    # Only the email no application matches yet is looked at again.
+    assert _CountingInbox.header_fetches == [[b"3"]] and _CountingInbox.bodies == [b"3"]
+
+
+def test_a_linked_email_stays_put_when_the_posting_is_renamed(store):
+    """Endeavor and Netic: a scan renamed the employer, so every check moved the interview
+    email to another application and back, posting a correction and an update each time."""
+    first = submitted("Netic", "Forward Deployed Engineer", "https://jobs.ashbyhq.com/netic/1")
+    second = submitted("Netic", "Software Engineer, Agent Platform", "https://jobs.ashbyhq.com/netic/2")
+    mail = message("Netic Hiring Team <no-reply@ashbyhq.com>", "Netic interview: Forward Deployed Engineer",
+                   "We would like to schedule an interview for the Forward Deployed Engineer role.", "<n@x>")
+    feed = [(b"1", mail, mail.get_content())]
+    settings = {"email_tracking": {"lookback_days": 30, "use_luna": False}}
+    email_tracker.sync(settings, messages=feed)
+    assert {row["id"]: row["stage"] for row in db.list_tracker()}[first] == "interview"
+    with db.conn() as c:   # a later scan renamed the first posting's employer
+        c.execute("UPDATE jobs SET company='Cybernetic Labs' WHERE id=(SELECT job_id FROM applications WHERE id=?)",
+                  (first,))
+    for _ in range(3):
+        report = email_tracker.sync(settings, messages=feed)
+        assert report.updates == []
+    stages = {row["id"]: row["stage"] for row in db.list_tracker()}
+    assert stages[first] == "interview" and stages[second] == "applied"
+    assert not [e for e in db.list_events(limit=200) if "Inbox correction" in e["msg"]]
+
+
+def test_a_sent_posting_keeps_the_name_it_was_sent_under(store):
+    app_id = submitted("Netic", "Software Engineer, Agent Platform", "https://jobs.ashbyhq.com/netic/2")
+    renamed = Job(source="ashby", ats="ashby", company="Cybernetic Labs", title="Software Engineer New Grad",
+                  url="https://jobs.ashbyhq.com/netic/2", description="Now with a description")
+    db.upsert_jobs([renamed])
+    row = db.tracked_application(app_id)
+    assert (row["company"], row["title"]) == ("Netic", "Software Engineer, Agent Platform")
+    fresh = Job(source="ashby", ats="ashby", company="Netic", title="Data Analyst", url="https://jobs.ashbyhq.com/netic/3")
+    db.upsert_jobs([fresh])
+    db.upsert_jobs([fresh.model_copy(update={"company": "Cybernetic Labs"})])
+    with db.conn() as c:   # a posting nobody applied to still takes the latest name
+        assert c.execute("SELECT company FROM jobs WHERE url=?", (fresh.url,)).fetchone()[0] == "Cybernetic Labs"

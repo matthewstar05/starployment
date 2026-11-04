@@ -236,7 +236,7 @@ def test_window_scan_state_and_badges(app):
     window.set_scan_state(scanning=False, next_scan_at=time.time() + 42 * 60, auto_apply=False)
     assert window.scan.isEnabled()
     assert window.sidebar.status_title.text().startswith("Next scan in 4")
-    assert window.sidebar.status_detail.text() == "Auto-apply off"
+    assert window.sidebar.status_detail.text() == "JARVIS off: nothing sends by itself"
     window.set_scan_state(scanning=False, setup_complete=False)
     assert window.sidebar.status_title.text() == "Setup needed"
     window.set_data(stats={"new": 12, "applied": 1, "needs_human": 3, "total": 40})

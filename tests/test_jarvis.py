@@ -469,3 +469,12 @@ def test_role_key_keeps_real_differences():
     assert jarvis.role_key("Forward Deployed Engineer") == jarvis.role_key("Forward Deployed Engineer, Early Career")
     assert jarvis.role_key("Software Engineer, Backend") != jarvis.role_key("Software Engineer, Frontend")
     assert jarvis.role_key("Software Engineer") != jarvis.role_key("Senior Software Engineer")
+
+
+def test_with_jarvis_off_nothing_is_sent_unattended(running, monkeypatch):
+    """The older Automatic applications switch no longer sends: JARVIS OFF means off."""
+    save([job(50, 90)])
+    db.set_settings({"jarvis_mode": "off", "auto_apply": True, "setup_complete": True})
+    monkeypatch.setattr(scheduler, "apply_to_job", lambda *a, **kw: pytest.fail("sent with JARVIS off"))
+    assert not jarvis.automatic(db.get_settings())
+    assert scheduler.auto_apply_batch() == []

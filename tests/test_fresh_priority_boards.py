@@ -111,29 +111,12 @@ def test_star_is_the_candidates_choice_or_else_the_priority_list(store):
     assert is_starred(db.get_job(plain.id), priority) and held_from_automation(db.get_job(plain.id), priority)
 
 
-def test_automatic_runs_skip_priority_companies_and_starred_roles(store, monkeypatch):
-    priority_job = posting("google", 1, company="Google", score=99)
-    starred_job = posting("starred", 2, company="Starred Co", score=98)
-    normal = posting("normal", 3, company="Normal Co", score=97)
-    save_jobs(priority_job, starred_job, normal)
-    db.set_job_star(starred_job.id, True)
-    db.set_settings({"auto_apply": True, "setup_complete": True, "max_apply_per_run": 5,
-                     "priority_companies": ["Google"]})
-    monkeypatch.setattr(scheduler, "rescore", lambda: None)
-    monkeypatch.setattr(scheduler.STATE, "stop", False)
-    monkeypatch.setattr(scheduler, "preflight_job", lambda *a: type("R", (), {"status": "ready"})())
-    attempted = []
-    monkeypatch.setattr(scheduler, "apply_one", lambda job_id, **kw: attempted.append(job_id) or {"status": "dry_run"})
-    scheduler.auto_apply_batch()
-    assert attempted == [normal.id]
-
-
 def test_unattended_attempt_on_a_priority_role_stops_before_the_browser(store, make_pdf, monkeypatch):
     resume = make_pdf(store / "resumes" / "main.pdf", ["Ada Example"])
     db.save_profile(Profile(first_name="Ada", last_name="Example", email="ada@example.test", resume_path=str(resume)))
     job = posting("google", 1, company="Google", score=99)
     save_jobs(job)
-    db.set_settings({"auto_apply": True, "setup_complete": True, "priority_companies": ["Google"]})
+    db.set_settings({"jarvis_mode": "new", "setup_complete": True, "priority_companies": ["Google"]})
     monkeypatch.setattr(scheduler, "enrich_job", lambda job: job)
     monkeypatch.setattr(scheduler, "apply_to_job", lambda *a, **k: pytest.fail("browser must not run"))
     result = scheduler.apply_one(job.id, require_eligible=True)

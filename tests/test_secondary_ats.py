@@ -127,24 +127,6 @@ def _secondary_job(ats, company="Example", *, suffix="1", starred=None, score=95
 
 
 @pytest.mark.parametrize("ats", ["workable", "rippling"])
-def test_scheduler_auto_apply_considers_secondary_providers(store, monkeypatch, ats):
-    jobs = [_secondary_job(ats, suffix="1"), _secondary_job(ats, suffix="2", company="Other")]
-    db.upsert_jobs(jobs)
-    db.set_settings({"auto_apply": True, "setup_complete": True, "max_apply_per_run": 3})
-    monkeypatch.setattr(scheduler, "rescore", lambda: None)
-    monkeypatch.setattr(scheduler, "preflight_job", lambda *args: type("Ready", (), {"status": "ready"})())
-    attempted = []
-    monkeypatch.setattr(scheduler, "apply_one", lambda job_id, **kwargs:
-                        attempted.append(job_id) or {"status": "dry_run"})
-
-    results = scheduler.auto_apply_batch()
-
-    assert len(results) == 2
-    assert set(attempted) == {job.id for job in jobs}
-    assert {db.get_job(job_id).ats for job_id in attempted} == {ats}
-
-
-@pytest.mark.parametrize("ats", ["workable", "rippling"])
 def test_secondary_confirmed_submit_is_durably_applied(store, monkeypatch, ats):
     resume = config.RESUMES / "candidate.pdf"
     resume.write_bytes(b"%PDF-1.7\nfixture")
@@ -200,28 +182,3 @@ def test_secondary_uncertain_submit_is_durable_but_never_applied(store, monkeypa
     assert all(row["status"] != "applied" for row in db.list_applications())
 
 
-def test_secondary_priority_holds_and_canonical_dedupe(store, monkeypatch):
-    workable = _secondary_job("workable", suffix="ABC123")
-    workable_alias = workable.model_copy(update={
-        "url": workable.url + "?utm_source=board",
-        "apply_url": "https://apply.workable.com/example/j/ABC123/apply/",
-    })
-    rippling = _secondary_job("rippling", company="Other", suffix="1")
-    priority_company = _secondary_job("workable", company="Priority Co", suffix="2")
-    starred = _secondary_job("rippling", company="Starred Co", suffix="3", starred=True)
-    db.upsert_jobs([workable, workable_alias, rippling, priority_company, starred])
-    db.set_job_star(starred.id, True)
-    assert db.job_stats()["total"] == 4
-    db.set_settings({"auto_apply": True, "setup_complete": True, "max_apply_per_run": 5,
-                     "priority_companies": ["Priority Co"]})
-    monkeypatch.setattr(scheduler, "rescore", lambda: None)
-    monkeypatch.setattr(scheduler, "preflight_job", lambda *args: type("Ready", (), {"status": "ready"})())
-    attempted = []
-    monkeypatch.setattr(scheduler, "apply_one", lambda job_id, **kwargs:
-                        attempted.append(job_id) or {"status": "dry_run"})
-
-    scheduler.auto_apply_batch()
-
-    assert set(attempted) == {workable.id, rippling.id}
-    assert priority_company.id not in attempted
-    assert starred.id not in attempted

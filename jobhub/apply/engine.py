@@ -16,7 +16,6 @@ import time
 import uuid
 from datetime import datetime
 from contextlib import contextmanager
-from contextlib import nullcontext as _nullcontext
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
@@ -372,10 +371,19 @@ def launch_context(playwright, channel: str | None, profile_dir: Path | None = N
 # profile folder: the main profile first, then numbered ones beside it.
 _PROFILE_LOCK = threading.Lock()
 _PROFILES_IN_USE: set[int] = set()
-# Greenhouse email codes arrive in one mailbox; with codes enabled, one such send at a time.
+# Verification emails arrive in one mailbox: from the moment a send records its inbox
+# baseline until it ends, it alone may read codes and links (``_mailbox_turn``). Sends run
+# side by side until then; the lock used to be held for every whole send, so a single stuck
+# page held up all the others (2026-11-04: seven hours overnight).
 _MAILBOX_LOCK = threading.Lock()
+MAILBOX_WAIT_SECONDS = 10 * 60
 # How long a hand-off window waits for the candidate to finish and submit.
 ASSIST_SECONDS = 20 * 60
+# A send that is still running after this long is stuck in a browser call that never returns
+# (a page whose script never finishes, a renderer that hung): its browser is shut down so the
+# call fails and the send ends for review. No step of a working send comes near it.
+SEND_LIMIT_SECONDS = 25 * 60
+ASSIST_LIMIT_SECONDS = ASSIST_SECONDS + 15 * 60
 HANDOFF_BANNER_JS = """() => {
   if (document.getElementById('starployment-handoff')) return;
   const bar = document.createElement('div');
@@ -387,6 +395,21 @@ HANDOFF_BANNER_JS = """() => {
     + 'box-shadow:0 2px 8px rgba(0,0,0,.2);pointer-events:none';
   document.body.appendChild(bar);
 }"""
+
+
+def _child_pids(pid: int) -> list[int]:
+    """Processes started by ``pid`` (the Playwright driver's browser)."""
+    import subprocess
+    if os.name == "nt":
+        command = ["powershell", "-NoProfile", "-Command",
+                   f"(Get-CimInstance Win32_Process -Filter 'ParentProcessId={int(pid)}').ProcessId"]
+    else:
+        command = ["/usr/bin/pgrep", "-P", str(int(pid))]
+    try:
+        out = subprocess.run(command, capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [int(line) for line in out.split() if line.strip().isdigit()]
 
 
 @contextmanager
@@ -421,6 +444,8 @@ class FormEngine:
         self.question_details: list[dict] = []
         self.answered: dict[str, str] = {}
         self.submission_attempted = False
+        self._aborted = False
+        self._mailbox_held = False
         self._attempt_id = uuid.uuid4().hex[:10]
         self._shot_n = 0
         self.root = None
@@ -455,31 +480,92 @@ class FormEngine:
         self._log(f"[{self.adapter.name}] open {url}")
         # A dedicated persistent profile retains login cookies without reading the
         # user's regular browser. Each simultaneous send has its own profile slot.
-        mailbox = bool(self.settings.get("email_verification", {}).get("enabled"))
-        with sync_playwright() as playwright, browser_profile_slot() as profile_dir, \
-                (_MAILBOX_LOCK if mailbox else _nullcontext()):
-            channel = self.settings.get("browser_channel") or None
-            ctx = None
-            page = None
+        manager = sync_playwright()
+        watchdog = threading.Timer(ASSIST_LIMIT_SECONDS if self.assist else SEND_LIMIT_SECONDS,
+                                   self._abort_browser, args=(manager,))
+        watchdog.daemon = True
+        try:
+            with manager as playwright, browser_profile_slot() as profile_dir:
+                watchdog.start()
+                return self._run_browser(playwright, profile_dir, url)
+        except Exception as exc:  # noqa: BLE001 - only an aborted driver's shutdown reaches here
+            if not self._aborted:
+                raise
+            self._log(f"Browser shut down: {str(exc).splitlines()[0][:120] if str(exc) else type(exc).__name__}")
+            return self._stuck_result()
+        finally:
+            watchdog.cancel()
+            self._release_mailbox()
+
+    def _abort_browser(self, manager) -> None:
+        """The watchdog: end the Playwright driver (and with it this send's browser), so the call
+        this send is stuck in raises and the send finishes for review."""
+        self._aborted = True
+        self._log("This send stopped responding; Starployment closed its browser")
+        try:
+            driver = manager._connection._transport._proc.pid
+        except Exception:  # noqa: BLE001 - no driver (already stopped)
+            return
+        # Kill the browser, not the driver: the driver then reports the browser closed and fails
+        # the pending call (a driver that dies instead leaves that call waiting forever).
+        for pid in _child_pids(driver):
             try:
-                ctx = launch_context(playwright, channel, profile_dir,
-                                     visible=self.assist or show_browser(self.settings))
-                ctx.set_default_timeout(7000)
-                page = ctx.pages[0] if ctx.pages else ctx.new_page()
-                if self.adapter.name == "ashby":
-                    self._watch_ashby_saves(page)
-                self._opened_at = time.monotonic()
-                return self._run_page(ctx, page, url)
-            except Exception as exc:  # noqa: BLE001
-                if page is not None:
-                    self._shot(page, "exception")
-                detail = str(exc).splitlines()[0][:240]
-                if re.search(r"ProcessSingleton|SingletonLock|profile.*in use", str(exc), re.I):
-                    return self._result("needs_human", "The Starployment browser profile is already in use. Close the other Starployment browser and retry.")
-                return self._result("needs_human" if self.submission_attempted else "failed", f"Browser could not complete the application: {detail}")
-            finally:
-                if ctx is not None:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+
+    def _stuck_result(self) -> ApplyResult:
+        limit = (ASSIST_LIMIT_SECONDS if self.assist else SEND_LIMIT_SECONDS) // 60
+        return self._result("needs_human" if self.submission_attempted else "failed",
+                            f"The employer's page stopped responding for {limit} minutes, so Starployment closed it."
+                            + (" Check the employer's site or your email before sending it again."
+                               if self.submission_attempted else " Nothing was sent; it can be sent again."))
+
+    def _mailbox_turn(self) -> bool:
+        """Take this send's turn at the verification mailbox before recording an inbox baseline;
+        kept until the send ends. False when another send kept it past ``MAILBOX_WAIT_SECONDS``."""
+        if self._mailbox_held:
+            return True
+        if not _MAILBOX_LOCK.acquire(timeout=MAILBOX_WAIT_SECONDS):
+            self._log("Another send was still reading the mailbox; continuing without automatic email verification")
+            return False
+        self._mailbox_held = True
+        return True
+
+    def _release_mailbox(self) -> None:
+        if self._mailbox_held:
+            self._mailbox_held = False
+            _MAILBOX_LOCK.release()
+
+    def _run_browser(self, playwright, profile_dir, url: str) -> ApplyResult:
+        channel = self.settings.get("browser_channel") or None
+        ctx = None
+        page = None
+        try:
+            ctx = launch_context(playwright, channel, profile_dir,
+                                 visible=self.assist or show_browser(self.settings))
+            ctx.set_default_timeout(7000)
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+            if self.adapter.name == "ashby":
+                self._watch_ashby_saves(page)
+            self._opened_at = time.monotonic()
+            return self._run_page(ctx, page, url)
+        except Exception as exc:  # noqa: BLE001
+            if page is not None:
+                self._shot(page, "exception")
+            detail = str(exc).splitlines()[0][:240]
+            if re.search(r"ProcessSingleton|SingletonLock|profile.*in use", str(exc), re.I):
+                return self._result("needs_human", "The Starployment browser profile is already in use. Close the other Starployment browser and retry.")
+            if self._aborted:
+                return self._stuck_result()
+            return self._result("needs_human" if self.submission_attempted else "failed", f"Browser could not complete the application: {detail}")
+        finally:
+            if ctx is not None:
+                try:
                     ctx.close()
+                except Exception:  # noqa: BLE001 - the watchdog already shut the browser down
+                    if not self._aborted:
+                        raise
 
     FRAME_RE = re.compile(r"greenhouse\.io|ashbyhq\.com|lever\.co|apply|application|careers|jobs", re.I)
 
@@ -1566,7 +1652,7 @@ class FormEngine:
             db.mark_submission_attempted(self.job.id)
             self.submission_attempted = True
         inbox = baseline_data = None
-        if bool(self.settings.get("email_verification", {}).get("enabled")):
+        if bool(self.settings.get("email_verification", {}).get("enabled")) and self._mailbox_turn():
             try:
                 inbox = EmailVerificationInbox(self.settings["email_verification"], self.profile.email)
                 baseline_data = inbox.baseline()
@@ -1622,7 +1708,7 @@ class FormEngine:
         inbox = None
         baseline_data = None
         inbox_unavailable = False
-        if bool(self.settings.get("email_verification", {}).get("enabled")):
+        if bool(self.settings.get("email_verification", {}).get("enabled")) and self._mailbox_turn():
             try:
                 inbox = EmailVerificationInbox(self.settings["email_verification"], self.profile.email)
                 baseline_data = inbox.baseline()
@@ -1710,6 +1796,7 @@ class FormEngine:
         return self._result("needs_human", "Submit was clicked, but no new confirmation was detected. Check the employer's confirmation or email before any retry.")
 
     def _result(self, status: str, message: str) -> ApplyResult:
+        self._release_mailbox()   # the send is over: the next one may read the mailbox
         self._log(f"Result: {status}: {message}")
         return ApplyResult(status=status, message=message, screenshots=self.screenshots, log=self.log,
                            unanswered=self.unanswered, resume_path=self.resume_path,

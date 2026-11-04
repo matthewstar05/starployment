@@ -78,8 +78,11 @@ def test_passwords_stay_hidden_without_a_system_prompt(monkeypatch):
 
 def test_settings_validate_workday_options():
     settings = config.merge_settings(config.DEFAULT_SETTINGS, {"workday": {"create_accounts": True, "send": True}})
-    assert config.validate_settings(settings)["workday"] == {"create_accounts": True, "send": True}
-    assert config.DEFAULT_SETTINGS["workday"] == {"create_accounts": False, "send": False}
+    assert config.validate_settings(settings)["workday"] == {"create_accounts": True, "send": True,
+                                                             "check_portal": True}
+    assert config.DEFAULT_SETTINGS["workday"] == {"create_accounts": False, "send": False, "check_portal": True}
+    # Settings saved before Candidate Home tracking existed still validate.
+    assert config.validate_settings({**settings, "workday": {"create_accounts": True, "send": True}})
 
 
 def test_send_gates_follow_the_setting(tmp_path, monkeypatch):
@@ -280,7 +283,7 @@ def test_settings_and_sign_ins_sheet():
     patches = []
     view.save_requested.connect(patches.append)
     view._save()
-    assert patches[-1]["workday"] == {"create_accounts": True, "send": True}
+    assert patches[-1]["workday"] == {"create_accounts": True, "send": True, "check_portal": True}
     sheet = PasswordsSheet()
     sheet.set_accounts([{"tenant": "bank", "company": "Bank", "email": "ada@example.test", "status": "active"}])
     asked = []

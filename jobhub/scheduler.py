@@ -329,6 +329,10 @@ def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | No
                 raise ValueError("Job or profile no longer exists")
             settings = db.get_settings()
             job = enrich_job(job)
+            if required_jarvis_mode and db.get_settings().get("jarvis_mode") != required_jarvis_mode:
+                # JARVIS was switched (or turned off) while this posting was refreshed: not a
+                # reason to set the posting aside, only to not send it now.
+                raise PostingRefreshError("JARVIS authorization or eligibility changed before sending.")
             if require_eligible:
                 settings = db.get_settings()
                 min_score = float(settings.get("min_score_to_apply", 60))
@@ -421,80 +425,13 @@ def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | No
             STATE.running_apply = next(iter(STATE.running_applies), None)
 
 
-def _auto_apply_preflight_window(candidates: list[Job], budget: int) -> list[Job]:
-    """Return a bounded, rotating slice of ranked candidates for public preflight.
-
-    The scan run id is durable across restarts and advances once per scheduled
-    scan. Rotating the probe window prevents a fixed set of high-ranked forms
-    with missing answers from starving roles later in the ranked list. The
-    returned slice remains in match order so answerable roles in the slice keep
-    the normal ranking preference.
-    """
-    if len(candidates) <= budget:
-        return candidates
-    with db.conn() as connection:
-        row = connection.execute("SELECT COALESCE(MAX(id), 0) AS id FROM runs").fetchone()
-    scan_id = int(row["id"] if row else 0)
-    start = (max(0, scan_id - 1) * budget) % len(candidates)
-    end = start + budget
-    if end <= len(candidates):
-        return candidates[start:end]
-    # Wrap at the end of the ranked list, then restore its original order.
-    selected = candidates[start:] + candidates[:end - len(candidates)]
-    positions = {job.id: index for index, job in enumerate(candidates)}
-    return sorted(selected, key=lambda job: positions[job.id])
-
-
 def auto_apply_batch() -> list[dict]:
+    """The scheduled cycle's unattended sends. Only JARVIS sends unattended (``jarvis.automatic``):
+    with JARVIS OFF, nothing goes out without the candidate pressing send."""
     settings = db.get_settings()
     if not jarvis.automatic(settings) or not settings.get("setup_complete"):
         return []
-    if jarvis.active(settings):
-        return jarvis_batch()
-    rescore()
-    priority = settings.get("priority_companies") or []
-    # Priority companies and starred roles are never applied to unattended.
-    candidates = [job for job in db.list_jobs(status="new", min_score=float(settings.get("min_score_to_apply", 60)), limit=100000)
-                  if (job.ats in ("greenhouse", "ashby", "lever", "workable", "rippling")
-                      or (job.ats == "workday" and (settings.get("workday") or {}).get("send")))
-                  and job.score_json.get("auto_apply_eligible", True)
-                  and not held_from_automation(job, priority)]
-    candidates = jarvis.diversify(jarvis.not_repeated(candidates), settings)
-    results = []
-    attempted_companies: set[str] = set()
-    max_applications = int(settings.get("max_apply_per_run", 3))
-    profile = db.get_profile()
-    # A public Greenhouse preflight can reject an unanswerable form without
-    # reserving the browser or using one of this cycle's application slots.
-    # Bound public API requests even when the candidate has few saved answers.
-    preflight_budget = max(24, max_applications * 8)
-    for job in _auto_apply_preflight_window(candidates, preflight_budget):
-        if len(results) >= max_applications:
-            break
-        if not db.get_settings().get("auto_apply") or STATE.stop:
-            break
-        company_key = job.company.strip().casefold()
-        if company_key and company_key in attempted_companies:
-            continue
-        if job.ats == "workday":
-            from . import vault
-            if vault.sign_in_blocker(job.apply_url or job.url) or jarvis.set_aside([job.id]):
-                continue   # it would only record an attempt that stops where the last one did
-        readiness = preflight_job(job, profile, settings)
-        if readiness.status == "missing_facts":
-            log.info("Skipped %s before application: required answers missing for %s",
-                     job.id, ", ".join(readiness.missing))
-            continue
-        result = apply_one(job.id, require_eligible=True)
-        _after_workday(job, result)
-        if result.get("status") == "skipped":
-            continue   # a closed posting uses neither this run's budget nor the employer's turn
-        results.append(result)
-        if company_key:
-            attempted_companies.add(company_key)
-        if result.get("status") == "blocked":
-            break
-    return results
+    return jarvis_batch()
 
 
 def _set_aside(job: Job, reason: str, kind: str = "transient") -> None:
@@ -702,6 +639,9 @@ def jarvis_batch() -> list[dict]:
     return results
 
 
+DEFERRED_RETRY_SECONDS = 60
+
+
 async def loop() -> None:
     """Scan while the server runs, using the latest interval after each cycle."""
     STATE.stop = False
@@ -710,9 +650,14 @@ async def loop() -> None:
         cycle_started = time.time()
         interval = jarvis.interval_minutes(db.get_settings()) * 60
         STATE.next_scan_at = datetime.fromtimestamp(cycle_started + interval, tz=timezone.utc).isoformat(timespec="seconds")
+        retry_at = None
         try:
             summary = await asyncio.to_thread(scan_once)
-            if summary.get("status") in ("ok", "partial"):
+            if summary.get("status") == "deferred":
+                # A busy Mac postpones the scan, not the whole cycle: ask again shortly, so
+                # jarvis.hold's deferral limit can let it go ahead instead of idling an interval.
+                retry_at = time.time() + DEFERRED_RETRY_SECONDS
+            elif summary.get("status") in ("ok", "partial"):
                 results = await asyncio.to_thread(auto_apply_batch)
                 if summary.get("run_id"):
                     with db.conn() as c:
@@ -724,7 +669,7 @@ async def loop() -> None:
         while not STATE.stop:
             interval = jarvis.interval_minutes(db.get_settings()) * 60
             # Application time is part of the hourly cycle, not added to it.
-            next_time = cycle_started + interval
+            next_time = retry_at if retry_at is not None else cycle_started + interval
             STATE.next_scan_at = datetime.fromtimestamp(next_time, tz=timezone.utc).isoformat(timespec="seconds")
             if time.time() >= next_time:
                 break

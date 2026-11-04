@@ -75,9 +75,9 @@ Rules for this step:
   the end of the iteration, not after each edit.
 - This applies only on the owner's Mac. On other machines or in CI, stop after
   the tests and `build_desktop.py`/`smoke_bundle.py`.
-- Automatic applications are on in the owner's live settings. Relaunching
-  starts a scan within seconds and may submit applications as configured. That
-  is expected; do not change the owner's settings to avoid it.
+- JARVIS may be on in the owner's live settings. Relaunching starts a scan
+  within seconds and, with JARVIS on, may submit applications as configured.
+  That is expected; do not change the owner's settings to avoid it.
 
 ---
 
@@ -159,8 +159,11 @@ them to make a feature easier.
    (`jarvis.diversify`, default 3 in 30 days; JARVIS ALL+ allows twice the count, `jarvis.company_limit`); with `mix_role_families` they
    alternate role families (`families.py`: software, data, quant, finance,
    accounting, business, risk, economics) so one kind of role cannot take every send.
-5. **Automation is opt-in.** `auto_apply` defaults to off; practice mode
-   (`dry_run`) fills forms without clicking Submit.
+5. **Automation is opt-in, and only JARVIS sends unattended.** JARVIS defaults to OFF,
+   and with it OFF nothing is sent without the candidate pressing send
+   (`jarvis.automatic`). The older `auto_apply` setting is kept so saved settings still
+   validate, but it no longer sends and has no switch. Practice mode (`dry_run`) fills
+   forms without clicking Submit.
 6. **User data never ships.** `data/`, `.env`, resumes, screenshots, and the
    Playwright browser profile must never enter a bundle or
    `dist/Starployment-source.zip` (`packaging/export_source.py` is an allowlist on
@@ -206,7 +209,13 @@ them to make a feature easier.
    can open that email from Applications), and the inferred stage
    (`mail_events`), plus hashed keys of mail it read and set aside
    (`mail_seen`, so later checks skip downloading it; bump
-   `email_tracker.RULES_VERSION` when classification changes), and only advances a stage
+   `email_tracker.RULES_VERSION` when classification changes). Mail already linked to an
+   application is settled the same way, and `Mailbox._header_cache` remembers each UID's key
+   (per UIDVALIDITY) so a later check skips even its headers; only recorded mail no
+   application matches yet, and a rejection still waiting to be archived, are read again.
+   **A recorded email stays with the application it was first linked to** (`_apply`):
+   matching again from scratch moved emails whenever a scan renamed a posting's employer
+   ("Netic" and "Cybernetic Labs") and flipped stages on every check. It only advances a stage
    (`db.set_application_stage(..., "email")`); it never reopens an offer or a
    closed application or undoes a manual choice. Uncertain matches are left
    for the candidate: an assessment, interview, or offer no application matches is
@@ -283,6 +292,20 @@ them to make a feature easier.
    (LocalAuthentication: Touch ID or the Mac's password; refused off macOS),
    hides it after 30 seconds, and clears a copied one from the clipboard
    after a minute.
+   **Candidate Home tracking** (`jobhub/workday_portal.py`; `settings.workday.check_portal`,
+   on by default; Settings → Workday → Track Workday applications): with each inbox check
+   (and the Tracker's Check for updates), employers with an open Workday application and an
+   `active` saved sign-in are read at most every `CHECK_SECONDS` (daily when Workday lists
+   only drafts there), oldest first, within `RUN_SECONDS`, never while a send runs at that
+   employer, stopping when the Mac is busy. A fresh private browser context signs in and
+   reads `/wday/cxs/<tenant>/<site>/applications` (pages of four, with the page's
+   `x-calypso-csrf-token`); nothing is clicked or changed there. Rows match applications by
+   requisition (`match`), a title only when unambiguous. `stage_for` maps status text
+   forward-only (`set_application_stage(..., "workday")`, never over a manual choice);
+   `workday_portal` keeps the last reading so only changes are reported. An unconfirmed
+   attempt (`needs_human` past the boundary) that Candidate Home lists as submitted is the
+   employer's record of a received application, so `db.confirm_from_portal` makes it
+   Applied; a draft stays with the candidate.
 
 ---
 
@@ -375,6 +398,7 @@ every 15 s) and renders via window.set_data.
 | `jobhub/scheduler.py` | `scan_once` (with a rotating slice of discovered boards, `DISCOVERED_BOARDS_PER_SCAN`), `rescore`, `apply_one`, `auto_apply_batch`, shared `STATE`. |
 | `jobhub/apply/engine.py`, `adapters.py` | Browser form filling per ATS, confirmation detection, screenshots. |
 | `jobhub/apply/workday.py` | `WorkdayEngine`: Workday's sign-in-gated wizard by `data-automation-id`: account creation and sign-in from the vault, step filling, and (with `workday.send`) Save and Continue and Submit (rule 14). |
+| `jobhub/workday_portal.py` | Reads each employer's Workday Candidate Home with the saved sign-in and applies its statuses to the Tracker (rule 14). |
 | `jobhub/vault.py` | Workday sign-ins: generated passwords in the local secret store, `accounts.json` metadata, Touch ID (`authenticate`) before the UI shows one (rule 14). |
 | `jobhub/answers.py` | Maps rendered form questions to saved candidate answers without guessing. |
 | `jobhub/profile.py` | Resume parsing (pdftotext/pypdf, optional LLM). |

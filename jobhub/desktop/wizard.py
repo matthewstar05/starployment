@@ -419,8 +419,6 @@ class SetupWizard(QDialog):
         self.remote_ok.setChecked(bool(s.get("remote_ok", True)))
         self.include_internships = ToggleSwitch("Include internships and co-ops")
         self.include_internships.setChecked(bool(s.get("include_internships", False)))
-        self.auto_apply = ToggleSwitch("Also apply automatically to eligible matches, without review")
-        self.auto_apply.setChecked(bool(s.get("auto_apply", False)))
         self.min_salary = QSpinBox()
         self.min_salary.setRange(0, 10_000_000)
         self.min_salary.setSingleStep(5_000)
@@ -450,10 +448,9 @@ class SetupWizard(QDialog):
         lay.addWidget(experience)
         lay.addWidget(label("Starployment scans dozens of public Greenhouse, Lever, and Ashby company boards plus "
                             "major job sites. Edit the list any time in Settings → Company job boards.", "caption"))
-        autonomy = FormGroup("Autonomy", "Off by default. With it off, press Apply on Overview to prepare "
-                                         "applications and approve each one before it is sent.")
-        autonomy.add_widget(self.auto_apply)
-        lay.addWidget(autonomy)
+        lay.addWidget(label("Nothing is sent without you: press Apply on Overview to prepare applications and "
+                            "approve each one. To have Starployment send by itself, turn on JARVIS later from "
+                            "the sidebar badge.", "caption"))
         lay.addStretch()
 
     def _build_answers(self) -> None:
@@ -591,7 +588,6 @@ class SetupWizard(QDialog):
             answers["confirmed_fields"].append("years_experience")
         settings = {
             "setup_complete": True,
-            "auto_apply": self.auto_apply.isChecked(),
             "target_titles": self.target_titles.values(),
             "preferred_locations": self.locations.values(),
             "exclude_title_words": self.exclude_words.values(),

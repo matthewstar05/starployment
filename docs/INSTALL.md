@@ -49,7 +49,7 @@ To track replies or complete verification, enter your own email details in the
 same Connections page. Its app-password help opens your mail provider's page;
 **Test** checks your settings. Your main email password is not needed.
 
-Automatic applications are off on a new profile. Start by finding jobs, preparing
+JARVIS, which sends applications by itself, is off on a new profile. Start by finding jobs, preparing
 one, reviewing its answers/resume, and approving it yourself. Only employer
 confirmation records an application as Applied. CAPTCHAs and unsupported forms
 remain for you to finish on the employer's website.

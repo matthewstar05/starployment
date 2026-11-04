@@ -153,3 +153,32 @@ def test_phone_extension_is_never_the_phone_number():
 
 def test_worked_with_us_before_is_the_former_employer_question():
     assert ask("Have you worked with us before?", company="CIBC") == "No"
+
+
+def test_job_country_authorization_reads_workday_location_formats():
+    from jobhub.answers import Q, rule_answer
+    base = settings()
+    base["answers"].update(work_authorized_us="Yes")
+    base["answers"]["confirmed_fields"] += ["work_authorized_us"]
+
+    def a(label, location):
+        job = Job(source="workday", ats="workday", company="Example", title="Analyst", location=location,
+                  url="https://example.wd5.myworkdayjobs.com/x")
+        answer = rule_answer(Q(label=label, kind="radio", options=YES_NO), Profile(), base, job)
+        return None if answer is None else answer.value
+    citi = ("Are you legally authorized to work in the country or jurisdiction where the position to which "
+            "you are applying is located?")
+    posted = "Are you currently authorized to work in the country in which the job is posted?"
+    assert a(citi, "New York New York United States") == "Yes"
+    assert a(posted, "CINCINNATI, OHIO") == "Yes"
+    assert a(citi, "Irving Texas United States") == "Yes"
+    for elsewhere in ("Toronto, ON", "London, United Kingdom", "United States / Canada", "2 Locations",
+                      "New York or London", ""):
+        assert a(citi, elsewhere) is None, elsewhere
+
+
+def test_a_choice_listed_twice_in_different_case_is_still_chosen():
+    from jobhub.answers import pick_option
+    assert pick_option(["LinkedIn", "Linkedin"], "LinkedIn") == "LinkedIn"
+    assert pick_option(["Linkedin", "LINKEDIN"], "LinkedIn") == "Linkedin"
+    assert pick_option(["LinkedIn Recruiter", "LinkedIn Job Board"], "LinkedIn") is None

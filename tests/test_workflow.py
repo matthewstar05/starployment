@@ -269,109 +269,12 @@ def test_legacy_duplicate_vacancies_are_hidden_but_history_preserved():
         db.reserve_application(job.id)
 
 
-def test_auto_apply_respects_eligibility_and_current_toggle(monkeypatch):
-    blocked = posting(url="https://jobs.lever.co/acme/blocked", score=100, score_json={"auto_apply_eligible": False})
-    eligible = posting(url="https://jobs.lever.co/acme/eligible", score=90, score_json={"auto_apply_eligible": True})
-    db.upsert_jobs([blocked, eligible])
-    db.set_settings({"auto_apply": True, "setup_complete": True})
-    monkeypatch.setattr(scheduler, "rescore", lambda: None)
-    seen = []
-    def apply(job_id, **kwargs):
-        seen.append(job_id)
-        return {"status": "dry_run"}
-    monkeypatch.setattr(scheduler, "apply_one", apply)
-    assert len(scheduler.auto_apply_batch()) == 1
-    assert seen == [eligible.id]
-    db.set_settings({"auto_apply": False})
-    assert scheduler.auto_apply_batch() == []
-
-
 def test_auto_apply_waits_for_candidate_setup(monkeypatch):
     db.upsert_jobs([posting(score=90, score_json={"auto_apply_eligible": True})])
     db.set_settings({"auto_apply": True, "setup_complete": False})
     monkeypatch.setattr(scheduler, "rescore", lambda: None)
     assert scheduler.auto_apply_batch() == []
     assert db.list_applications() == []
-
-
-def test_auto_apply_preflight_skips_missing_facts_and_uses_next_slot(monkeypatch):
-    from jobhub.readiness import Readiness
-    blocked = Job(source="greenhouse", ats="greenhouse", company="Acme", title="Software Engineer New Grad",
-                  url="https://job-boards.greenhouse.io/acme/jobs/101", description="Python entry level",
-                  location="United States", score=100, score_json={"auto_apply_eligible": True})
-    ready = Job(source="greenhouse", ats="greenhouse", company="Acme", title="Software Engineer New Grad",
-                url="https://job-boards.greenhouse.io/acme/jobs/102", description="Python entry level",
-                location="United States", score=90, score_json={"auto_apply_eligible": True})
-    db.upsert_jobs([blocked, ready])
-    db.set_settings({"auto_apply": True, "setup_complete": True, "max_apply_per_run": 1})
-    monkeypatch.setattr(scheduler, "rescore", lambda: None)
-    checked = []
-    def preflight(job, profile, settings):
-        checked.append(job.id)
-        return Readiness("missing_facts", ("Work authorization",)) if job.id == blocked.id else Readiness("ready")
-    monkeypatch.setattr(scheduler, "preflight_job", preflight)
-    submitted = []
-    monkeypatch.setattr(scheduler, "apply_one", lambda job_id, **kwargs: submitted.append(job_id) or {"status": "dry_run"})
-    assert scheduler.auto_apply_batch() == [{"status": "dry_run"}]
-    assert checked == [blocked.id, ready.id]
-    assert submitted == [ready.id]
-    assert db.list_applications() == []
-
-
-def test_auto_apply_rotates_bounded_preflight_window_across_scans(monkeypatch):
-    from jobhub.readiness import Readiness
-
-    jobs = [
-        Job(source="lever", ats="lever", company=f"Company {index}", title="Software Engineer",
-            url=f"https://jobs.lever.co/company-{index}/{index}", location="United States",
-            score=100 - index, score_json={"auto_apply_eligible": True})
-        for index in range(25)
-    ]
-    db.upsert_jobs(jobs)
-    db.set_settings({"auto_apply": True, "setup_complete": True, "max_apply_per_run": 1})
-    monkeypatch.setattr(scheduler, "rescore", lambda: None)
-    checked = []
-
-    def preflight(job, profile, settings):
-        checked.append(job.id)
-        return Readiness("ready") if job.id == jobs[24].id else Readiness("missing_facts", ("Work authorization",))
-
-    monkeypatch.setattr(scheduler, "preflight_job", preflight)
-    submitted = []
-    monkeypatch.setattr(scheduler, "apply_one", lambda job_id, **kwargs:
-                        submitted.append(job_id) or {"status": "dry_run"})
-
-    first_run = db.create_run()
-    assert scheduler.auto_apply_batch() == []
-    db.finish_run(first_run, 0, 0, 0, "ok", [])
-    assert checked == [job.id for job in jobs[:24]]
-
-    second_run = db.create_run()
-    assert scheduler.auto_apply_batch() == [{"status": "dry_run"}]
-    db.finish_run(second_run, 0, 0, 0, "ok", [])
-    assert jobs[24].id in checked[24:]
-    assert submitted == [jobs[24].id]
-    assert db.list_applications() == []
-
-
-def test_auto_apply_batch_tries_distinct_employers_before_repeating_one(monkeypatch):
-    jobs = [
-        Job(source="lever", ats="lever", company=company, title="Software Engineer",
-            url=f"https://jobs.lever.co/{company.lower()}/{index}", location="United States",
-            score=score, score_json={"auto_apply_eligible": True})
-        for index, (company, score) in enumerate((
-            ("Example", 100), ("EXAMPLE", 99), ("Another", 98), ("Third", 97)
-        ))
-    ]
-    db.upsert_jobs(jobs)
-    db.set_settings({"auto_apply": True, "setup_complete": True, "max_apply_per_run": 3})
-    monkeypatch.setattr(scheduler, "rescore", lambda: None)
-    attempted = []
-    monkeypatch.setattr(scheduler, "apply_one", lambda job_id, **kwargs:
-                        attempted.append(job_id) or {"status": "needs_human"})
-
-    assert len(scheduler.auto_apply_batch()) == 3
-    assert attempted == [jobs[0].id, jobs[2].id, jobs[3].id]
 
 
 def test_scan_records_source_notices_without_partial_failure(monkeypatch):
@@ -435,3 +338,24 @@ def test_import_immediately_ranks_job_and_updates_fresh_description(monkeypatch)
         assert result['job']['description'] == 'SQL role'
         assert result['job']['score'] > 0
         assert result['job']['remote'] is False
+
+
+def test_deferred_scan_retries_within_a_minute(monkeypatch):
+    import asyncio
+    from datetime import datetime
+    calls = []
+    clock = [1000.0]
+    scheduled = []
+    monkeypatch.setattr(scheduler.time, "time", lambda: clock[0])
+
+    async def fake_sleep(seconds):
+        calls.append(("sleep", seconds))
+        if len([call for call in calls if call[0] == "sleep"]) == 2:
+            scheduled.append(scheduler.STATE.next_scan_at)
+            scheduler.STATE.stop = True
+    monkeypatch.setattr(scheduler.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(scheduler, "scan_once", lambda: calls.append(("scan", None)) or {"status": "deferred"})
+    monkeypatch.setattr(scheduler, "auto_apply_batch", lambda: calls.append(("auto", None)) or [])
+    asyncio.run(scheduler.loop())
+    assert ("auto", None) not in calls
+    assert datetime.fromisoformat(scheduled[0]).timestamp() == 1000 + scheduler.DEFERRED_RETRY_SECONDS

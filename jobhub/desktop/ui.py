@@ -668,7 +668,7 @@ class JobHubWindow(QMainWindow):
         self._scheduler_enabled = scheduler_enabled
         self._update_jarvis_status()
         automation = (f"JARVIS {jarvis_label(self._jarvis_mode)} on" if self._jarvis_mode != "off"
-                      else "Auto-apply on" if self._auto_apply else "Auto-apply off")
+                      else "JARVIS off: nothing sends by itself")
         self.scan.setEnabled(not scanning)
         self.scan.setText("Scanning…" if scanning else "Refresh jobs")
         if scanning:

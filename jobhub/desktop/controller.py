@@ -103,6 +103,7 @@ class DesktopController(QObject):
         self._mail_state: dict = {"last_checked": None, "unmatched": 0}
         self._mail_syncing = threading.Event()
         self._mail_retry_pending = False
+        self._portal_checking = threading.Event()
 
         window.scan_requested.connect(self.scan)
         window.apply_requested.connect(self.apply)
@@ -277,6 +278,7 @@ class DesktopController(QObject):
         # beside the scan, so a slow or failed scan never delays it.
         if settings.get("email_tracking", {}).get("enabled"):
             self.sync_email()
+        self.check_workday()
         self._status("Searching your sources for new jobs…", 0, "busy")
         self._update_scan_state(settings)
 
@@ -855,6 +857,16 @@ class DesktopController(QObject):
                 self._status(report.summary, tone="info")
             self.refresh(include_account=True)
             return
+        elif kind == "workday_portal":
+            report = result
+            if report.updates or report.confirmed:
+                tone = "success" if report.confirmed or any(u["stage"] in ("interview", "assessment", "offer")
+                                                             for u in report.updates) else "info"
+                self._status(report.summary, 12_000, tone)
+            elif context:
+                self._status(report.summary, tone="info")
+            self.refresh(include_account=True)
+            return
         elif kind == "rescore":
             self._status("Job rankings updated", tone="success")
         elif kind == "preview":
@@ -899,7 +911,7 @@ class DesktopController(QObject):
             self.refresh(wait=False)
             return
         label = {"plan": "Preparing applications", "prepare_one": "Preparing the application", "luna": "AI Autofill",
-                 "mail_sync": "Inbox check", "preview": "Resume preview", "import_resume": "Resume import"}.get(kind, kind)
+                 "mail_sync": "Inbox check", "workday_portal": "Workday check", "preview": "Resume preview", "import_resume": "Resume import"}.get(kind, kind)
         self._status(f"{label} failed: {error}", 15_000, "error")
         db.add_event(f"Desktop {kind} failed: {error}", "error")
         self.refresh(wait=False)
@@ -1324,7 +1336,23 @@ class DesktopController(QObject):
         if db.get_settings().get("email_tracking", {}).get("enabled"):
             self.sync_email()
 
+    def check_workday(self, manual: bool = False) -> None:
+        """Read the Workday Candidate Home of employers with open applications (workday_portal)."""
+        if not (db.get_settings().get("workday") or {}).get("check_portal", True) or self._portal_checking.is_set():
+            return
+        self._portal_checking.set()
+
+        def run():
+            from .. import workday_portal
+            try:
+                return workday_portal.check(db.get_settings(), manual=manual, stop=self._stopping.is_set)
+            finally:
+                self._portal_checking.clear()
+        self._submit_assist("workday_portal", run, manual)
+
     def sync_email(self, manual: bool = False) -> None:
+        if manual:
+            self.check_workday(manual=True)
         if not db.get_settings().get("email_tracking", {}).get("enabled"):
             self._status("Turn on reply tracking in Settings → Connections → Email", tone="info")
             self.window.show_connections()

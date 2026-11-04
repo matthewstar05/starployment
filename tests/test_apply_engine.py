@@ -1083,3 +1083,34 @@ def test_ashby_answers_that_did_not_save_are_found_before_submit(tmp_path):
     fields.append({"idx": "9", "name": "never", "label": "Authorized?", "kind": "radio", "buttonOptions": True})
     engine._filled.update({"0", "1", "2", "9"})
     assert [f["name"] for f in engine._ashby_unsaved(None, fields)] == ["failed", "refused", "never"]
+
+
+def test_a_send_stuck_in_a_browser_call_is_shut_down_and_frees_the_mailbox(store, tmp_path, monkeypatch):
+    """2026-11-04: one page whose script never returned held every other send for seven hours."""
+    import threading
+
+    from jobhub.apply import engine as engine_module
+    monkeypatch.setattr(engine_module, "SEND_LIMIT_SECONDS", 4)
+    page_file = tmp_path / "stuck.html"
+    page_file.write_text("<!doctype html><title>stuck</title>", encoding="utf-8")
+    resume = tmp_path / "resume.pdf"
+    resume.write_bytes(b"%PDF-1.4\nlocal test resume")
+    job = Job(source="fixture", company="Local Fixture", title="Engineer", url=page_file.as_uri())
+
+    class Stuck(FormEngine):
+        def _run_page(self, ctx, page, url):
+            page.goto(url)
+            assert self._mailbox_turn()
+            self.submission_attempted = True
+            page.evaluate("() => { while (true) {} }")     # never returns
+            raise AssertionError("unreachable")
+    engine = Stuck(job, Profile(), {"email_verification": {"enabled": True}}, str(resume),
+                   Adapter("fixture", page_file.as_uri(), settle_ms=0), False)
+    result = {}
+    worker = threading.Thread(target=lambda: result.update(r=engine.run()), daemon=True)
+    worker.start()
+    worker.join(60)
+    assert not worker.is_alive(), "the watchdog did not end the stuck send"
+    assert result["r"].status == "needs_human" and "stopped responding" in result["r"].message
+    assert engine_module._MAILBOX_LOCK.acquire(timeout=1)    # the next send gets the mailbox
+    engine_module._MAILBOX_LOCK.release()

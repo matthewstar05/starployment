@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from email import policy
+from email.message import EmailMessage
 from email.parser import BytesParser
 from email.utils import getaddresses, parsedate_to_datetime
 
@@ -307,6 +308,8 @@ def _message_key(message, uid: bytes) -> str:
 
 
 _HEADER_BATCH = 200
+# (host, user, UIDVALIDITY) -> {uid: (message key, looked like recruiting mail)}; see Mailbox._header_cache.
+_HEADERS: dict[tuple, dict[bytes, tuple[str, bool]]] = {}
 _RECONNECTS = 3
 _CONNECTION_ERRORS = (imaplib.IMAP4.abort, OSError)   # includes timeouts, SSL, DNS, and broken pipes
 # Bump when ``classify``, ``_RECRUITING_HINT`` or the Luna reading changes, so mail
@@ -433,19 +436,33 @@ class Mailbox:
                     if result != "OK" or not data:
                         return
                     uids = data[0].split()[-limit:][::-1]
+                cache = self._header_cache(mailbox)
                 while done < len(uids):
                     chunk = uids[done:done + _HEADER_BATCH]
-                    result, rows = mailbox.uid("FETCH", b",".join(chunk),
-                                               "(UID BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID)])")
+
+                    def settled(uid: bytes) -> bool:
+                        known = cache.get(uid)
+                        return known is not None and (not known[1] or bool(skip and skip(known[0])))
+                    wanted = [uid for uid in chunk if not settled(uid)]
                     headers: dict[bytes, bytes] = {}
-                    for item in rows or []:
-                        if isinstance(item, tuple) and (found := re.search(rb"\bUID (\d+)", item[0] or b"")):
-                            headers[found.group(1)] = item[1] or b""
+                    if wanted:
+                        result, rows = mailbox.uid("FETCH", b",".join(wanted),
+                                                   "(UID BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID)])")
+                        for item in rows or []:
+                            if isinstance(item, tuple) and (found := re.search(rb"\bUID (\d+)", item[0] or b"")):
+                                headers[found.group(1)] = item[1] or b""
                     for uid in chunk:
+                        if uid not in headers and settled(uid):
+                            done += 1
+                            yield uid, EmailMessage(), None   # read on an earlier check: nothing new
+                            continue
                         message = BytesParser(policy=policy.default).parsebytes(headers.get(uid, b""))
                         body = None
-                        if (_RECRUITING_HINT.search(f"{message.get('Subject', '')} {message.get('From', '')}")
-                                and not (skip and skip(_message_key(message, uid)))):
+                        key = _message_key(message, uid)
+                        hinted = bool(_RECRUITING_HINT.search(f"{message.get('Subject', '')} {message.get('From', '')}"))
+                        if uid in headers:
+                            cache[uid] = (key, hinted)
+                        if hinted and not (skip and skip(key)):
                             result, body_rows = mailbox.uid("FETCH", uid, "(BODY.PEEK[])")
                             raw = next((item[1] for item in body_rows or [] if isinstance(item, tuple)), b"")
                             message = BytesParser(policy=policy.default).parsebytes(raw[:400_000]) if raw else message
@@ -466,6 +483,19 @@ class Mailbox:
                         mailbox.logout()
                     except Exception:  # noqa: BLE001
                         pass
+
+
+    def _header_cache(self, mailbox) -> dict:
+        """Each message's key and whether it looked like recruiting mail, by UID, for this
+        mailbox. A UID names the same message for as long as the folder's UIDVALIDITY stays
+        the same, so a later check skips even the headers of mail it has already settled."""
+        try:
+            validity = (mailbox.response("UIDVALIDITY")[1] or [None])[0]
+        except Exception:  # noqa: BLE001 - a server that does not say: no cache
+            validity = None
+        if not validity:
+            return {}
+        return _HEADERS.setdefault((self.host, self.username, bytes(validity)), {})
 
 
 def test_mailbox(verification_settings: dict) -> tuple[bool, str]:
@@ -497,9 +527,20 @@ def sync(settings: dict | None = None, *, messages=None, archiver=None, luna_now
     seen = db.seen_mail_keys(rules)
     report = SyncReport()
     mailbox = None if messages is not None else Mailbox(settings.get("email_verification") or {})
-    # Mail read before and set aside is not downloaded again; recorded mail is
-    # always re-read, since its application may have become tracked since.
-    source = messages if mailbox is None else mailbox.recent(days, skip=lambda key: key in seen and key not in known)
+    # Mail read under these rules is not downloaded again: set-aside mail, and recorded mail
+    # already linked to an application (it stays with it, ``_apply``). Recorded mail no
+    # application matched yet is read again, since its application may be tracked by now; so is
+    # a rejection still waiting to be archived.
+    archiving = bool(tracking.get("archive_rejections"))
+
+    def settled(key: str) -> bool:
+        if key not in seen:
+            return False
+        if key not in known:
+            return True
+        stage, app_id = known[key]
+        return app_id is not None and not (archiving and stage == "rejected")
+    source = messages if mailbox is None else mailbox.recent(days, skip=settled)
     rejections: list[tuple[bytes, str, int]] = []   # (uid, Message-ID, application id) still in the Inbox
     set_aside: list[str] = []
     try:
@@ -674,18 +715,27 @@ def _apply(item: dict, report, applications, known, rejections, seen, set_aside,
     if app is None and item["company"]:   # the employer Luna named, read as if the subject said it
         app = match_application(f"{sender} {item['company']}", f"{subject} · {item['company']}", body, applications,
                                 arrived)
+    previous = known.get(key)
+    if previous and previous[1] is not None and (app is None or int(app["id"]) != int(previous[1])):
+        # A message stays with the application it was first linked to. Matching again from
+        # scratch moved it whenever a posting's employer name or title changed between scans
+        # ("Netic" and "Cybernetic Labs"), or another application to that employer was tracked,
+        # so stages flipped back and forth on every check.
+        linked = next((tracked for tracked in applications if int(tracked["id"]) == int(previous[1])), None)
+        app = linked or db.tracked_application(int(previous[1])) or app
     app_id = int(app["id"]) if app else None
     if stage == "rejected" and app_id is not None and message_id:
         rejections.append((item["uid"], message_id, app_id))
     # A message already read the same way is done. One read differently, by a
     # better rule or because its application is now tracked, is applied again.
-    if known.get(key) == (stage, app_id):
+    if previous == (stage, app_id):
+        _settle(key, app_id, seen, set_aside, rules)
         return
-    previous = known.get(key)
     db.record_mail_event(message_key=key, received_at=received, sender=sender, subject=subject, stage=stage,
                          application_id=app_id, confidence=item["confidence"], message_id=message_id,
                          employer=item["company"] or employer_hint(item["sender_header"], subject))
     known[key] = (stage, app_id)
+    _settle(key, app_id, seen, set_aside, rules)
     # A message read differently no longer vouches for the stage it set before.
     restaged = db.restage_from_mail(int(previous[1])) if previous and previous[1] is not None else None
     if restaged:
@@ -708,6 +758,15 @@ def _apply(item: dict, report, applications, known, rejections, seen, set_aside,
                                "title": app.get("title"), "stage": stage})
         db.add_event(f"Inbox update: {app.get('company')} · {app.get('title')} → {stage}", "success"
                      if stage in ("interview", "offer", "assessment") else "info", app.get("job_id"))
+
+
+def _settle(key: str, app_id: int | None, seen: set, set_aside: list, rules: int) -> None:
+    """Mark a message linked to an application as read under these rules, so the next
+    check does not download it again (unlinked mail is read again until it matches)."""
+    if app_id is None or key in seen:
+        return
+    seen.add(key)
+    set_aside.append(key)
 
 
 def _archive_rejections(report: SyncReport, rejections: list[tuple[bytes, str, int]], archiver) -> None:

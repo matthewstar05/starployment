@@ -94,7 +94,7 @@ def test_unattended_apply_rechecks_eligibility_after_stale_new_grad_becomes_seni
     resume.write_bytes(b"%PDF-1.7\nfictional fixture")
     db.save_profile(Profile(first_name="Ada", last_name="Lovelace", email="ada@example.test",
                             resume_path=str(resume)))
-    db.set_settings({"auto_apply": True, "setup_complete": True, "min_score_to_apply": 60,
+    db.set_settings({"jarvis_mode": "new", "setup_complete": True, "min_score_to_apply": 60,
                      "target_titles": ["Software Engineer New Grad"]})
     stale = singlestore_posting(title="Software Engineer New Grad", description="Entry-level Python role",
                                 score=95, score_json={"auto_apply_eligible": True})
@@ -129,7 +129,7 @@ def test_automatic_run_skips_a_closed_posting_without_using_its_budget(monkeypat
     resume = config.RESUMES / "candidate.pdf"
     resume.write_bytes(b"%PDF-1.7\nfictional fixture")
     db.save_profile(Profile(first_name="Ada", last_name="Lovelace", email="ada@example.test", resume_path=str(resume)))
-    db.set_settings({"auto_apply": True, "setup_complete": True, "min_score_to_apply": 60, "max_apply_per_run": 1})
+    db.set_settings({"jarvis_mode": "new", "setup_complete": True, "min_score_to_apply": 60, "max_apply_per_run": 1})
     closed = singlestore_posting(score=95, score_json={"auto_apply_eligible": True})
     open_ = singlestore_posting(company="Open Example", score=90, score_json={"auto_apply_eligible": True},
                                 url="https://job-boards.greenhouse.io/openexample/jobs/1",
