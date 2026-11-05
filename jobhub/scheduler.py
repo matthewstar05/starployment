@@ -342,6 +342,11 @@ def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | No
                         "The current posting no longer meets your automatic application criteria. "
                         "Review the refreshed role before applying."
                     )
+                if jarvis.is_engaged(job.company, jarvis.engaged_employers(settings), job.url):
+                    # Checked again right before the browser opens: an interview invitation may
+                    # have arrived since this run picked the posting.
+                    raise PostingRefreshError(f"You are interviewing with {job.company}, so Starployment does not "
+                                              "apply there by itself. Apply by hand if you mean to.")
                 if held_from_automation(job, settings.get("priority_companies") or []):
                     raise PostingRefreshError(
                         "This is a starred or priority-company role, so it waits for your own approval. "

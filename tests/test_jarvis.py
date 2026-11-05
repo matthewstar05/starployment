@@ -478,3 +478,44 @@ def test_with_jarvis_off_nothing_is_sent_unattended(running, monkeypatch):
     monkeypatch.setattr(scheduler, "apply_to_job", lambda *a, **kw: pytest.fail("sent with JARVIS off"))
     assert not jarvis.automatic(db.get_settings())
     assert scheduler.auto_apply_batch() == []
+
+
+def test_employers_you_are_interviewing_with_get_nothing_unattended(running, monkeypatch):
+    """Endeavor: an interview at "Endeavorai" blocks a posting listed as "Endeavor AI", not "Endeavor Health"."""
+    from jobhub import prepare
+    sent = Job(source="ashby", ats="ashby", company="Endeavorai", title="Forward Deployed Engineer",
+               url="https://jobs.ashbyhq.com/endeavor/1")
+    db.upsert_jobs([sent])
+    app_id = db.reserve_application(sent.id)
+    db.start_application(app_id, sent.id)
+    db.mark_submission_attempted(sent.id)
+    db.finish_application(app_id, "applied", [], [], [], submission_attempted=True)
+    db.set_application_stage(app_id, "interview", "manual")
+    variant = job(50, 90).model_copy(update={"company": "Endeavor AI", "title": "Platform Engineer",
+                                             "url": "https://jobs.ashbyhq.com/endeavor/2"})
+    other = job(51, 90).model_copy(update={"company": "Endeavor Health", "title": "Data Analyst",
+                                           "url": "https://jobs.ashbyhq.com/endeavorhealth/3"})
+    assert [j.company for j in jarvis.not_repeated([variant, other])] == ["Endeavor Health"]
+    drafts = [{"id": 1, "status": "ready", "company": "Endeavor AI", "ats": "ashby", "starred": 0},
+              {"id": 2, "status": "ready", "company": "Endeavor Health", "ats": "ashby", "starred": 0}]
+    send, held = prepare.bulk_send_candidates(drafts, [], {})
+    assert [d["id"] for d in send] == [2] and [d["id"] for d in held] == [1]
+    # The toggle is on by default; turned off, the employer is treated like any other.
+    db.set_settings({"block_engaged_employers": False})
+    assert len(jarvis.not_repeated([variant, other])) == 2
+
+
+def test_an_employer_under_another_name_on_the_same_board_is_blocked(running):
+    sent = Job(source="ashby", ats="ashby", company="Cybernetic Labs", title="Forward Deployed Engineer",
+               url="https://jobs.ashbyhq.com/netic/1")
+    db.upsert_jobs([sent])
+    app_id = db.reserve_application(sent.id)
+    db.start_application(app_id, sent.id)
+    db.mark_submission_attempted(sent.id)
+    db.finish_application(app_id, "applied", [], [], [], submission_attempted=True)
+    db.set_application_stage(app_id, "assessment", "email")
+    renamed = job(60, 90).model_copy(update={"company": "Netic", "title": "Data Analyst",
+                                             "url": "https://jobs.ashbyhq.com/netic/9"})
+    elsewhere = job(61, 90).model_copy(update={"company": "Netic", "title": "Data Analyst",
+                                               "url": "https://jobs.lever.co/neticx/9"})
+    assert jarvis.not_repeated([renamed, elsewhere]) == [elsewhere]

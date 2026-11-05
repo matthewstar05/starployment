@@ -168,6 +168,8 @@ class SettingsView(QWidget):
         self.parallel_agent_calls.setSuffix(" at once")
         self.show_browser = ToggleSwitch()
         self.show_browser.setAccessibleName("Show the browser while sending")
+        self.block_engaged = ToggleSwitch()
+        self.block_engaged.setAccessibleName("Don't apply where you're interviewing")
         automation.add_row("Practice mode", self.dry_run, "Fill forms but never click Submit, even when you send.")
         automation.add_row("Send applications", Stepper(self.parallel_sends, width=112),
                            "Each runs in its own background browser (about 300 MB each), one per employer at a time.")
@@ -177,6 +179,10 @@ class SettingsView(QWidget):
                            "AI Autofill gives each long answer its own call and runs them side by side.")
         automation.add_row("Show the browser while sending", self.show_browser,
                            "Off sends quietly in the background. Turn on to watch a send.")
+        automation.add_row("Don't apply where you're interviewing", self.block_engaged,
+                           "JARVIS and Send ready skip every role at an employer where an application has an "
+                           "assessment, interview, or offer, so a second application never lands mid-process. "
+                           "You can still send one yourself.")
         self.interval.setSingleStep(5)
         automation.add_row("Scan every", Stepper(self.interval, width=104))
         automation.add_row("Applications per run", Stepper(self.max_apply), "At most one per employer each run.")
@@ -278,7 +284,7 @@ class SettingsView(QWidget):
         self.tracker.watch(
             self.jarvis_mode, self.dry_run, self.interval, self.max_apply, self.min_score, self.luna, self.email,
             self.parallel_sends, self.parallel_prepare, self.parallel_agent_calls,
-            self.show_browser, self.keychain_protection, self.workday_accounts, self.workday_send,
+            self.show_browser, self.block_engaged, self.keychain_protection, self.workday_accounts, self.workday_send,
             self.workday_portal, self.company_cap, self.mix_families, self.prune,
             self.target_titles, self.locations, self.exclude_words, self.remote_ok, self.include_internships,
             self.min_salary, self.years_experience, self.max_skills, self.greenhouse, self.lever,
@@ -373,6 +379,7 @@ class SettingsView(QWidget):
             self.parallel_prepare.setValue(int(s.get("parallel_prepare", 8)))
             self.parallel_agent_calls.setValue(int(s.get("parallel_agent_calls", 4)))
             self.show_browser.setChecked(bool(s.get("show_browser", False)))
+            self.block_engaged.setChecked(bool(s.get("block_engaged_employers", True)))
             self.keychain_protection.setChecked(bool(s.get("keychain_protection", False)))
             workday = s.get("workday") or {}
             self.workday_accounts.setChecked(bool(workday.get("create_accounts", False)))
@@ -420,6 +427,7 @@ class SettingsView(QWidget):
             "parallel_prepare": self.parallel_prepare.value(),
             "parallel_agent_calls": self.parallel_agent_calls.value(),
             "show_browser": self.show_browser.isChecked(),
+            "block_engaged_employers": self.block_engaged.isChecked(),
             "keychain_protection": self.keychain_protection.isChecked(),
             "workday": {"create_accounts": self.workday_accounts.isChecked(), "send": self.workday_send.isChecked(),
                         "check_portal": self.workday_portal.isChecked()},

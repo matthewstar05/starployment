@@ -529,13 +529,16 @@ def automation_history() -> tuple[set[tuple[str, str]], set[str]]:
     roles: set[tuple[str, str]] = set()
     engaged: set[str] = set()
     with reader() as c:
-        for row in c.execute("SELECT j.company, j.title, a.stage, a.status, a.submission_attempted, a.method "
-                             "FROM applications a JOIN jobs j ON j.id=a.job_id").fetchall():
+        for row in c.execute("SELECT j.company, j.title, j.url, a.stage, a.status, a.submission_attempted, "
+                             "a.method FROM applications a JOIN jobs j ON j.id=a.job_id").fetchall():
             company = normalize_company(row["company"] or "")
             if (row["submission_attempted"] or row["status"] == "applied" or row["method"] == "manual"):
                 roles.add((company, role_key(row["title"] or "")))
             if (row["stage"] or "") in ("assessment", "interview", "offer"):
                 engaged.add(company)
+                board = board_of(row["url"] or "")
+                if board:   # the employer's own job board, whatever name a source gives it
+                    engaged.add(f"board:{board[0]}:{board[1]}")
     return roles, engaged
 
 

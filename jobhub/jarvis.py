@@ -224,15 +224,52 @@ def role_key(title: str) -> str:
     return " ".join(sorted(set(text.split())))
 
 
-def not_repeated(jobs: list[Job]) -> list[Job]:
-    """Drop roles automatic runs must leave alone: one already applied to under another posting,
-    and every role at an employer where an application has reached an assessment, interview, or
-    offer (a second application there can look careless). The candidate may still apply by hand."""
+def engaged_employers(settings: dict | None = None) -> set[str]:
+    """Employers you are in a hiring process with (normalized names): an application at an
+    assessment, interview, or offer, or such an email from an employer no application matches.
+    Empty when Settings → Automation → Don't apply where you're interviewing is off."""
     from . import db
     from .priority import normalize_company
-    roles, engaged = db.automation_history()
+    settings = settings if settings is not None else db.get_settings()
+    if not settings.get("block_engaged_employers", True):
+        return set()
+    _, engaged = db.automation_history()
+    engaged |= {normalize_company(row.get("employer") or "") for row in db.unmatched_stage_mail(days=60)}
+    return {name for name in engaged if name}
+
+
+def _names(engaged: set[str]) -> set[str]:
+    return {name for name in engaged if not name.startswith("board:")}
+
+
+def is_engaged(company: str, engaged: set[str], url: str = "") -> bool:
+    """One employer under its posting's name variants: "Endeavor AI" is "Endeavorai", and
+    "Akuna Capital University" is "Akuna Capital". "Endeavor Health" is not "Endeavorai".
+    A posting on the same company job board counts too ("Netic" and "Cybernetic Labs" both
+    post at jobs.ashbyhq.com/netic)."""
+    from .models import board_of
+    from .priority import normalize_company
+    board = board_of(url) if url else None
+    if board and f"board:{board[0]}:{board[1]}" in engaged:
+        return True
+    name = normalize_company(company)
+    if not name:
+        return False
+    compact = name.replace(" ", "")
+    return any(name == other or compact == other.replace(" ", "")
+               or name.startswith(other + " ") or other.startswith(name + " ") for other in _names(engaged))
+
+
+def not_repeated(jobs: list[Job], settings: dict | None = None) -> list[Job]:
+    """Drop roles automatic runs must leave alone: one already applied to under another posting,
+    and every role at an employer you are interviewing with (``engaged_employers``; a second
+    application there can look careless). The candidate may still apply by hand."""
+    from . import db
+    from .priority import normalize_company
+    roles, _ = db.automation_history()
+    engaged = engaged_employers(settings)
     # Within one run the one-employer-per-cycle rule already keeps a role from going twice, and a
     # posting that cannot be sent (a missing answer) must still let its twin take the turn.
     return [job for job in jobs
-            if normalize_company(job.company) not in engaged
+            if not is_engaged(job.company, engaged, job.url)
             and (normalize_company(job.company), role_key(job.title)) not in roles]

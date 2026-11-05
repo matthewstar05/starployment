@@ -943,12 +943,16 @@ def bulk_send_candidates(drafts: list[dict], priority: list[str],
     unless it is starred (priority companies are starred automatically):
     starred applications wait for their own Approve & send.
     """
+    from .jarvis import engaged_employers, is_engaged
     from .priority import held_from_bulk_send
     send, held = [], []
+    engaged = engaged_employers(settings) if drafts else set()
     for draft in drafts:
         if not sends_unattended(draft.get("ats") or "", settings or {}):
             continue   # Workday without Send Workday applications: finished in a browser window
-        if draft.get("status") == "ready" and held_from_bulk_send(draft, priority):
+        if is_engaged(draft.get("company") or "", engaged, draft.get("url") or ""):
+            held.append(draft)   # an employer you are interviewing with: only by its own Approve & send
+        elif draft.get("status") == "ready" and held_from_bulk_send(draft, priority):
             held.append(draft)
         elif draft.get("status") in ("approved", "ready"):
             send.append(draft)

@@ -305,6 +305,9 @@ DEFAULT_SETTINGS: dict = {
     "show_browser": False,         # True opens a visible browser window while sending
     # --- priority employers: starred, prepared, never sent automatically ---
     "priority_companies": PRIORITY_COMPANIES,
+    # Never send (JARVIS or Send ready) to an employer you are interviewing with: an application
+    # there at an assessment, interview, or offer (jarvis.engaged_employers).
+    "block_engaged_employers": True,
     # --- targeting ---
     "target_titles": [],
     "exclude_title_words": [],
@@ -562,6 +565,7 @@ def validate_settings(settings: dict) -> dict:
         show_browser: StrictBool
         min_score_to_apply: float = Field(ge=0, le=100, allow_inf_nan=False, strict=True)
         priority_companies: list[StrictStr] = Field(max_length=300)
+        block_engaged_employers: StrictBool = True
         target_titles: list[StrictStr] = Field(max_length=300)
         exclude_title_words: list[StrictStr] = Field(max_length=100)
         include_internships: StrictBool

@@ -1038,8 +1038,8 @@ class DesktopController(QObject):
             settings.get("priority_companies") or [], settings)
         if not candidates:
             self._status("Nothing is ready to send. Use Autofill all or answer the open questions first."
-                         + (f" {len(held)} starred application{'s' if len(held) != 1 else ''} wait for you to "
-                            "approve each one." if held else ""))
+                         + (f" {len(held)} application{'s' if len(held) != 1 else ''} (starred, or at an employer "
+                            "you are interviewing with) wait for you to approve each one." if held else ""))
             return
         practice = settings.get("dry_run")
         autofilled = sum(1 for d in candidates if any(q.get("source") == "autofill" for q in d["questions"]))
