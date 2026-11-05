@@ -549,3 +549,22 @@ def test_all_plus_sends_one_workday_application_at_a_time(running, monkeypatch):
     scheduler.jarvis_batch()
     assert state["peak_workday"] == 1 and state["peak"] > 1
     assert "workday" in state["sent"] and state["sent"].count("workday") < 4   # the rest wait for a later cycle
+
+
+def test_all_plus_sends_a_still_listed_posting_over_180_days_old(running, monkeypatch):
+    """ALL+ chose these postings, and the last check before the browser turned every one away."""
+    old_reason = {"auto_apply_eligible": False, "review_reasons": ["Posting date is over 180 days old"]}
+    row = job(70, 90).model_copy(update={"score_json": old_reason})
+    save([row])
+    db.set_settings({"jarvis_mode": "all_plus"})
+    monkeypatch.setattr(scheduler, "enrich_job", lambda j: j)
+    sent = []
+    monkeypatch.setattr(scheduler, "apply_to_job", lambda *a, **kw: sent.append(1) or
+                        {"status": "applied", "submission_attempted": True, "log": [], "screenshots": []})
+    scheduler.apply_one(row.id, require_eligible=True, required_jarvis_mode="all_plus")
+    assert sent == [1]
+    db.set_settings({"jarvis_mode": "all"})       # ALL keeps the stricter rule
+    other = job(71, 90).model_copy(update={"score_json": old_reason})
+    save([other])
+    result = scheduler.apply_one(other.id, require_eligible=True, required_jarvis_mode="all")
+    assert sent == [1] and not result.get("submission_attempted")

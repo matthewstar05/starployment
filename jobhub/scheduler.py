@@ -336,7 +336,12 @@ def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | No
             if require_eligible:
                 settings = db.get_settings()
                 min_score = float(settings.get("min_score_to_apply", 60))
-                if (job.score_json.get("auto_apply_eligible") is not True or job.score < min_score
+                # A JARVIS send is held to JARVIS's own rule (ALL+ also takes still-listed postings
+                # over 180 days old); the stricter scorer flag alone turned every one of those away at
+                # the last step (2026-11-05 night: 10 of 30 attempts in half an hour).
+                eligible = (jarvis.eligible(job, settings) if required_jarvis_mode
+                            else job.score_json.get("auto_apply_eligible") is True)
+                if (not eligible or job.score < min_score
                         or not jarvis.automatic(settings) or not settings.get("setup_complete")):
                     raise PostingGone(
                         "The current posting no longer meets your automatic application criteria. "
