@@ -61,6 +61,9 @@ DEGREE_LEVELS = {
     "bachelor's degree": ("bachelor's degree", "bachelors degree", "bachelor's", "bachelors", "bachelor of science",
                           "bachelor of science (bs)", "bachelor of science (b.s.)", "bs", "b.s."),
 }
+_HOW_HEARD_LABEL = re.compile(r"how did you (?:first )?(?:hear|learn|find)|source of (?:this )?application", re.I)
+# Spellings Workday lists use for a source (Entegris: "Linkedln" with a lower-case L).
+SOURCE_SPELLINGS = {"linkedin": ("linkedin", "linkedln", "linked in", "linkedin.com")}
 _DEGREE_LABEL = re.compile(r"(?:degree|degree type|level of education)\s*\*?", re.I)
 SIGN_IN_STEP_RE = re.compile(r"create account|sign.?in", re.I)
 READY_SECONDS = 45
@@ -434,6 +437,16 @@ class WorkdayEngine(FormEngine):
                     else:
                         self._log(f"{field['label'][:50]}: no option for {free!r} among {options[:12]}")
             chosen = pick_option(options, str(value)) if isinstance(value, str) else None
+            if chosen is None and _HOW_HEARD_LABEL.search(field["label"]):
+                saved = str((value if isinstance(value, str) else self._answer(field, [])) or "").strip()
+                spellings = SOURCE_SPELLINGS.get(saved.casefold(), ())
+                listed = [o for o in options if o.strip().casefold() in spellings]
+                others = [o for o in options if re.fullmatch(r"\s*other\s*", o, re.I)]
+                if saved and len(listed) == 1:
+                    chosen = listed[0]          # the list's own spelling ("Linkedln")
+                elif saved and not listed and len(others) == 1:
+                    chosen = others[0]          # the source is not listed: "Other" is the true answer
+                    self._log(f"{field['label'][:50]}: {saved} is not listed, chose Other")
             if chosen is None and _DEGREE_LABEL.fullmatch(field["label"].strip()):
                 saved = value if isinstance(value, str) else self._answer(field, [])
                 level = DEGREE_LEVELS.get(str(saved or "").strip().casefold().replace("’", "'"))

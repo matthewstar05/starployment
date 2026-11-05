@@ -313,3 +313,34 @@ def test_a_degree_dropdown_takes_the_catalogs_wording_of_the_saved_level(tmp_pat
         assert page.inner_text("#degree") == "Master of Science (MS)", engine.log
     finally:
         page.close()
+
+
+@pytest.mark.parametrize("listed, expected", [
+    (["Corporate Website", "Linkedln", "Indeed"], "Linkedln"),
+    (["Crowe Career Site", "Other", "Referral - A Crowe Employee Referred Me"], "Other"),
+    (["Career Builder", "Indeed", "Monster"], "Select One"),
+])
+def test_how_heard_uses_the_lists_spelling_or_other_never_a_different_source(tmp_path, monkeypatch, browser,
+                                                                            listed, expected):
+    items = "".join(f'<li role="option" onclick="pick(this)">{o}</li>' for o in listed)
+    page_html = f"""<!doctype html><html><body><div data-automation-id="applyFlowPage">
+      <div data-automation-id="formField-source"><label>How Did You Hear About Us?*</label>
+        <button aria-haspopup="listbox" id="src" onclick="document.getElementById('sl').style.display='block'">Select One</button>
+        <ul role="listbox" id="sl" style="display:none">{items}</ul></div></div>
+      <script>function pick(li) {{ document.getElementById('src').innerText = li.innerText; li.parentElement.style.display='none'; }}</script>
+      </body></html>"""
+    path = tmp_path / "source.html"
+    path.write_text(page_html)
+    monkeypatch.setattr(workday_module, "rule_answer", lambda q, *args:
+                        Answer("LinkedIn", "user") if q.label.startswith("How Did You Hear") and not q.options else None)
+    job = Job(source="fixture", ats="workday", company="Firm", title="Analyst", url=path.as_uri())
+    engine = workday_module.WorkdayEngine(job, Profile(), {}, str(tmp_path / "r.pdf"),
+                                          Adapter("workday", path.as_uri(), assist_only=True), False)
+    page = browser.new_page()
+    try:
+        page.goto(path.as_uri())
+        engine.root = page.main_frame
+        engine._fill_step(page)
+        assert page.inner_text("#src") == expected, engine.log
+    finally:
+        page.close()
