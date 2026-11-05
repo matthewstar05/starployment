@@ -48,6 +48,18 @@ VERIFY_RE = re.compile(r"verif(?:y|ication)[^.]{0,60}(?:email|account)|(?:email|
 CLOSED_RE = re.compile(r"page you are looking for (?:doesn.t|does not) exist|job (?:posting )?(?:you are looking for )?"
                        r"(?:is )?no longer (?:available|accepting|open|exists)|no longer accepting applications|"
                        r"(?:position|job) has been (?:filled|closed)|this job (?:is not|isn.t) available", re.I)
+# A picker's list options, not the chosen values other pickers show as pills: those are
+# promptOption elements too, inside a selectedItemList (2026-11-05: the School pill "California
+# Polytechnic State University-San Luis Obispo" was read as the Degree list's only option).
+OPEN_PROMPT_OPTION = ("[data-automation-id=promptOption]:visible"
+                      ":not([data-automation-id=selectedItemList] *):not([data-automation-id=selectedItem] *)")
+# A degree level as Workday catalogs word it; only these count as the saved level.
+DEGREE_LEVELS = {
+    "master's degree": ("master's degree", "masters degree", "master's", "masters", "master of science",
+                        "master of science (ms)", "master of science (m.s.)", "ms", "m.s."),
+    "bachelor's degree": ("bachelor's degree", "bachelors degree", "bachelor's", "bachelors", "bachelor of science",
+                          "bachelor of science (bs)", "bachelor of science (b.s.)", "bs", "b.s."),
+}
 SIGN_IN_STEP_RE = re.compile(r"create account|sign.?in", re.I)
 READY_SECONDS = 45
 SETTLE_POLLS = 40          # up to ~40 s for a step to finish loading before it is read         # how long a posting page may take to show its Apply button or a sign-in
@@ -247,7 +259,7 @@ class WorkdayEngine(FormEngine):
         return [o.strip() for o in page.locator("[role=listbox] [role=option]:visible").all_inner_texts() if o.strip()]
 
     def _choose(self, page: Page, text: str) -> bool:
-        for option in page.locator("[role=listbox] [role=option]:visible, [data-automation-id=promptOption]:visible").all():
+        for option in page.locator(f"[role=listbox] [role=option]:visible, {OPEN_PROMPT_OPTION}").all():
             if (option.inner_text() or "").strip() == text:
                 self._press(option)
                 return True
@@ -386,7 +398,7 @@ class WorkdayEngine(FormEngine):
                 search.press("Enter")
                 page.wait_for_timeout(1000)
                 options = list(dict.fromkeys(o.strip() for o in page.locator(
-                    "[data-automation-id=promptOption]:visible").all_inner_texts() if o.strip()))
+                    OPEN_PROMPT_OPTION).all_inner_texts() if o.strip()))
                 chosen = pick_option(options, value) or next((o for o in options if o.casefold() == value.casefold()), None)
                 if chosen and self._choose(page, chosen):
                     return True
@@ -438,7 +450,7 @@ class WorkdayEngine(FormEngine):
             search.press_sequentially(value, delay=30)
             search.press("Enter")
             page.wait_for_timeout(1200)
-            options = list(dict.fromkeys(o.strip() for o in page.locator("[data-automation-id=promptOption]:visible")
+            options = list(dict.fromkeys(o.strip() for o in page.locator(OPEN_PROMPT_OPTION)
                                          .all_inner_texts() if o.strip() and o.strip() not in taken))
             chosen = pick_option(options, value) or (options[0] if len(options) == 1 and
                                                       options[0].casefold() == value.casefold() else None)
@@ -449,6 +461,18 @@ class WorkdayEngine(FormEngine):
                 naming = sorted((o for o in options if wanted in o.casefold()), key=len)
                 if naming and (len(naming) == 1 or len(naming[0]) < len(naming[1])):
                     chosen = naming[0]
+            if chosen is None and re.fullmatch(r"(?:degree|degree type|level of education)\s*\*?", field["label"].strip(), re.I) \
+                    and value.casefold().replace("’", "'") in DEGREE_LEVELS:
+                # Workday's degree catalog words the saved level its own way ("Master of Science",
+                # "Masters"): search its first word and take the option that is that level.
+                wanted = DEGREE_LEVELS[value.casefold().replace("’", "'")]
+                search.fill("")
+                search.press_sequentially(value.split("'")[0].split()[0], delay=30)
+                search.press("Enter")
+                page.wait_for_timeout(1200)
+                options = list(dict.fromkeys(o.strip() for o in page.locator(OPEN_PROMPT_OPTION).all_inner_texts()
+                                             if o.strip() and o.strip() not in taken))
+                chosen = next((o for o in options if o.casefold().replace("’", "'") in wanted), None)
             if chosen is None and re.search(r"field of study|major|discipline", field["label"], re.I) \
                     and len(value.split()) > 1:
                 # A fixed catalog without the exact major ("Quantitative Economics"): the option that is
@@ -458,7 +482,7 @@ class WorkdayEngine(FormEngine):
                 search.press_sequentially(broad, delay=30)
                 search.press("Enter")
                 page.wait_for_timeout(1200)
-                options = list(dict.fromkeys(o.strip() for o in page.locator("[data-automation-id=promptOption]:visible")
+                options = list(dict.fromkeys(o.strip() for o in page.locator(OPEN_PROMPT_OPTION)
                                              .all_inner_texts() if o.strip() and o.strip() not in taken))
                 chosen = next((o for o in options if o.casefold() == broad.casefold()), None)
             if chosen is None:

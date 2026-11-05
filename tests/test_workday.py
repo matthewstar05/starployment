@@ -269,3 +269,19 @@ def test_work_experience_comes_from_the_resume_and_education_dates_are_left_alon
         assert page.input_value("#em") == "" and page.input_value("#ey") == ""   # school years untouched
     finally:
         context.close()
+
+
+def test_picker_options_leave_out_other_pickers_chosen_values(browser):
+    """The School pill was read as the Degree list's only option (2026-11-05)."""
+    from jobhub.apply.workday import DEGREE_LEVELS, OPEN_PROMPT_OPTION
+    html = ('<div data-automation-id="selectedItemList"><div data-automation-id="selectedItem">'
+            '<div data-automation-id="promptOption">Example State University</div></div></div>'
+            '<div role="listbox"><div data-automation-id="promptOption">Master of Science</div>'
+            '<div data-automation-id="promptOption">Doctorate</div></div>')
+    page = browser.new_page()
+    try:
+        page.set_content(html)
+        assert page.locator(OPEN_PROMPT_OPTION).all_inner_texts() == ["Master of Science", "Doctorate"]
+    finally:
+        page.close()
+    assert "master of science" in DEGREE_LEVELS["master's degree"] and "doctorate" not in DEGREE_LEVELS["master's degree"]
