@@ -295,6 +295,19 @@ if (!window.chrome) { window.chrome = {runtime: {}}; }
 """
 MIN_PAGE_SECONDS = 18          # time on the form before Submit, like a quick human
 # Searchable catalogs where a value missing from the list is truthfully "Other".
+# A school whose catalogs (Ashby's school list) use its bare name for this campus. Only exact,
+# well-known equivalents: dropping a campus in general would turn "University of California,
+# Berkeley" into the whole UC system.
+SCHOOL_CATALOG_NAMES = {
+    "california polytechnic state university san luis obispo": "California Polytechnic State University",
+    "cal poly san luis obispo": "California Polytechnic State University",
+}
+
+
+def _normalized_school(name: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", (name or "").casefold()))
+
+
 CATALOG_RE = re.compile(r"\b(?:school|university|college|institution|degree|discipline|major|field of study)\b", re.I)
 SPAM_RE = re.compile(r"flagged as (?:possible )?spam|spam|suspicious activity|automated|are you a robot|"
                      r"recaptcha|verify you are human|bot detected", re.I)
@@ -1290,6 +1303,8 @@ class FormEngine:
             for option in options:
                 first.setdefault(option.split("\n")[0].strip(), option)
             hit = pick_option(list(first), value)
+            if hit is None and _normalized_school(value) in SCHOOL_CATALOG_NAMES:
+                hit = pick_option(list(first), SCHOOL_CATALOG_NAMES[_normalized_school(value)])
             chosen = first[hit] if hit else None
         return chosen
 

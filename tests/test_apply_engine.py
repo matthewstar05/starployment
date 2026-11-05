@@ -1114,3 +1114,11 @@ def test_a_send_stuck_in_a_browser_call_is_shut_down_and_frees_the_mailbox(store
     assert result["r"].status == "needs_human" and "stopped responding" in result["r"].message
     assert engine_module._MAILBOX_LOCK.acquire(timeout=1)    # the next send gets the mailbox
     engine_module._MAILBOX_LOCK.release()
+
+
+def test_a_school_matches_the_catalogs_name_for_its_campus_only():
+    options = ["California Polytechnic State University\nUnited States\ncalpoly.edu",
+               "California State Polytechnic University\nUnited States\ncpp.edu"]
+    assert FormEngine._pick(options, "California Polytechnic State University, San Luis Obispo") == options[0]
+    assert FormEngine._pick(["University of California\nUnited States\nuniversityofcalifornia.edu"],
+                            "University of California, Berkeley") is None
