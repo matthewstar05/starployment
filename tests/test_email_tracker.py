@@ -703,3 +703,28 @@ def test_account_mail_and_conditional_offers_are_not_stage_updates(store):
     db.set_application_stage(app_id, "offer", "email")
     email_tracker.sync({"email_tracking": {"lookback_days": 30}}, messages=[(b"1", mail, mail.get_content())])
     assert {row["id"]: row["stage"] for row in db.list_tracker()}[app_id] == "applied"
+
+
+def test_an_employers_thank_you_email_confirms_an_unconfirmed_submit(store):
+    job = Job(source="greenhouse", ats="greenhouse", company="CoreWeave", title="Data Engineer",
+              url="https://job-boards.greenhouse.io/coreweave/jobs/1")
+    db.upsert_jobs([job])
+    app_id = db.reserve_application(job.id)
+    db.start_application(app_id, job.id)
+    db.mark_submission_attempted(job.id)
+    db.finish_application(app_id, "needs_human", [], [], [], error="Submit was clicked, but no new confirmation "
+                          "was detected.", submission_attempted=True)
+    with db.conn() as c:
+        c.execute("UPDATE applications SET started_at='2026-09-30T09:00:00+00:00' WHERE id=?", (app_id,))
+    before = message("CoreWeave <no-reply@us.greenhouse-mail.io>", "Thank you for applying to CoreWeave",
+                     "Thank you for applying! We have received your application.", "<old@x>")
+    before.replace_header("Date", "Tue, 29 Sep 2026 10:00:00 +0000")      # an older application's email
+    email_tracker.sync({"email_tracking": {"lookback_days": 30, "use_luna": False}},
+                       messages=[(b"1", before, before.get_content())])
+    assert {r["id"]: r["status"] for r in db.list_tracker()}[app_id] == "needs_human"
+    thanks = message("CoreWeave <no-reply@us.greenhouse-mail.io>", "Thank you for applying to CoreWeave",
+                     "Thank you for applying! We have received your application.", "<t@x>")
+    report = email_tracker.sync({"email_tracking": {"lookback_days": 30, "use_luna": False}},
+                                messages=[(b"2", thanks, thanks.get_content())])
+    assert [c["application_id"] for c in report.confirmed] == [app_id]
+    assert {r["id"]: r["status"] for r in db.list_tracker()}[app_id] == "applied"

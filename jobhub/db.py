@@ -1433,7 +1433,31 @@ def save_portal_state(app_id: int, tenant: str, status: str, draft: bool, tasks:
     return changed
 
 
-def confirm_from_portal(app_id: int, status: str) -> bool:
+def confirm_from_email(app_id: int, subject: str, received_at: str) -> bool:
+    """An unconfirmed attempt the employer acknowledged by email after it was sent.
+
+    "Thank you for applying" (or any later step) from that employer, received after the
+    attempt started, is the employer's own confirmation; the attempt becomes Applied. Same
+    guard as ``confirm_from_portal``: only an attempt past the submit boundary that is not running."""
+    with conn() as c:
+        row = c.execute("SELECT started_at FROM applications WHERE id=?", (app_id,)).fetchone()
+    if row is None or not row["started_at"] or (received_at or "") < row["started_at"]:
+        return False
+    return confirm_from_portal(app_id, f"email: {subject[:60]}", source="email")
+
+
+def confirm_acknowledged_attempts() -> list[dict]:
+    """Unconfirmed attempts whose employer email, already recorded, acknowledges them."""
+    with reader() as c:
+        rows = c.execute(
+            "SELECT a.id, a.job_id, j.company, j.title, m.subject, m.received_at FROM applications a "
+            "JOIN jobs j ON j.id=a.job_id JOIN mail_events m ON m.application_id=a.id AND m.dismissed=0 "
+            "WHERE a.status='needs_human' AND a.submission_attempted=1 AND m.received_at >= a.started_at "
+            "AND m.stage IN ('applied','assessment','interview','offer','rejected') GROUP BY a.id").fetchall()
+    return [dict(row) for row in rows if confirm_from_email(int(row["id"]), row["subject"] or "", row["received_at"])]
+
+
+def confirm_from_portal(app_id: int, status: str, source: str = "workday") -> bool:
     """An unconfirmed Workday attempt that the employer's own Candidate Home lists as submitted.
 
     That listing is the employer's record of a received application, the same evidence as a
@@ -1449,11 +1473,12 @@ def confirm_from_portal(app_id: int, status: str) -> bool:
             log = json.loads(row["log"] or "[]")
         except ValueError:
             log = []
-        log.append(f"Workday's Candidate Home lists this application as submitted ({status[:80]}).")
+        log.append(f"The employer confirmed it by {status[:80]}." if source == "email" else
+                   f"Workday's Candidate Home lists this application as submitted ({status[:80]}).")
         c.execute("UPDATE applications SET status='applied', error='', finished_at=COALESCE(finished_at, ?), "
                   "log=?, stage=CASE WHEN COALESCE(stage,'')='' THEN 'applied' ELSE stage END, "
-                  "stage_source=CASE WHEN COALESCE(stage_source,'')='' THEN 'workday' ELSE stage_source END, "
-                  "stage_updated_at=? WHERE id=?", (stamp, json.dumps(log), stamp, app_id))
+                  "stage_source=CASE WHEN COALESCE(stage_source,'')='' THEN ? ELSE stage_source END, "
+                  "stage_updated_at=? WHERE id=?", (stamp, json.dumps(log), source, stamp, app_id))
         c.execute("UPDATE jobs SET status='applied', updated_at=? WHERE id=?", (stamp, row["job_id"]))
         c.execute("UPDATE drafts SET status='sent', application_id=?, error='', updated_at=? WHERE job_id=? "
                   "AND status IN ('unconfirmed','error','sending')", (app_id, stamp, row["job_id"]))

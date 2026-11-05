@@ -296,6 +296,7 @@ class SyncReport:
     scanned: int = 0
     recruiting: int = 0
     updates: list[dict] = field(default_factory=list)      # {application_id, company, title, stage}
+    confirmed: list[dict] = field(default_factory=list)    # unconfirmed attempts the employer acknowledged
     unmatched: list[dict] = field(default_factory=list)    # {sender, subject, stage}
     archived: int = 0
     archive_error: str = ""
@@ -541,6 +542,10 @@ def sync(settings: dict | None = None, *, messages=None, archiver=None, luna_now
     db.prune_mail_seen(rules, (datetime.now(timezone.utc) - timedelta(days=days + 2)).isoformat(timespec="seconds"))
     seen = db.seen_mail_keys(rules)
     report = SyncReport()
+    for row in db.confirm_acknowledged_attempts():   # mail read before this rule existed
+        report.confirmed.append({"application_id": row["id"], "company": row["company"], "title": row["title"]})
+        db.add_event(f"Inbox confirmed {row['company']} · {row['title']}: {(row['subject'] or '')[:80]}", "success",
+                     row["job_id"])
     mailbox = None if messages is not None else Mailbox(settings.get("email_verification") or {})
     # Mail read under these rules is not downloaded again: set-aside mail, and recorded mail
     # already linked to an application (it stays with it, ``_apply``). Recorded mail no
@@ -763,6 +768,12 @@ def _apply(item: dict, report, applications, known, rejections, seen, set_aside,
         report.unmatched[:] = [u for u in report.unmatched if (u["sender"], u["subject"]) != (sender, subject)]
         report.unmatched.append({"sender": sender, "subject": subject, "stage": stage})
         return
+    if app.get("status") == "needs_human" and db.confirm_from_email(int(app["id"]), subject, received):
+        # Submit was pressed but no confirmation page showed; this email is the employer's own.
+        app["status"] = "applied"
+        report.confirmed.append({"application_id": app["id"], "company": app.get("company"), "title": app.get("title")})
+        db.add_event(f"Inbox confirmed {app.get('company')} · {app.get('title')}: {subject[:80]}", "success",
+                     app.get("job_id"))
     try:
         changed = db.set_application_stage(int(app["id"]), stage, "email")
     except ValueError:
