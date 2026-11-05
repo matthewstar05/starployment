@@ -234,6 +234,9 @@ SCAN_JS = r"""
 # an iframe, a banner covering a dropdown swallows the click even though the browser reports
 # it as delivered. Hiding the banner gives no consent (no choice is clicked or sent); the
 # site treats an unanswered banner as "no" to optional cookies.
+# Consent banners' own "decline all" buttons (never accept): Workable, OneTrust, Cookiebot.
+DECLINE_COOKIES = ("[data-ui=cookie-consent-decline]", "#onetrust-reject-all-handler",
+                   "#CybotCookiebotDialogBodyButtonDecline")
 HIDE_BANNERS_JS = r"""
 () => {
   const consent = /cookie|consent|privacy (?:preferences|choices|settings)|we use (?:cookies|technologies)|gdpr/i;
@@ -690,6 +693,7 @@ class FormEngine:
             if not todo:
                 break
             self._log(f"Pass {pass_no}: {len(todo)} fields to consider")
+            self._hide_banners(page)   # a banner can arrive after the page loads
             self._fill_fields(page, todo)
             if self.adapter.settle_ms:
                 page.wait_for_timeout(min(450, self.adapter.settle_ms))
@@ -1155,7 +1159,21 @@ class FormEngine:
                 if text and not re.search(r"^no (options|results)", text, re.I)]
 
     def _hide_banners(self, page: Page) -> None:
-        """Hide cookie and consent banners on the page and in the form's frame (see HIDE_BANNERS_JS)."""
+        """Hide cookie and consent banners on the page and in the form's frame (see HIDE_BANNERS_JS).
+
+        A banner with its own decline button is answered with it, the most private choice:
+        Workable's banner lays a backdrop over the lower page that hiding the banner leaves,
+        and every click under it timed out (2026-11-05: 8 of 8 Workable sends)."""
+        for selector in DECLINE_COOKIES:
+            try:
+                button = page.locator(selector).first
+                if button.count() and button.is_visible():
+                    button.click(timeout=3000)
+                    self._log("Declined optional cookies on the employer's banner")
+                    page.wait_for_timeout(500)
+                    break
+            except Exception:  # noqa: BLE001 - the banner went away by itself
+                pass
         hidden = 0
         for scope in dict.fromkeys([page.main_frame, getattr(self.root, "page", None) and self.root]):
             if scope is None:
@@ -1708,6 +1726,7 @@ class FormEngine:
                                            "If you submitted it, check your email, then Mark as sent.")
 
     def _submit(self, page: Page) -> ApplyResult:
+        self._hide_banners(page)
         button = None
         for selector in self.adapter.submit_selectors:
             candidates = self.root.locator(selector)

@@ -1122,3 +1122,24 @@ def test_a_school_matches_the_catalogs_name_for_its_campus_only():
     assert FormEngine._pick(options, "California Polytechnic State University, San Luis Obispo") == options[0]
     assert FormEngine._pick(["University of California\nUnited States\nuniversityofcalifornia.edu"],
                             "University of California, Berkeley") is None
+
+
+def test_a_consent_banner_is_declined_with_its_own_button(tmp_path, browser):
+    """Workable's banner laid a backdrop over the form; every click under it timed out."""
+    page_file = tmp_path / "banner.html"
+    page_file.write_text("""<!doctype html><html><body><form><input id="name"></form>
+      <div id="backdrop" style="position:fixed;inset:0;background:rgba(0,0,0,.5)">
+        <div><p>We use cookies.</p><button data-ui="cookie-consent-accept" onclick="window.choice='accept'">Accept all</button>
+        <button data-ui="cookie-consent-decline" onclick="window.choice='decline';document.getElementById('backdrop').remove()">Decline all</button></div>
+      </div></body></html>""", encoding="utf-8")
+    job = Job(source="fixture", company="Local Fixture", title="Engineer", url=page_file.as_uri())
+    engine = FormEngine(job, Profile(), {}, str(tmp_path / "r.pdf"), Adapter("fixture", page_file.as_uri()), True)
+    page = browser.new_page()
+    try:
+        page.goto(page_file.as_uri())
+        engine.root = page.main_frame
+        engine._hide_banners(page)
+        assert page.evaluate("window.choice") == "decline"
+        page.fill("#name", "Ada", timeout=2000)      # nothing covers the form any more
+    finally:
+        page.close()
