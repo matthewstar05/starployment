@@ -1387,6 +1387,13 @@ def list_tracker(limit: int = 5000) -> list[dict]:
     return out
 
 
+def open_jobs_at(company: str) -> list[str]:
+    """New or prepared postings under this employer name."""
+    with reader() as c:
+        return [r["id"] for r in c.execute("SELECT id FROM jobs WHERE lower(company)=lower(?) AND status IN "
+                                           "('new','prepared')", (company,)).fetchall()]
+
+
 def workday_applications() -> list[dict]:
     """The latest visible attempt at each Workday vacancy that reached the submit boundary."""
     with reader() as c:

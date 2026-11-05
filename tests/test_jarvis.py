@@ -568,3 +568,16 @@ def test_all_plus_sends_a_still_listed_posting_over_180_days_old(running, monkey
     save([other])
     result = scheduler.apply_one(other.id, require_eligible=True, required_jarvis_mode="all")
     assert sent == [1] and not result.get("submission_attempted")
+
+
+def test_a_boards_required_question_sets_aside_its_other_postings(running):
+    first, second = job(80, 90), job(81, 90)
+    second.company = first.company
+    elsewhere = job(82, 90).model_copy(update={"company": first.company, "url": "https://jobs.lever.co/other/82"})
+    save([first, second, elsewhere])
+    scheduler._after_workday(db.get_job(first.id), {"status": "needs_human", "message":
+                             "Required or invalid fields need attention: What country do you currently reside in?"})
+    waiting = jarvis.set_aside([second.id, elsewhere.id])
+    assert waiting == {second.id}            # the same board only
+    scheduler._after_workday(db.get_job(second.id), {"status": "needs_human", "message": "A CAPTCHA appeared"})
+    assert jarvis.set_aside([elsewhere.id]) == set()

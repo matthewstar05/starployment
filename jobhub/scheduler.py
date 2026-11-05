@@ -485,9 +485,24 @@ def _after_workday(job: Job, result: dict) -> None:
     would most likely stop the same way at that employer's other postings: set them aside, so an
     employer costs one attempt, not one per posting. They come back after
     jarvis.SET_ASIDE_SECONDS or when the candidate fixes the sign-in."""
-    if job.ats != "workday" or result.get("status") != "needs_human":
+    if result.get("status") != "needs_human":
         return
     message = str(result.get("message") or "")
+    if job.ats != "workday":
+        # A board's own required question (DV Trading's "What country do you currently reside in?",
+        # 2026-11-05: three postings, three cycles) usually sits on all its postings: set them aside
+        # for a day instead of spending a send slot on each.
+        from .models import board_of
+        board = board_of(job.url)
+        if not board or not message.startswith("Required or invalid fields need attention:"):
+            return
+        others = [job_id for job_id in db.open_jobs_at(job.company) if job_id != job.id
+                  and board_of(db.get_job(job_id).url if db.get_job(job_id) else "") == board]
+        reason = f"Every {job.company} application asks the same: {message[:220]}"
+        fresh = sum(db.hold_for_jarvis(job_id, reason, jarvis.set_aside_seconds("posting")) for job_id in others)
+        if fresh:
+            db.add_event(f"JARVIS set aside {fresh} more {job.company} posting(s): {message[:200]}", "warn", job.id)
+        return
     from urllib.parse import urlparse
     from .apply.adapters import adapter_for
     adapter = adapter_for(job)
