@@ -285,3 +285,31 @@ def test_picker_options_leave_out_other_pickers_chosen_values(browser):
     finally:
         page.close()
     assert "master of science" in DEGREE_LEVELS["master's degree"] and "doctorate" not in DEGREE_LEVELS["master's degree"]
+
+
+def test_a_degree_dropdown_takes_the_catalogs_wording_of_the_saved_level(tmp_path, monkeypatch, browser):
+    """Stblaw and Marvell list "Master of Science (MS)" but no "Master's Degree" (2026-11-05)."""
+    page_html = """<!doctype html><html><body><div data-automation-id="applyFlowPage">
+      <div data-automation-id="formField-degree"><label>Degree*</label>
+        <button aria-haspopup="listbox" id="degree" onclick="document.getElementById('dl').style.display='block'">Select One</button>
+        <ul role="listbox" id="dl" style="display:none">
+          <li role="option" onclick="pick(this)">High School (HS)</li><li role="option" onclick="pick(this)">Bachelor of Science (BS)</li>
+          <li role="option" onclick="pick(this)">Master of Science (MS)</li><li role="option" onclick="pick(this)">Doctorate (PhD)</li>
+        </ul></div></div>
+      <script>function pick(li) { document.getElementById('degree').innerText = li.innerText; li.parentElement.style.display='none'; }</script>
+      </body></html>"""
+    path = tmp_path / "degree.html"
+    path.write_text(page_html)
+    monkeypatch.setattr(workday_module, "rule_answer", lambda q, *args:
+                        Answer("Master's Degree", "user") if q.label.startswith("Degree") else None)
+    job = Job(source="fixture", ats="workday", company="Firm", title="Analyst", url=path.as_uri())
+    engine = workday_module.WorkdayEngine(job, Profile(), {}, str(tmp_path / "r.pdf"),
+                                          Adapter("workday", path.as_uri(), assist_only=True), False)
+    page = browser.new_page()
+    try:
+        page.goto(path.as_uri())
+        engine.root = page.main_frame
+        engine._fill_step(page)
+        assert page.inner_text("#degree") == "Master of Science (MS)", engine.log
+    finally:
+        page.close()

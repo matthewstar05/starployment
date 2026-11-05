@@ -56,10 +56,12 @@ OPEN_PROMPT_OPTION = ("[data-automation-id=promptOption]:visible"
 # A degree level as Workday catalogs word it; only these count as the saved level.
 DEGREE_LEVELS = {
     "master's degree": ("master's degree", "masters degree", "master's", "masters", "master of science",
-                        "master of science (ms)", "master of science (m.s.)", "ms", "m.s."),
+                        "master of science (ms)", "master of science (m.s.)", "masters degree (ms)", "master's degree (ms)",
+                        "master of science (msc)", "ms", "m.s."),
     "bachelor's degree": ("bachelor's degree", "bachelors degree", "bachelor's", "bachelors", "bachelor of science",
                           "bachelor of science (bs)", "bachelor of science (b.s.)", "bs", "b.s."),
 }
+_DEGREE_LABEL = re.compile(r"(?:degree|degree type|level of education)\s*\*?", re.I)
 SIGN_IN_STEP_RE = re.compile(r"create account|sign.?in", re.I)
 READY_SECONDS = 45
 SETTLE_POLLS = 40          # up to ~40 s for a step to finish loading before it is read         # how long a posting page may take to show its Apply button or a sign-in
@@ -432,6 +434,11 @@ class WorkdayEngine(FormEngine):
                     else:
                         self._log(f"{field['label'][:50]}: no option for {free!r} among {options[:12]}")
             chosen = pick_option(options, str(value)) if isinstance(value, str) else None
+            if chosen is None and _DEGREE_LABEL.fullmatch(field["label"].strip()):
+                saved = value if isinstance(value, str) else self._answer(field, [])
+                level = DEGREE_LEVELS.get(str(saved or "").strip().casefold().replace("’", "'"))
+                levels = [o for o in options if level and o.casefold().replace("’", "'") in level]
+                chosen = levels[0] if len(levels) == 1 else None   # the catalog's wording of the saved level
             if chosen and self._choose(page, chosen):
                 return True
             if field["required"]:
@@ -461,7 +468,7 @@ class WorkdayEngine(FormEngine):
                 naming = sorted((o for o in options if wanted in o.casefold()), key=len)
                 if naming and (len(naming) == 1 or len(naming[0]) < len(naming[1])):
                     chosen = naming[0]
-            if chosen is None and re.fullmatch(r"(?:degree|degree type|level of education)\s*\*?", field["label"].strip(), re.I) \
+            if chosen is None and _DEGREE_LABEL.fullmatch(field["label"].strip()) \
                     and value.casefold().replace("’", "'") in DEGREE_LEVELS:
                 # Workday's degree catalog words the saved level its own way ("Master of Science",
                 # "Masters"): search its first word and take the option that is that level.
