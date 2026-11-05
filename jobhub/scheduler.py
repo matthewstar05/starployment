@@ -617,6 +617,7 @@ def jarvis_batch() -> list[dict]:
     # first); the probe bound keeps one cycle's public requests and agent calls in check.
     from concurrent.futures import FIRST_COMPLETED, wait as wait_for
     inflight: set = set()
+    workday_inflight: set = set()
     with ThreadPoolExecutor(max_workers=workers, initializer=governor.same_qos(),
                             thread_name_prefix="jarvis") as pool:
         for job in candidates[:max(24, maximum * 8)]:
@@ -632,11 +633,19 @@ def jarvis_batch() -> list[dict]:
             if not room or not _headroom_for(mode):
                 break
             company = job.company.strip().casefold()
+            if job.ats == "workday" and workers > 1 and any(not f.done() for f in workday_inflight):
+                # One Workday send at a time: each takes minutes and most stop on an employer's own
+                # question (2026-11-05 night: 0 of 20 confirmed while holding 3 of 4 slots), so the
+                # other slots stay with boards that finish. The posting comes up again next cycle.
+                continue
             with lock:
                 if company in employers:
                     continue
                 employers.add(company)
-            inflight.add(pool.submit(attempt, job, company))
+            future = pool.submit(attempt, job, company)
+            inflight.add(future)
+            if job.ats == "workday":
+                workday_inflight.add(future)
         wait_for(inflight)
     db.add_event(f"JARVIS {jarvis.label(mode)} finished: {len(results)} attempt(s), "
                  f"{sum(r.get('status') == 'applied' for r in results)} confirmed"

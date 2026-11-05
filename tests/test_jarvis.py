@@ -519,3 +519,33 @@ def test_an_employer_under_another_name_on_the_same_board_is_blocked(running):
     elsewhere = job(61, 90).model_copy(update={"company": "Netic", "title": "Data Analyst",
                                                "url": "https://jobs.lever.co/neticx/9"})
     assert jarvis.not_repeated([renamed, elsewhere]) == [elsewhere]
+
+
+def test_all_plus_sends_one_workday_application_at_a_time(running, monkeypatch):
+    rows = [job(180 + n, 95 - n) for n in range(8)]
+    for row in rows[:4]:
+        row.ats, row.source = "workday", "workday"
+    save(rows)
+    db.set_settings({"jarvis_mode": "all_plus", "parallel_sends": 4, "max_apply_per_run": 8})
+    monkeypatch.setattr(jarvis, "eligible", lambda j, s: True)
+    monkeypatch.setattr(jarvis, "still_listed", lambda jobs: jobs)
+    lock = threading.Lock()
+    state = {"workday": 0, "peak_workday": 0, "now": 0, "peak": 0, "sent": []}
+
+    def attempt(j, *args):
+        with lock:
+            state["now"] += 1
+            state["peak"] = max(state["peak"], state["now"])
+            if j.ats == "workday":
+                state["workday"] += 1
+                state["peak_workday"] = max(state["peak_workday"], state["workday"])
+        time.sleep(0.05)
+        with lock:
+            state["now"] -= 1
+            state["workday"] -= j.ats == "workday"
+            state["sent"].append(j.ats)
+        return "result", {"status": "applied"}
+    monkeypatch.setattr(scheduler, "_jarvis_attempt", attempt)
+    scheduler.jarvis_batch()
+    assert state["peak_workday"] == 1 and state["peak"] > 1
+    assert "workday" in state["sent"] and state["sent"].count("workday") < 4   # the rest wait for a later cycle
