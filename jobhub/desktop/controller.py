@@ -24,6 +24,8 @@ from .ui import JobHubWindow, SetupWizard
 # Settings keys that change job rankings. Saving anything else skips the
 # full-catalog rescore, which can take seconds on a large job table.
 MAIL_RETRY_MS = 5 * 60_000   # after the mail server could not be reached
+# ALL+: a cycle that ran past its interval starts the next one this soon, not a whole interval later.
+PLUS_OVERRUN_PAUSE_SECONDS = 30
 # Short tasks the candidate is waiting on; they get their own thread so they
 # never queue behind preparation or Luna, which can hold the assist pool for minutes.
 QUICK_TASKS = frozenset({"preview", "vault_auth", "agent_status", "agent_test", "mail_test", "import_resume"})
@@ -346,9 +348,13 @@ class DesktopController(QObject):
                          else summary + (" · some sources had issues" if partial else ""),
                          tone="warning" if partial else "success")
             # After a long scan or wake from sleep, start one fresh interval
-            # instead of trying to replay every missed hourly cycle.
+            # instead of trying to replay every missed hourly cycle. ALL+ (nights away) goes
+            # straight on instead: a cycle that ran past its interval used to idle a whole one
+            # more (2026-11-08: about five minutes of every eleven sent nothing).
             if time.time() >= self._next_cycle_at:
-                self._next_cycle_at = time.time() + jarvis.interval_minutes(db.get_settings()) * 60
+                current = db.get_settings()
+                self._next_cycle_at = time.time() + (PLUS_OVERRUN_PAUSE_SECONDS if jarvis.plus(current)
+                                                     else jarvis.interval_minutes(current) * 60)
         elif kind == "import":
             result = result if isinstance(result, dict) else {}
             self._status(f"Added {result.get('company', '')} · {result.get('title', '')}", tone="success")

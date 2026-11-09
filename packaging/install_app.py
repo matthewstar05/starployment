@@ -118,6 +118,10 @@ def _wait_for_exit(bundle: Path, timeout: float) -> bool:
     return not running_pids(bundle)
 
 
+# The app's own grace for a send in progress (desktop/__main__.SEND_GRACE_SECONDS) plus a margin.
+QUIT_GRACE_SECONDS = 960
+
+
 def quit_app(bundle: Path, timeout: float, bundle_id: str = BUNDLE_ID) -> bool:
     """Quit the app cleanly; return True once no process remains.
 
@@ -215,8 +219,13 @@ def main(argv: list[str] | None = None) -> int:
         for bundle, bundle_id in running:
             print(f"Quitting the running {bundle.stem}…", flush=True)
             if not quit_app(bundle, timeout=45, bundle_id=bundle_id):
-                shutil.rmtree(staging)
-                raise SystemExit(f"{bundle.stem} did not quit within 45 seconds; the installed app was left unchanged.")
+                # The quit request still stands: the app closed its window and is finishing a send
+                # that started after the check above (up to its 15-minute grace). Leaving now left it
+                # to exit with nothing to relaunch it (2026-11-08: an overnight JARVIS run). Wait.
+                print(f"{bundle.stem} is finishing an application before it quits…", flush=True)
+                if not _wait_for_exit(bundle, QUIT_GRACE_SECONDS):
+                    shutil.rmtree(staging)
+                    raise SystemExit(f"{bundle.stem} did not quit; the installed app was left unchanged.")
 
     if target.exists():
         target.rename(previous)

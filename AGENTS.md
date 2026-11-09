@@ -125,6 +125,17 @@ them to make a feature easier.
    set it. With JARVIS ALL or ALL+ on, an open Workday text question that saved answers cannot
    settle is written by Luna (`WorkdayEngine._luna_answer`, never a `luna.SENSITIVE_RE`
    question, kept with that application), the same standing permission as AI Autofill.
+   **ALL+ guesses on Workday** (the owner's explicit choice, 2026-11-08): with JARVIS ALL+ on, an
+   unattended Workday step's required questions that saved answers leave open go to AI Autofill in one
+   batch with their options (`WorkdayEngine._guess_open`), sensitive ones included, answered from the resume and
+   saved answers and guessed where those are silent, then `_fallback_guess`; demographics are declined,
+   never guessed. Never in practice runs or Finish in browser, never in other modes. Each guess is a
+   "Guessed …" log line on that application. ALL+ also **finishes unfinished Workday attempts** on their own
+   record (`scheduler.finish_candidates` → `_jarvis_finish` → `apply_one(finish=True)`), a narrow exception to
+   rule 3 that is safe because Workday records the boundary before the form is touched: only an attempt
+   Candidate Home lists as Not Submitted, or one whose stop is a known pre-Submit step
+   (`_WORKDAY_BEFORE_SUBMIT`) with nothing suggesting it was sent (`_MAYBE_SENT`); each at most once per
+   `FINISH_HOLD_SECONDS`.
    The submit boundary (rule 3) has two narrow, user-initiated exceptions.
    `prepare.reopen_rejected` → `db.mark_not_received` clears an unconfirmed
    attempt only when the employer explicitly refused it (`prepare.refused`: a
@@ -153,7 +164,7 @@ them to make a feature easier.
    for one posting at once. Sends may run side by side up to
    `settings.parallel_sends` (its `limit`; default 1 for every other caller),
    each in its own browser profile slot (`engine.browser_profile_slot`); the
-   desktop send pool and JARVIS ALL/ALL+ batches (`scheduler.jarvis_batch`, side by side up to their send concurrency) never run two to one employer at once. Automatic runs
+   desktop send pool and JARVIS ALL/ALL+ batches (`scheduler.jarvis_batch`, side by side up to their send concurrency; Workday postings wait in a one-at-a-time lane of their own that does not spend the cycle's probe budget) never run two to one employer at once. Automatic runs
    are capped per run, at one attempt per employer per cycle, and at
    `company_cap.count` attempts per employer in `company_cap.days`
    (`jarvis.diversify`, default 3 in 30 days; JARVIS ALL+ allows twice the count, `jarvis.company_limit`); with `mix_role_families` they

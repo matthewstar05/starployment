@@ -345,7 +345,11 @@ def _preference_facts(settings: dict) -> str:
               "us_citizen_or_permanent_resident": "US citizen or permanent resident",
               "willing_to_relocate": "Willing to relocate", "salary_expectation": "Salary expectation",
               "available_start": "Available to start", "how_heard": "Usually finds roles via",
-              "preferred_name": "Preferred name", "pronouns": "Pronouns"}
+              "preferred_name": "Preferred name", "pronouns": "Pronouns", "over_18": "18 or older",
+              "relatives_at_employer": "Has relatives working at the employer",
+              "non_compete": "Bound by a non-compete", "security_clearance": "Holds an active security clearance",
+              "former_employee": "Worked for this employer before (unless the resume lists it)",
+              "phone_type": "Phone type", "native_language": "Native language"}
     for key, label in labels.items():
         if str(answers.get(key) or "").strip():
             lines.append(f"{label}: {answers[key]}")

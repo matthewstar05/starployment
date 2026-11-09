@@ -344,3 +344,131 @@ def test_how_heard_uses_the_lists_spelling_or_other_never_a_different_source(tmp
         assert page.inner_text("#src") == expected, engine.log
     finally:
         page.close()
+
+
+GUESS_PAGE = """<!doctype html><html><body><div data-automation-id="applyFlowPage">
+  <div data-automation-id="formField-auth"><label>Are you legally authorized to work in the country where this job is located?*</label>
+    <button aria-haspopup="listbox" id="auth" onclick="document.getElementById('al').style.display='block'">Select One</button>
+    <ul role="listbox" id="al" style="display:none">
+      <li role="option" onclick="pick('auth', this)">Yes</li><li role="option" onclick="pick('auth', this)">No</li></ul></div>
+  <div data-automation-id="formField-prev"><legend>Are you a previous employee of Example Group?*</legend>
+    <input type="radio" name="prev" id="p1" value="Yes"><label for="p1">Yes</label>
+    <input type="radio" name="prev" id="p2" value="No"><label for="p2">No</label></div>
+  <div data-automation-id="formField-travel"><label>Are you willing to travel as part of your job?*</label>
+    <button aria-haspopup="listbox" id="travel" onclick="document.getElementById('tl').style.display='block'">Select One</button>
+    <ul role="listbox" id="tl" style="display:none">
+      <li role="option" onclick="pick('travel', this)">Yes</li><li role="option" onclick="pick('travel', this)">No</li></ul></div>
+  <div data-automation-id="formField-why"><label>Why are you interested in this role?*</label><textarea id="why"></textarea></div>
+  <div data-automation-id="formField-ack"><label><input type="checkbox" id="ack">I have read the job requirements*</label></div>
+</div>
+<script>function pick(id, li) { document.getElementById(id).innerText = li.innerText; li.parentElement.style.display='none'; }</script>
+</body></html>"""
+
+
+def _guess_engine(tmp_path, monkeypatch, mode, autofill):
+    path = tmp_path / "guess.html"
+    path.write_text(GUESS_PAGE)
+    monkeypatch.setattr(workday_module, "rule_answer", lambda *a, **kw: None)
+    from jobhub import luna
+    monkeypatch.setattr(luna, "autofill_answers", autofill)
+    job = Job(source="fixture", ats="workday", company="Example Group", title="Analyst", url=path.as_uri())
+    engine = workday_module.WorkdayEngine(job, Profile(), {"jarvis_mode": mode}, str(tmp_path / "r.pdf"),
+                                          Adapter("workday", path.as_uri(), assist_only=True), False)
+    engine._guesses = {}
+    return engine, path
+
+
+def test_all_plus_guesses_every_open_workday_question_instead_of_stopping(tmp_path, monkeypatch, browser):
+    """2026-11-08 night: all 43 Workday attempts stopped on a question saved answers did not settle."""
+    asked = []
+
+    def autofill(job, profile, settings, questions):
+        asked.extend(questions)
+        answers = {"legally authorized": "Yes", "interested": "I like the team's data work."}
+        return {q["id"]: {"answer": a} for q in questions for k, a in answers.items() if k in q["label"]}
+    engine, path = _guess_engine(tmp_path, monkeypatch, "all_plus", autofill)
+    page = browser.new_page()
+    try:
+        page.goto(path.as_uri())
+        engine.root = page.main_frame
+        _, open_required = engine._fill_step(page)
+        assert open_required == [], engine.log
+        assert page.inner_text("#auth") == "Yes"
+        assert page.is_checked("#p2")                    # fallback: "previous employee" is No
+        assert page.inner_text("#travel") == "Yes"       # fallback: willingness is Yes
+        assert page.input_value("#why") == "I like the team's data work."
+        assert page.is_checked("#ack")
+        assert {"Yes", "No"} <= set(next(q for q in asked if "authorized" in q["label"])["options"])
+        assert any(" Guessed " in line for line in engine.log)
+    finally:
+        page.close()
+
+
+@pytest.mark.parametrize("mode", ["all", "off"])
+def test_only_all_plus_guesses_workday_answers(tmp_path, monkeypatch, browser, mode):
+    engine, path = _guess_engine(tmp_path, monkeypatch, mode, lambda *a, **kw: {})   # ALL may still write text
+    page = browser.new_page()
+    try:
+        page.goto(path.as_uri())
+        engine.root = page.main_frame
+        _, open_required = engine._fill_step(page)
+        assert any("authorized" in label for label in open_required)
+    finally:
+        page.close()
+
+
+def test_guessing_declines_demographics_and_dates_education_from_the_resume():
+    from jobhub.models import Education
+    job = Job(source="fixture", ats="workday", company="Firm", title="Analyst", url="https://x.example.test")
+    profile = Profile(education=[Education(school="Example State", start="Aug 2020", end="May 2024")])
+    engine = workday_module.WorkdayEngine(job, profile, {"jarvis_mode": "all_plus"}, "",
+                                          Adapter("workday", "https://x.example.test", assist_only=True), False)
+    gender = {"label": "Gender", "kind": "dropdown", "ancestors": ""}
+    assert engine._fallback_guess(gender, ["Male", "Female", "I do not wish to answer"]) == "I do not wish to answer"
+    assert engine._fallback_guess({**gender, "label": "Race"}, ["White", "Asian"]) is None
+    engine.settings = {"jarvis_mode": "all_plus",
+                       "answers": {"field_answers": {"What is your gender/gender identity?": "Male"}}}
+    assert engine._fallback_guess({**gender, "label": "What is your Gender?"}, ["Female", "Male"]) == "Male"
+    assert engine._fallback_guess({**gender, "label": "Are you Hispanic or Latino?"}, ["Yes", "No"]) is None
+    to = {"label": "To (Actual or Expected)", "kind": "date", "ancestors": "education-1 < educationSection"}
+    assert engine._fallback_guess(to, []) == "05/01/2024"
+    assert engine._fallback_guess({**to, "label": "From"}, []) == "08/01/2020"
+
+
+def test_workday_something_went_wrong_page_is_refreshed_not_left(tmp_path, monkeypatch, browser):
+    """Resumed drafts (2026-11-08) opened to Workday's "Something went wrong. Please refresh the page"."""
+    broken = WORKDAY_PAGE.replace(
+        "setTimeout(() => { document.getElementById('signin').remove(); document.getElementById('flow').style.display='block'; }, 3500);",
+        """setTimeout(() => {
+             document.getElementById('signin').remove();
+             if (!sessionStorage.getItem('seen')) {
+               sessionStorage.setItem('seen', '1');
+               const flow = document.getElementById('flow');
+               flow.innerHTML = '<div data-automation-id="progressBarActiveStep">My Information</div>' +
+                 '<h2>Something went wrong</h2><p>Please refresh the page and then try again.</p>';
+               flow.style.display = 'block';
+             } else { document.getElementById('flow').style.display='block'; }
+           }, 1500);""")
+    assert broken != WORKDAY_PAGE
+    page_path = tmp_path / "workday.html"
+    page_path.write_text(broken)
+    url = page_path.as_uri()
+    monkeypatch.setattr(engine_module.config, "SCREENSHOTS", tmp_path / "shots")
+    monkeypatch.setattr(workday_module.db, "mark_submission_attempted", lambda job_id: None)
+    monkeypatch.setattr(workday_module, "ASSIST_SECONDS", 25)
+    saved = {"First Name": "Ada", "Country": "United States of America"}
+    monkeypatch.setattr(workday_module, "rule_answer", lambda q, *args:
+                        Answer(saved[q.label], "rule") if q.label in saved else None)
+    resume = tmp_path / "resume.pdf"
+    resume.write_bytes(b"%PDF-1.4\n")
+    job = Job(source="fixture", ats="workday", company="Bank", title="Analyst", url=url, apply_url=url)
+    engine = workday_module.WorkdayEngine(job, Profile(email="ada@example.test"), {}, str(resume),
+                                          Adapter("workday", url, assist_only=True), False, assist=True)
+    context = browser.new_context()
+    page = context.new_page()
+    try:
+        result = engine._run_page(context, page, url)
+        assert result.status == "applied", (result.message, engine.log[-8:])
+        assert any("something went wrong; refreshing" in line for line in engine.log)
+    finally:
+        context.close()

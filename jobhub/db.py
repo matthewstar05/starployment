@@ -506,6 +506,21 @@ def release_workday_holds(host: str) -> int:
         return cur.rowcount
 
 
+def drafts_left_for_owner(job_ids) -> set[str]:
+    """Jobs whose draft JARVIS must leave alone: one already sent (it has an application), or one
+    that errored, is still preparing, or stopped mid-send. JARVIS skips these, so a cycle drops them
+    before it ranks postings instead of spending its probe window on them every time."""
+    ids = list(job_ids)
+    found: set[str] = set()
+    with reader() as c:
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            found.update(r[0] for r in c.execute(
+                f"SELECT job_id FROM drafts WHERE job_id IN ({','.join('?' * len(chunk))}) AND "
+                "(application_id IS NOT NULL OR status NOT IN ('ready', 'needs_answers', 'approved'))", chunk))
+    return found
+
+
 def draft_stamps(job_ids) -> dict[str, str]:
     """Each draft's updated_at by job, so a set-aside posting returns once the candidate edits it."""
     ids = list(job_ids)

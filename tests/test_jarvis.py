@@ -547,8 +547,54 @@ def test_all_plus_sends_one_workday_application_at_a_time(running, monkeypatch):
         return "result", {"status": "applied"}
     monkeypatch.setattr(scheduler, "_jarvis_attempt", attempt)
     scheduler.jarvis_batch()
-    assert state["peak_workday"] == 1 and state["peak"] > 1
-    assert "workday" in state["sent"] and state["sent"].count("workday") < 4   # the rest wait for a later cycle
+    assert state["peak_workday"] == 2 and state["peak"] > 2    # ALL+ with four workers: two Workday lanes
+    db.set_settings({"parallel_sends": 2})                      # fewer workers: one Workday at a time
+    state.update(peak_workday=0, sent=[])
+    with db.conn() as c:
+        c.execute("DELETE FROM applications")
+    scheduler.jarvis_batch()
+    assert state["peak_workday"] == 1
+    db.set_settings({"parallel_sends": 4})
+    # Workday postings take turns in their own lane within the cycle; boards fill the other slots.
+    assert state["sent"].count("workday") == 4 and state["sent"].count("greenhouse") == 4
+
+
+def test_waiting_workday_postings_do_not_use_up_the_probe_window(running, monkeypatch):
+    """2026-11-08 night: 176 of the 200 postings a cycle looked at were Workday ones passed over
+    while one Workday send ran, so each cycle started a single board application."""
+    rows = [job(600 + n, 99 - n * 0.1, age=0 if n < 230 else 10) for n in range(260)]
+    for row in rows[:230]:          # newer and better matched: the first 230 in the ranking
+        row.ats, row.source = "workday", "workday"
+    save(rows)
+    db.set_settings({"jarvis_mode": "all_plus", "parallel_sends": 4, "max_apply_per_run": 25,
+                     "mix_role_families": False, "company_cap": {"count": 0, "days": 30}})
+    monkeypatch.setattr(jarvis, "eligible", lambda j, s: True)
+    monkeypatch.setattr(jarvis, "still_listed", lambda jobs: jobs)
+    lock = threading.Lock()
+    sent = []
+
+    def attempt(j, *args):
+        time.sleep(0.2 if j.ats == "workday" else 0.01)
+        with lock:
+            sent.append(j.ats)
+        return "result", {"status": "needs_human"}
+    monkeypatch.setattr(scheduler, "_jarvis_attempt", attempt)
+    assert len(scheduler.jarvis_batch()) == 25
+    assert sent.count("greenhouse") >= 20     # boards past the first 200 postings still go
+
+
+def test_drafts_left_for_the_owner_are_dropped_before_ranking(running, monkeypatch):
+    rows = [job(700 + n, 95 - n) for n in range(30)]
+    save(rows)
+    db.set_settings({"jarvis_mode": "all_plus", "parallel_sends": 1, "max_apply_per_run": 1,
+                     "mix_role_families": False})
+    for row in rows[:28]:
+        db.upsert_draft(row.id, status="error")
+    monkeypatch.setattr(jarvis, "still_listed", lambda jobs: jobs)
+    tried = []
+    monkeypatch.setattr(scheduler, "_jarvis_attempt", lambda j, *a: tried.append(j.id) or ("skip", None))
+    scheduler.jarvis_batch()
+    assert sorted(tried) == sorted([rows[28].id, rows[29].id])
 
 
 def test_all_plus_sends_a_still_listed_posting_over_180_days_old(running, monkeypatch):
@@ -581,3 +627,69 @@ def test_a_boards_required_question_sets_aside_its_other_postings(running):
     assert waiting == {second.id}            # the same board only
     scheduler._after_workday(db.get_job(second.id), {"status": "needs_human", "message": "A CAPTCHA appeared"})
     assert jarvis.set_aside([elsewhere.id]) == set()
+
+
+def _unfinished_workday(number, error, portal_draft=False):
+    row = job(number, 90)
+    row.ats, row.source = "workday", "workday"
+    row.url = row.apply_url = f"https://firm{number}.wd5.myworkdayjobs.com/External/job/NY/Analyst_R{number}"
+    row.company = f"Firm {number}"
+    save([row])
+    app_id = db.reserve_application(row.id)
+    db.start_application(app_id, row.id)
+    db.mark_submission_attempted(row.id)        # Workday records the boundary before touching the form
+    db.finish_application(app_id, "needs_human", ["first try"], [], [], error, None, True)
+    if portal_draft:
+        with db.conn() as c:
+            c.execute("INSERT INTO workday_portal(application_id, tenant, status, draft) VALUES (?,?,?,1)",
+                      (app_id, f"firm{number}", "Not Submitted"))
+    return row, app_id
+
+
+def test_all_plus_finishes_unfinished_workday_applications_on_their_own_record(running, monkeypatch):
+    asked, _ = _unfinished_workday(800, "Workday asks what Starployment has no saved answer for: Degree.")
+    clicked, _ = _unfinished_workday(801, "Submit was clicked, but no new confirmation was detected.")
+    listed, _ = _unfinished_workday(802, "Submit was clicked, but no new confirmation was detected.", portal_draft=True)
+    page, _ = _unfinished_workday(803, "Workday kept the current step 2 of 6 My Experience page open: it did not move on.")
+    picked = {job.id for job, _ in scheduler.finish_candidates()}
+    assert picked == {asked.id, listed.id, page.id}       # never one that may have gone through
+    db.set_settings({"jarvis_mode": "all_plus", "parallel_sends": 4, "max_apply_per_run": 10,
+                     "workday": {"create_accounts": True, "send": True}})
+    from jobhub import vault
+    monkeypatch.setattr(vault, "sign_in_blocker", lambda url: None)
+    sent = []
+
+    def apply(job_row, *args, **kwargs):
+        sent.append(job_row.id)
+        db.mark_submission_attempted(job_row.id)
+        return ApplyResult(status="applied", message="Submitted on Workday, and Workday confirmed it.",
+                           submission_attempted=True, log=["done"])
+    monkeypatch.setattr(scheduler, "apply_to_job", apply)
+    scheduler.jarvis_batch()
+    assert set(sent) == picked
+    with db.conn() as c:
+        rows = {r["job_id"]: r for r in c.execute("SELECT * FROM applications")}
+        assert c.execute("SELECT COUNT(*) FROM applications").fetchone()[0] == 4    # no second record
+    assert all(rows[job_id]["status"] == "applied" for job_id in picked)
+    assert rows[clicked.id]["status"] == "needs_human"
+    assert "first try" in rows[asked.id]["log"]                # the earlier evidence stays
+    assert scheduler.finish_candidates() == []
+
+
+def test_finishing_is_all_plus_only_and_never_repeated_every_cycle(running, monkeypatch):
+    row, _ = _unfinished_workday(810, "Workday asks what Starployment has no saved answer for: Degree.")
+    db.set_settings({"jarvis_mode": "all", "workday": {"create_accounts": True, "send": True}})
+    tried = []
+    monkeypatch.setattr(scheduler, "_jarvis_finish", lambda *a: tried.append(a) or ("skip", None))
+    scheduler.jarvis_batch()
+    assert tried == []
+    db.set_settings({"jarvis_mode": "all_plus"})
+    monkeypatch.undo()
+    from jobhub import vault
+    monkeypatch.setattr(scheduler, "STATE", scheduler.State())
+    monkeypatch.setattr(scheduler, "rescore", lambda: None)
+    monkeypatch.setattr(vault, "sign_in_blocker", lambda url: None)
+    monkeypatch.setattr(scheduler, "apply_to_job", lambda j, *a, **kw: ApplyResult(
+        status="needs_human", message="Workday kept the current step 3 of 6 page open.", submission_attempted=True))
+    scheduler.jarvis_batch()
+    assert scheduler.finish_candidates() == []                 # set aside for days, not retried next cycle

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import threading
 import time
 import traceback
@@ -301,20 +302,23 @@ def queue_application(job_id: str, parallel: int = 1) -> int:
 
 def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | None = None,
               require_eligible: bool = False, extra_answers: dict | None = None,
-              resume_override: str | None = None, assist: bool = False, required_jarvis_mode: str | None = None) -> dict:
+              resume_override: str | None = None, assist: bool = False, required_jarvis_mode: str | None = None,
+              finish: bool = False) -> dict:
     """Reserve once, record before submitting, and persist the outcome atomically.
 
     ``extra_answers`` are answers the candidate approved for this one
     application (question label -> answer). They apply to this attempt only.
     ``resume_override`` is the resume chosen when the application was prepared.
     ``assist`` opens a visible window the candidate finishes and submits themselves.
+    ``finish`` is JARVIS ALL+ completing an unfinished Workday attempt on its own record
+    (``finish_candidates``): the earlier log is kept and the posting is not re-scored.
     """
     if application_id is None:
         try:
             application_id = queue_application(job_id)
         except ValueError as error:
             return {"error": str(error), "status": "blocked"}
-    earlier = (db.get_application(application_id) or {}).get("log") or [] if assist else []
+    earlier = (db.get_application(application_id) or {}).get("log") or [] if (assist or finish) else []
     with _apply_slots:
         if not db.start_application(application_id, job_id):
             return {"error": "Application reservation is no longer available", "status": "blocked"}
@@ -358,7 +362,7 @@ def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | No
                         "Prepare it and use Approve & send."
                     )
             if required_jarvis_mode:
-                if settings.get("jarvis_mode") != required_jarvis_mode or not jarvis.eligible(job, settings):
+                if settings.get("jarvis_mode") != required_jarvis_mode or (not finish and not jarvis.eligible(job, settings)):
                     raise PostingRefreshError("JARVIS authorization or eligibility changed before sending.")
                 if jarvis.hold("send", settings):
                     raise PostingRefreshError("JARVIS stopped before sending because the computer is busy.")
@@ -416,8 +420,9 @@ def apply_one(job_id: str, dry_run: bool | None = None, application_id: int | No
                     "The application engine reported success without a durable "
                     "submission attempt record. Review the employer site before retrying."
                 )
-            if earlier:   # finishing an earlier attempt in the browser keeps its evidence
-                result.log = [*earlier, "Finishing in a browser window with you", *result.log]
+            if earlier:   # finishing an earlier attempt keeps its evidence
+                result.log = [*earlier, "Finishing in a browser window with you" if assist
+                              else "JARVIS ALL+ finishing this unfinished Workday application", *result.log]
             db.finish_application(application_id, result.status, result.log, result.screenshots, result.unanswered,
                                   "" if result.status in ("applied", "dry_run") else result.message,
                                   result.resume_path or resume or None, result.submission_attempted,
@@ -515,6 +520,73 @@ def _after_workday(job: Job, result: dict) -> None:
         db.add_event(f"JARVIS set aside {fresh} more {job.company} posting(s): {message[:200]}", "warn", job.id)
 
 
+# Workday stops that come before its Submit button. Workday records the submit boundary before the
+# form is touched (rule 3), so these attempts carry it although nothing was sent; Workday keeps
+# each one as a "Not Submitted" draft in the candidate's account.
+_WORKDAY_BEFORE_SUBMIT = re.compile(
+    r"^(?:Workday asks what|Workday kept the|Workday's current step|Workday sent a verification email|"
+    r"This employer's Workday application needs you sign|JARVIS stopped before sending because|"
+    r"Workday's .{0,80} page (?:took no resume|has no Save and Continue))", re.I)
+_MAYBE_SENT = re.compile(r"submit was clicked|did not accept submit|submission was attempted|confirmed the application|"
+                         r"review page", re.I)
+FINISH_HOLD_SECONDS = 3 * 86400
+
+
+def finish_candidates() -> list[tuple[Job, int]]:
+    """Unfinished Workday attempts ALL+ may complete on their own record: Workday's Candidate Home
+    lists the application as Not Submitted, or the attempt stopped at a step before Submit (and
+    nothing suggests it may have gone through). Newest first; each is tried at most once in
+    ``FINISH_HOLD_SECONDS``."""
+    with db.reader() as c:
+        rows = c.execute(
+            "SELECT a.id, a.job_id, a.error, p.draft, p.status AS portal FROM applications a "
+            "JOIN jobs j ON j.id=a.job_id LEFT JOIN workday_portal p ON p.application_id=a.id "
+            "WHERE j.ats='workday' AND a.status='needs_human' AND COALESCE(a.hidden, 0)=0 "
+            "ORDER BY a.id DESC").fetchall()
+    picked = []
+    for row in rows:
+        error = str(row["error"] or "")
+        not_submitted = bool(row["draft"]) or str(row["portal"] or "").casefold() == "not submitted"
+        if not_submitted or (_WORKDAY_BEFORE_SUBMIT.search(error) and not _MAYBE_SENT.search(error)):
+            picked.append((row["job_id"], int(row["id"])))
+    now = time.time()
+    held = {job_id for job_id, (until, _) in db.jarvis_holds(job_id for job_id, _ in picked).items() if until > now}
+    out = []
+    for job_id, app_id in picked:
+        job = db.get_job(job_id) if job_id not in held else None
+        if job is not None:
+            out.append((job, app_id))
+    return out
+
+
+def _jarvis_finish(job: Job, application_id: int, mode: str) -> tuple[str, dict | None]:
+    """Complete one unfinished Workday attempt on its own record (ALL+ only)."""
+    from . import vault
+    current = db.get_settings()
+    if STATE.stop or current.get("jarvis_mode") != mode:
+        return "stop", None
+    if held_from_automation(job, current.get("priority_companies") or []) or \
+            jarvis.is_engaged(job.company, jarvis.engaged_employers(current), job.url):
+        db.hold_for_jarvis(job.id, "Starred, priority, or interviewing: finish it yourself", FINISH_HOLD_SECONDS)
+        return "skip", None
+    blocker = vault.sign_in_blocker(job.apply_url or job.url)
+    if blocker:
+        db.hold_for_jarvis(job.id, blocker, FINISH_HOLD_SECONDS)
+        return "skip", None
+    # Held first, so a crash or a second stop never brings it back every cycle.
+    db.hold_for_jarvis(job.id, "JARVIS ALL+ tried to finish this Workday application", FINISH_HOLD_SECONDS)
+    try:
+        db.reopen_for_browser(application_id)
+    except ValueError:
+        return "skip", None
+    record = db.get_application(application_id) or {}
+    db.add_event("JARVIS ALL+ is finishing this unfinished Workday application", "info", job.id)
+    result = apply_one(job.id, application_id=application_id, required_jarvis_mode=mode, finish=True,
+                       resume_override=str(record.get("resume_path") or "") or None)
+    _after_workday(job, result)
+    return "result", result
+
+
 def _jarvis_attempt(job: Job, mode: str, sweep: bool, profile) -> tuple[str, dict | None]:
     """One JARVIS application: ("result", outcome), ("skip", None) to try another, or ("stop", None)."""
     from . import prepare
@@ -603,6 +675,10 @@ def jarvis_batch() -> list[dict]:
                   if job.id not in attempted and jarvis.eligible(job, settings)]
     if sweep:
         candidates = jarvis.still_listed(candidates)
+        # Drafts that errored or were already sent are skipped by _jarvis_attempt anyway; left in,
+        # they took the same places in the probe window every cycle.
+        left = db.drafts_left_for_owner(job.id for job in candidates)
+        candidates = [job for job in candidates if job.id not in left]
     waiting = jarvis.set_aside(job.id for job in candidates)
     candidates = jarvis.diversify(jarvis.not_repeated(
         jarvis.rank([job for job in candidates if job.id not in waiting], mode)), settings)
@@ -616,9 +692,14 @@ def jarvis_batch() -> list[dict]:
     stop = threading.Event()
     lock = threading.Lock()
 
+    # ALL+ also finishes Workday applications earlier runs left unfinished (finish_candidates),
+    # ahead of new Workday postings in the Workday lane.
+    finishing = dict((job.id, app_id) for job, app_id in finish_candidates()) if jarvis.plus(settings) else {}
+
     def attempt(job: Job, company: str) -> None:
         try:
-            outcome = _jarvis_attempt(job, mode, sweep, profile)
+            outcome = (_jarvis_finish(job, finishing[job.id], mode) if job.id in finishing
+                       else _jarvis_attempt(job, mode, sweep, profile))
         except Exception:  # noqa: BLE001 - one failure never ends the overnight cycle
             log.exception("JARVIS attempt failed")
             outcome = ("skip", None)
@@ -634,35 +715,60 @@ def jarvis_batch() -> list[dict]:
                 stop.set()
 
     # Set-aside postings are already gone, so take the ranking in order (newest and best
-    # first); the probe bound keeps one cycle's public requests and agent calls in check.
+    # first); the probe bound (attempts started) keeps one cycle's public requests and agent
+    # calls in check.
+    #
+    # One Workday send at a time: each takes minutes and most stop on an employer's own question
+    # (2026-11-05 night: 0 of 20 confirmed while holding 3 of 4 slots), so the other slots stay
+    # with boards that finish. Workday postings wait in their own lane and go one after another
+    # in ranked order. Passing over them used to spend the probe window: on 2026-11-08 they were
+    # 176 of the 200 postings each cycle looked at, so a cycle started one board application and
+    # ended within a minute while about a thousand eligible board postings waited.
+    from collections import deque
     from concurrent.futures import FIRST_COMPLETED, wait as wait_for
+    budget = max(24, maximum * 8)
+    unfinished = [db.get_job(job_id) for job_id in finishing]
+    unfinished = [job for job in unfinished if job is not None]
+    order = {job.id: index for index, job in enumerate(candidates)}
+    order.update({job.id: index - len(unfinished) for index, job in enumerate(unfinished)})
+    lane = workers > 1
+    # Workday lanes: one, or two in ALL+ with four or more workers (its sends now finish: ALL+ guesses
+    # what saved answers leave open).
+    workday_lanes = 2 if jarvis.plus(settings) and workers >= 4 else 1
+    boards = deque(job for job in candidates if not (lane and job.ats == "workday"))
+    workdays = deque([*unfinished, *(job for job in candidates if lane and job.ats == "workday")])
+    if not lane:
+        boards.extendleft(reversed(unfinished))
+    started = 0
     inflight: set = set()
     workday_inflight: set = set()
     with ThreadPoolExecutor(max_workers=workers, initializer=governor.same_qos(),
                             thread_name_prefix="jarvis") as pool:
-        for job in candidates[:max(24, maximum * 8)]:
-            # Wait for a free worker and a place in this run's budget; an attempt that ends
-            # without sending (skipped, set aside) gives its place back.
+        while (boards or workdays) and started < budget:
+            # Wait for a free worker, a place in this run's budget, and a posting that may start
+            # now; an attempt that ends without sending (skipped, set aside) gives its place back.
             while True:
                 inflight = {future for future in inflight if not future.done()}
+                workday_free = sum(not future.done() for future in workday_inflight) < workday_lanes
+                ready = bool(boards) or (bool(workdays) and workday_free)
                 with lock:
                     room = not stop.is_set() and len(results) + len(inflight) < maximum
-                if (room and len(inflight) < workers) or not inflight:
+                if (room and len(inflight) < workers and ready) or not inflight:
                     break
-                _done, inflight = wait_for(inflight, return_when=FIRST_COMPLETED)
-            if not room or not _headroom_for(mode):
+                wait_for(inflight, return_when=FIRST_COMPLETED)
+            if not room or not ready or not _headroom_for(mode):
                 break
+            if workdays and workday_free and (not boards or order[workdays[0].id] < order[boards[0].id]):
+                job = workdays.popleft()
+            else:
+                job = boards.popleft()
             company = job.company.strip().casefold()
-            if job.ats == "workday" and workers > 1 and any(not f.done() for f in workday_inflight):
-                # One Workday send at a time: each takes minutes and most stop on an employer's own
-                # question (2026-11-05 night: 0 of 20 confirmed while holding 3 of 4 slots), so the
-                # other slots stay with boards that finish. The posting comes up again next cycle.
-                continue
             with lock:
                 if company in employers:
                     continue
                 employers.add(company)
             future = pool.submit(attempt, job, company)
+            started += 1
             inflight.add(future)
             if job.ats == "workday":
                 workday_inflight.add(future)

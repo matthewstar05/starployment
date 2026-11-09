@@ -22,7 +22,8 @@ _PACE = {
     "all": (("clock", "green", "Gentle on your Mac",
              "Background priority, half your saved concurrency, and a pause while the Mac is busy."),),
     "all_plus": (("trending", "green", "A wider net",
-                  "Also older postings still listed, and twice your per-employer limit."),
+                  "Also older postings still listed, twice your per-employer limit, and on Workday it "
+                  "guesses whatever your resume and saved answers leave open (logged on each application)."),
                  ("zap", "red", "Full speed, best overnight",
                   "Your full saved concurrency and scans twice as often. It slows down only when the Mac "
                   "nears its memory or CPU limits, so it never freezes it.")),

@@ -207,6 +207,11 @@ FIELDS_JS = r"""
 }
 """
 
+WORKDAY_ERROR_JS = r"""() => {
+  const text = (document.body && document.body.innerText) || '';
+  return /something went wrong/i.test(text) && /refresh the page|try again/i.test(text);
+}"""
+
 BANNER_JS = """(message) => {
   let bar = document.getElementById('starployment-handoff');
   if (!bar) {
@@ -248,6 +253,9 @@ class WorkdayEngine(FormEngine):
         return {m.group(0).casefold() for m in SUCCESS_RE.finditer(text)}
 
     def _answer(self, field: dict, options: list[str]) -> object:
+        guess = self._guesses.get(field.get("id")) if hasattr(self, "_guesses") else None
+        if guess is not None:
+            return guess
         label = ALIASES.get(field["label"].casefold(), field["label"])
         kind = {"dropdown": "select", "prompt": "select", "checkboxes": "select"}.get(field["kind"], field["kind"])
         answer = rule_answer(Q(label=label, kind=kind, options=options, required=field["required"],
@@ -412,9 +420,13 @@ class WorkdayEngine(FormEngine):
         entry = self._experience_entry(field)
         if entry is not None:
             done = self._fill_experience(page, field, entry)
-            if done is not None:
+            if done is not None and (done or field["id"] not in getattr(self, "_guesses", {})):
                 return done
         if kind == "date":
+            guess = getattr(self, "_guesses", {}).get(field["id"])
+            parts = self._date_parts(guess) if isinstance(guess, str) else None
+            if parts:
+                return self._type_date(page, box, parts)
             # Only the self-identification form's signature date is a date Starployment knows: today.
             if not re.search(r"^date$|today", field["label"], re.I):
                 return False
@@ -540,10 +552,12 @@ class WorkdayEngine(FormEngine):
                     return True
             return False
         if kind == "checkboxes":
-            chosen = pick_option(field["options"], str(value))
-            if chosen is None:
+            wanted = value if isinstance(value, list) else [value]
+            picked = [c for c in (pick_option(field["options"], str(v)) for v in wanted) if c is not None]
+            if not picked:
                 return False
-            box.locator("input[type=checkbox]").nth(field["options"].index(chosen)).check()
+            for chosen in dict.fromkeys(picked):
+                box.locator("input[type=checkbox]").nth(field["options"].index(chosen)).check()
             return True
         if kind == "checkbox" and value is True:
             # rule_answer never accepts an attestation or consent; only ordinary saved yes/no boxes.
@@ -593,9 +607,149 @@ class WorkdayEngine(FormEngine):
                         pass
             page.wait_for_timeout(300)
         remaining = [f for f in page.evaluate(FIELDS_JS) if f["empty"] and f["required"]]
+        for _ in range(3):   # a guessed answer may reveal a follow-up question ("If yes, explain")
+            if not remaining or not self._guessing():
+                break
+            guessed = self._guess_open(page, remaining)
+            filled += guessed
+            remaining = [f for f in page.evaluate(FIELDS_JS) if f["empty"] and f["required"]]
+            if not guessed:
+                break
         for f in remaining[:4]:
             self._log(f"Open: {f['label'][:40]} ({f['kind']}, block {f.get('group') or '-'}; in {f.get('ancestors', '')[:120]})")
         return filled, [f["label"] for f in remaining]
+
+    # ------------------------------------------------------------- ALL+ guesses
+    # With JARVIS ALL+ the candidate asked Starployment to answer every Workday question itself, so a
+    # required question that saved answers cannot settle no longer stops the application. AI Autofill
+    # answers it from the resume and saved answers (work authorization, sponsorship, relatives...)
+    # and guesses the most likely answer where they are silent; a plain fallback covers what it
+    # leaves open. Every guess is logged on the application. Demographic questions are declined,
+    # never guessed. Never a practice run or Finish in browser.
+    _NO_BY_DEFAULT = re.compile(
+        r"previous(?:ly)?|former|ever (?:been )?(?:employ|work)|current(?:ly)? (?:an? )?(?:employ|work)|relative|"
+        r"related to|family|relationship|in-laws|investigat|convict|criminal|felony|misdemeanor|disciplin|"
+        r"terminat|dismiss|non[- ]?compete|restrictive covenant|conflict of interest|government official|"
+        r"public official|debar|sanction|exclud|other offers|any offers|negotiation|procurement|"
+        r"applied (?:here |to us )?before|subject of", re.I)
+
+    def _guessing(self) -> bool:
+        from .. import jarvis
+        return not self.assist and not self.dry_run and jarvis.plus(self.settings)
+
+    @staticmethod
+    def _date_parts(text: str) -> list[tuple[str, str]] | None:
+        """MM/DD/YYYY, MM/YYYY, YYYY-MM-DD, "May 2026", or a year, as Workday date sections."""
+        text = (text or "").strip()
+        found = re.fullmatch(r"(\d{1,2})/(\d{1,2})/(\d{4})", text)
+        if found:
+            return [("Month", f"{int(found[1]):02d}"), ("Day", f"{int(found[2]):02d}"), ("Year", found[3])]
+        found = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})", text)
+        if found:
+            return [("Month", found[2]), ("Day", found[3]), ("Year", found[1])]
+        parts = WorkdayEngine._month_year(text)
+        if parts:
+            return [("Month", f"{parts[0]:02d}"), ("Day", "01"), ("Year", str(parts[1]))]
+        found = re.fullmatch(r"(\d{4})", text)
+        return [("Month", "01"), ("Day", "01"), ("Year", found[1])] if found else None
+
+    def _section_label(self, field: dict) -> str:
+        """The question as the AI sees it: Education's "From" and "To" are school years."""
+        label = field["label"] or field.get("automation") or "Question"
+        if re.search(r"education", (field.get("ancestors") or "") + " " + (field.get("automation") or ""), re.I) \
+                and not re.search(r"education|school|degree", label, re.I):
+            return f"Education: {label}"
+        return label
+
+    def _fallback_guess(self, field: dict, options: list[str]):
+        from ..luna import DEMOGRAPHIC_RE
+        label, kind = field["label"], field["kind"]
+        options = [o for o in options if o.strip() and not re.fullmatch(r"select one|-+|please select.*", o.strip(), re.I)]
+        if DEMOGRAPHIC_RE.search(label):
+            # Only the candidate's own saved answer on the same topic ("What is your gender/gender
+            # identity?" for "What is your Gender?"), else a decline option; never a guess.
+            saved = (self.settings.get("answers") or {}).get("field_answers") or {}
+            for topic in (r"gender|\bsex\b", r"hispanic|latin[oa]", r"\brace\b|racial|ethnicit", r"veteran",
+                          r"disabilit", r"orientation", r"transgender"):
+                if re.search(topic, label, re.I):
+                    for question, answer in saved.items():
+                        if isinstance(answer, str) and re.search(topic, question, re.I):
+                            chosen = pick_option(options, answer)
+                            if chosen:
+                                return chosen
+                    break
+            return next((o for o in options if re.search(r"not (?:wish|want)|prefer not|decline|choose not|"
+                                                         r"not to (?:self[- ]?)?identify|do not wish", o, re.I)), None)
+        if kind == "checkbox":
+            return True
+        if kind == "date":
+            education = [e for e in (self.profile.education or []) if e.start or e.end]
+            if education and self._section_label(field).startswith("Education"):
+                end = re.search(r"\bto\b|end|graduat", label, re.I)
+                found = self._month_year(education[0].end if end else education[0].start)
+                if found:
+                    return f"{found[0]:02d}/01/{found[1]}"
+            return date.today().strftime("%m/%d/%Y")
+        if kind in ("text", "textarea"):
+            return "N/A"
+        if not options:
+            return None
+        wanted = "No" if self._NO_BY_DEFAULT.search(label) else "Yes"
+        return pick_option(options, wanted) or options[0]
+
+    def _guess_open(self, page: Page, fields: list[dict]) -> int:
+        """Answer this step's open required fields with AI Autofill or a fallback; returns how many took."""
+        from ..luna import autofill_answers
+        if not hasattr(self, "_guesses"):
+            self._guesses: dict[str, object] = {}
+        fields = [f for f in fields if f["id"] not in self._guesses]
+        if not fields:
+            return 0
+        asked: list[tuple[dict, dict, list[str]]] = []
+        for field in fields:
+            options = list(field.get("options") or [])
+            if field["kind"] == "dropdown":
+                try:
+                    options = [o for o in self._open_options(page, field)
+                               if not re.fullmatch(r"select one", o.strip(), re.I)]
+                except Exception:  # noqa: BLE001 - the AI answers without the list
+                    options = []
+                finally:
+                    page.keyboard.press("Escape")
+            kind = {"dropdown": "select", "radio": "radio", "checkboxes": "checkbox", "checkbox": "checkbox",
+                    "textarea": "textarea"}.get(field["kind"], "text")
+            question = {"id": f"workday-{field['id']}", "label": self._section_label(field), "kind": kind,
+                        "required": True, "options": options if kind in ("select", "radio", "checkbox") else []}
+            if field["kind"] == "date":
+                question["format"] = "date"
+            asked.append((field, question, options))
+        try:
+            filled = autofill_answers(self.job, self.profile, self.settings, [q for _, q, _ in asked])
+        except Exception as exc:  # noqa: BLE001 - the fallback still answers
+            self._log(f"AI Autofill could not answer this step: {str(exc)[:120]}")
+            filled = {}
+        took = 0
+        for field, question, options in asked:
+            answer = (filled.get(question["id"]) or {}).get("answer")
+            source = "AI Autofill"
+            if answer is None or answer == "" or answer == []:
+                answer, source = self._fallback_guess(field, options), "fallback"
+            if answer is None:
+                continue
+            self._guesses[field["id"]] = answer
+            self._log(f"Guessed {question['label'][:80]}: {str(answer)[:80]} ({source}, ALL+)")
+            try:
+                if self._fill_field(page, field):
+                    took += 1
+                    self.answered[field["label"]] = "guessed"
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"Could not enter the guess for {field['label'][:60]}: {str(exc).splitlines()[0][:120]}")
+            finally:
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:  # noqa: BLE001
+                    pass
+        return took
 
     def _upload_resume(self, page: Page) -> bool:
         if page.locator("[data-automation-id=file-upload-successful]:visible, "
@@ -925,6 +1079,7 @@ class WorkdayEngine(FormEngine):
         self._signup_held = False
         self._resume_attached = False
         self._failures: dict[str, int] = {}
+        self._guesses: dict[str, object] = {}
         try:
             return self._walk(ctx, page, url)
         finally:
@@ -957,6 +1112,7 @@ class WorkdayEngine(FormEngine):
         steps: dict[str, int] = {}
         sign_in_waits = settle_waits = 0
         settled_step = waiting_for = ""
+        recoveries = 0
         try:
             page.bring_to_front()
         except Exception:  # noqa: BLE001
@@ -972,6 +1128,25 @@ class WorkdayEngine(FormEngine):
                     return self._result("applied", "You submitted it in the browser, and Workday confirmed it."
                                         if self.assist else "Submitted on Workday, and Workday confirmed it.")
                 state = page.evaluate(STATE_JS)
+                if not state["fields"] and page.evaluate(WORKDAY_ERROR_JS):
+                    # "Something went wrong. Please refresh the page and then try again." Workday shows
+                    # this when a saved, unfinished application reopens right after signing in
+                    # (2026-11-08: most resumed drafts). Refresh as it asks; then open the posting again.
+                    if recoveries >= 3:
+                        self._shot(page, "workday-error")
+                        return self._result("needs_human", "Workday kept showing \"Something went wrong\" for this "
+                                                           "application after refreshing. Choose Finish in browser.")
+                    recoveries += 1
+                    self._log(f"Workday said something went wrong; {'refreshing' if recoveries < 3 else 'opening the posting again'}")
+                    if recoveries < 3:
+                        page.reload(wait_until="domcontentloaded", timeout=60000)
+                    else:
+                        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                        started = False
+                    page.wait_for_timeout(3000)
+                    settled_step = waiting_for = ""
+                    settle_waits = 0
+                    continue
                 if state["step"] != waiting_for:
                     waiting_for, settle_waits = state["step"], 0   # each step gets its own loading wait
                 if state["apply"] and not started:
