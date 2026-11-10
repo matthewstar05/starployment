@@ -70,6 +70,11 @@ CREATE TABLE IF NOT EXISTS workday_portal (
 );
 -- When each employer's Candidate Home was last read, and how it went.
 CREATE TABLE IF NOT EXISTS workday_portal_checks (tenant TEXT PRIMARY KEY, checked_at TEXT, outcome TEXT DEFAULT '');
+-- Confirmed applications already copied to the candidate's Google Sheet.
+-- The fingerprint is the row that was sent, so a later sync posts only changes.
+CREATE TABLE IF NOT EXISTS sheet_sync (
+  application_id INTEGER PRIMARY KEY, fingerprint TEXT, synced_at TEXT
+);
 CREATE TABLE IF NOT EXISTS resume_files (
   id INTEGER PRIMARY KEY AUTOINCREMENT, path TEXT UNIQUE, label TEXT, category TEXT DEFAULT 'general',
   is_default INTEGER DEFAULT 0, added_at TEXT, enabled INTEGER DEFAULT 1, removed INTEGER DEFAULT 0
@@ -1400,6 +1405,33 @@ def list_tracker(limit: int = 5000) -> list[dict]:
         d["stage"] = d.get("stage") or ("applied" if d["status"] == "applied" else "")
         out.append(d)
     return out
+
+
+def sheet_sync_state() -> dict[int, str]:
+    """Fingerprints of applications already copied to the Google Sheet, keyed by application id."""
+    with reader() as c:
+        rows = c.execute("SELECT application_id, fingerprint FROM sheet_sync").fetchall()
+    return {int(row["application_id"]): str(row["fingerprint"] or "") for row in rows}
+
+
+def mark_sheet_synced(rows) -> None:
+    """Remember each application id and the fingerprint that was just copied."""
+    records = [(int(app_id), str(fingerprint), now_iso()) for app_id, fingerprint in rows]
+    if not records:
+        return
+    with conn() as c:
+        c.executemany(
+            "INSERT INTO sheet_sync(application_id, fingerprint, synced_at) VALUES (?,?,?) "
+            "ON CONFLICT(application_id) DO UPDATE SET fingerprint=excluded.fingerprint, "
+            "synced_at=excluded.synced_at",
+            records,
+        )
+
+
+def clear_sheet_sync() -> None:
+    """Forget every copied row so the next sync sends the whole tracker again."""
+    with conn() as c:
+        c.execute("DELETE FROM sheet_sync")
 
 
 def open_jobs_at(company: str) -> list[str]:

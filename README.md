@@ -143,6 +143,22 @@ retrieves verification codes (including segmented and leading-zero codes) or sec
 messages, completes the verification step in your session without leaking tokens, and records the application as applied
 only after employer confirmation.
 
+## Google Sheets
+
+**Settings → Google Sheets** can copy each confirmed application into a Google Sheet you own. It stays off
+until you turn it on.
+
+1. Press **Copy setup script**.
+2. In the sheet, open **Extensions → Apps Script**, paste the script, and choose **Deploy → New deployment →
+   Web app**. Set **Execute as** to **Me** and **Who has access** to **Anyone**. Authorize it once and copy
+   the `/exec` URL.
+3. Paste that URL into **Web app URL**, press **Test**, turn on **Copy confirmed applications to a Google Sheet**, and
+   **Save**.
+
+The script runs as you, so Starployment never signs in to Google. The shared token stays in your credential
+vault. Only confirmed applications are sent. Each row is matched by its Starployment ID and updated in place;
+rows are never deleted. **Sync now** sends what changed. **Resend everything** writes the full list again.
+
 ## Tracker
 
 **Tracker** is a sortable spreadsheet of every application that went out: company and role, location, salary,

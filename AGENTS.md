@@ -317,6 +317,15 @@ them to make a feature easier.
    attempt (`needs_human` past the boundary) that Candidate Home lists as submitted is the
    employer's record of a received application, so `db.confirm_from_portal` makes it
    Applied; a draft stays with the candidate.
+15. **Google Sheets sync is opt-in and off by default.** Settings → Google Sheets
+   copies confirmed applications into a spreadsheet the candidate owns. The Apps
+   Script they deploy there runs as the sheet owner, so Starployment never holds a
+   Google account. The shared token lives only in the vault through
+   `email_verification._keyring()`, service "Starployment Google Sheets", never in
+   SQLite or logs (rule 9). Only confirmed applications (status `applied`) are
+   sent. Rows are upserted by Starployment ID and never deleted. A cell value
+   that starts with `=`, `+`, `-`, or `@` is prefixed with `'` so the sheet
+   cannot run it as a formula.
 
 ---
 
@@ -419,6 +428,7 @@ every 15 s) and renders via window.set_data.
 | `jobhub/governor.py` | Load and free-memory checks that hold back extra parallel work while the computer is busy (`busy(load_per_core, min_free)`; ALL+ passes looser limits), and macOS thread QoS for background cycles (`set_thread_qos`; Python threads do not inherit it, so pools pass `initializer=same_qos()`). |
 | `jobhub/luna.py` | Draft answers (`draftable`, `draft_answers`), resume selection, optional email second opinion; all output validated. |
 | `jobhub/email_tracker.py` | Provider presets, read-only IMAP, `classify` (assessment platforms in `_PLATFORMS`), `match_application` (ignores no-reply words, compares names without spaces, groups "X" with "X University", picks the role by title words), batched Luna second reading, `sync`. Audit changes against a real inbox before trusting a rule: acknowledgements describe later steps and company slogans say "challenges". |
+| `jobhub/sheets_sync.py` | Opt-in copy of confirmed applications into a Google Sheet the candidate owns. A script they deploy runs as the sheet owner; rows are upserted by Starployment ID and never deleted (rule 15). |
 | `jobhub/setup.py`, `readiness.py` | Saving setup and the resume library (`save_resume_library`, `merge_resume_into_library`); what is still missing before unattended work. |
 | `jobhub/migration.py` | One-time import of checkout data into the packaged app's data directory. |
 | `jobhub/server.py`, `web/` | Legacy FastAPI JSON API and static web UI (no build step). |
@@ -466,7 +476,7 @@ Tests prove behavior; screenshots prove design. After any visual change:
 | `desktop/__main__.py` | Entry point and flags: `--no-scheduler`, `--setup`, `--smoke-test PNG`, `--browser-check`, `--dependency-check`. |
 | `desktop/controller.py` | `DesktopController`: signal wiring, worker thread, refresh loop, toasts, save handlers. The only place the UI talks to `db`/`scheduler`. |
 | `desktop/ui.py` | `JobHubWindow` shell: floating sidebar, page stack, toasts, keyboard shortcuts, macOS menu bar, theme crossfade, `set_data`, `set_scan_state`. Re-exports the views. |
-| `desktop/views/` | One module per sidebar page: `dashboard.py` (+ `ApplyHero`, `ApplyPlanSheet`), `jobs.py` (+ `AddPostingSheet`; Posted column, Posted window and Sort menus, header-click sorting run in SQL), `applications.py` (drafts and attempts; `DraftDetail`, `QuestionRow`; Starred filter, Sort menu with Priority (`format.priority_rank`: offers, interviews, assessments first, rejections last), Hide rejections, double-click or Open email for a stage's email (`format.email_link`), right-click star / mark as sent / remove), Ready / Incomplete / Approved / Sent / Issues filters with counts, Starred only, View: Comfortable or Compact rows (`ApplicationDelegate.compact`, remembered in QSettings unless `JOBHUB_UI_PREFS=0`), `tracker.py` (spreadsheet, `AddApplicationSheet`; Sort menu with Priority, which sorts the Stage column by `format.priority_rank`, and Hide rejections), `profile.py` (Details, Resume builder, Resume files, Answers), `settings.py`, `passwords.py` (saved Workday sign-ins, opened from Settings → Workday). Shared panels: `resume_builder.py`, `connections.py` (Luna and Email, also used by the wizard). |
+| `desktop/views/` | One module per sidebar page: `dashboard.py` (+ `ApplyHero`, `ApplyPlanSheet`), `jobs.py` (+ `AddPostingSheet`; Posted column, Posted window and Sort menus, header-click sorting run in SQL), `applications.py` (drafts and attempts; `DraftDetail`, `QuestionRow`; Starred filter, Sort menu with Priority (`format.priority_rank`: offers, interviews, assessments first, rejections last), Hide rejections, double-click or Open email for a stage's email (`format.email_link`), right-click star / mark as sent / remove), Ready / Incomplete / Approved / Sent / Issues filters with counts, Starred only, View: Comfortable or Compact rows (`ApplicationDelegate.compact`, remembered in QSettings unless `JOBHUB_UI_PREFS=0`), `tracker.py` (spreadsheet, `AddApplicationSheet`; Sort menu with Priority, which sorts the Stage column by `format.priority_rank`, and Hide rejections), `profile.py` (Details, Resume builder, Resume files, Answers), `settings.py`, `passwords.py` (saved Workday sign-ins, opened from Settings → Workday). Shared panels: `resume_builder.py`, `connections.py` (Luna and Email, also used by the wizard, and Google Sheets). |
 | `desktop/editors.py` | No-syntax editors: `TagEditor` (chips), `KeyValueEditor` (label/value rows), `BulletEditor`, `FlowLayout`, `yes_no_control`. They set `formExpand` so `FormGroup` rows give them full width. |
 | `desktop/wizard.py` | `SetupWizard`: step indicator, resume drop zone, grouped forms, answer bank. |
 | `desktop/widgets.py` | The design system: backdrop, glass, controls, motion, layout helpers. |
@@ -718,6 +728,10 @@ unless `JOBHUB_UI_PREFS=0`) and can be hidden (⌘\\, View → Hide Sidebar, dou
 or drag the handle narrow); a chevron button in a left gutter brings it back. The
 JARVIS badge (`JarvisPill`) opens a glass mode popover (`widgets.ChoicePopover`, not a native menu); ALL and ALL+ ask first with a glass sheet (`views/jarvis_sheet.JarvisConfirmSheet`, Cancel is the default button), and only
 `jarvis_mode` is saved (`controller.set_jarvis_mode`), never other unsaved edits.
+Beside it, the **Jobs** and **Mail** pills (`AutomationPill`) switch `auto_scan` and
+`auto_mail_check` (`controller.set_automation`, saving only that key). Off, the timed cycle
+skips the source search (JARVIS still sends from postings already found) or the inbox and
+Workday Candidate Home checks; Refresh jobs and Check for updates always run.
 
 Shortcuts: ⌘1–⌘6 pages (Overview, Jobs, Applications, Tracker, Profile,
 Settings), ⌘⇧A Apply…, ⌘R refresh, ⌘N add posting, ⌘F find jobs, ⌘S save the
@@ -767,6 +781,7 @@ contrast) and look at the screenshots.
   `test_desktop_widgets.py` (primitives, motion end states, refresh safety,
   routing), `test_desktop_controller.py` (appearance, rescoring, skip/restore,
   toasts), `test_desktop_setup.py` (wizard payloads, Jobs table), `test_desktop_settings_view.py`,
+  `test_desktop_sheets.py`,
   `test_desktop_activity.py`, and `test_application_notes.py`.
 
 ---

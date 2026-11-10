@@ -13,7 +13,7 @@ from ...config import (ASHBY_COMPANIES, GREENHOUSE_COMPANIES, LEVER_COMPANIES, P
 from .. import fonts
 from ..editors import TagEditor
 from ..widgets import DirtyTracker, FormGroup, PageHeader, SegmentedControl, Stepper, ToggleSwitch, button
-from .connections import EmailConnection, LunaConnection
+from .connections import EmailConnection, LunaConnection, SheetsConnection
 
 DEFAULT_SUBTITLE = "Connections, automation, priority companies, search preferences, and appearance."
 COMPANY_SUGGESTIONS = sorted(set(PRIORITY_COMPANIES) | {
@@ -106,9 +106,11 @@ class SettingsView(QWidget):
         # Connections -----------------------------------------------------------
         self.luna = LunaConnection()
         self.email = EmailConnection()
+        self.sheets = SheetsConnection()
         self.connections_anchor = self.luna
         groups.addWidget(self.luna)
         groups.addWidget(self.email)
+        groups.addWidget(self.sheets)
 
         security = FormGroup("Security")
         self.keychain_protection = ToggleSwitch()
@@ -283,6 +285,7 @@ class SettingsView(QWidget):
 
         self.tracker.watch(
             self.jarvis_mode, self.dry_run, self.interval, self.max_apply, self.min_score, self.luna, self.email,
+            self.sheets,
             self.parallel_sends, self.parallel_prepare, self.parallel_agent_calls,
             self.show_browser, self.block_engaged, self.keychain_protection, self.workday_accounts, self.workday_send,
             self.workday_portal, self.company_cap, self.mix_families, self.prune,
@@ -393,6 +396,7 @@ class SettingsView(QWidget):
             self.max_skills.setValue(int(builder.get("max_skills", 28)))
             self.luna.set_values(s)
             self.email.set_values(s)
+            self.sheets.set_values(s)
             self.target_titles.set_values(list(s.get("target_titles") or []))
             self.locations.set_values(list(s.get("preferred_locations") or []))
             self.exclude_words.set_values(list(s.get("exclude_title_words") or []))
@@ -436,6 +440,7 @@ class SettingsView(QWidget):
                                **luna.pop("resume_builder")},
             **luna,
             **self.email.values(),
+            **self.sheets.values(),
             "target_titles": self.target_titles.values(),
             "preferred_locations": self.locations.values(),
             "exclude_title_words": self.exclude_words.values(),

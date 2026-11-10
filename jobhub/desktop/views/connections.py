@@ -1,4 +1,4 @@
-"""Connections: the AI account Luna uses, and the mailbox for replies and codes.
+"""Connections: Luna's AI account, the mailbox, and an optional Google Sheet.
 
 Built for someone who has a ChatGPT or Claude subscription but has never used
 a terminal: choose the account, press the one button the status line offers
@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QComboBox, QHBoxLayout, QLineEdit, QSpinBox, QVBox
 
 from ...agents import BACKENDS
 from ...email_tracker import PROVIDERS, provider_for
+from ..format import relative_time
 from ..widgets import FormGroup, StatusDot, ToggleSwitch, button, label
 
 LUNA_CHOICES = (("none", "Off"), ("antigravity_cli", "Antigravity (agy)"), ("claude_cli", "Claude (Pro or Max plan)"), ("codex_cli", "ChatGPT (Plus or Pro plan)"),
@@ -359,3 +360,107 @@ class EmailConnection(QWidget):
     def clear_secrets(self) -> None:
         self.password.clear()
         self.forget.setChecked(False)
+
+
+def _actions(*buttons: QWidget) -> QWidget:
+    """Left-aligned capsules. A bare button in a form row stretches edge to edge."""
+    row = QWidget()
+    layout = QHBoxLayout(row)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(8)
+    for item in buttons:
+        layout.addWidget(item)
+    layout.addStretch(1)
+    return row
+
+
+class SheetsConnection(QWidget):
+    """Copy confirmed applications into a Google Sheet the candidate owns.
+
+    The sheet's own Apps Script does the writing. This panel only collects the
+    web app URL and asks the controller to copy, test, or sync.
+    """
+
+    changed = Signal()
+    copy_script_requested = Signal()
+    test_requested = Signal(dict)
+    sync_requested = Signal(bool)
+
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        column = QVBoxLayout(self)
+        column.setContentsMargins(0, 0, 0, 0)
+        self.group = FormGroup(
+            "Google Sheets",
+            "Optional, and off until you turn it on. Confirmed applications are copied into a Google Sheet "
+            "you own. The script runs as you, so Starployment never signs in to Google.")
+        self.enabled = ToggleSwitch()
+        self.enabled.setAccessibleName("Copy confirmed applications to a Google Sheet")
+        self.enabled.toggled.connect(self.changed)
+        self.steps = label(
+            "1. Copy the setup script.\n"
+            "2. In your sheet: Extensions → Apps Script, paste, then Deploy → New deployment → Web app. "
+            "Execute as Me, Who has access Anyone. Authorize it and copy the /exec URL.\n"
+            "3. Paste it below, press Test, then Save.",
+            "callout")
+        self.copy_script = button("Copy setup script", "secondary")
+        self.copy_script.clicked.connect(self.copy_script_requested)
+        self.url = QLineEdit()
+        self.url.setPlaceholderText("https://script.google.com/macros/s/.../exec")
+        self.url.setAccessibleName("Web app URL")
+        self.url.textChanged.connect(self.changed)
+        self.tab = QLineEdit("Applications")
+        self.tab.setPlaceholderText("Applications")
+        self.tab.setAccessibleName("Tab name")
+        self.tab.textChanged.connect(self.changed)
+        self.status = StatusLine()
+        self.status.set_status("Not tested", "Paste the web app URL, then test.", "neutral", "test", "Test")
+        self.status.action_clicked.connect(self._test)
+        self.sync_now = button("Sync now", "secondary")
+        self.sync_now.clicked.connect(lambda: self.sync_requested.emit(False))
+        self.resend = button("Resend everything", "secondary")
+        self.resend.clicked.connect(lambda: self.sync_requested.emit(True))
+        self.caption = label("Not synced yet", "caption")
+        self.group.add_row("Copy confirmed applications to a Google Sheet", self.enabled,
+                           "Only applications an employer has confirmed. Rows already in the sheet are updated, never removed.")
+        self.group.add_widget(self.steps)
+        self.group.add_widget(_actions(self.copy_script))
+        self.group.add_row("Web app URL", self.url)
+        self.group.add_row("Tab name", self.tab, "Created in the sheet if it is missing.")
+        self.group.add_widget(self.status)
+        self.group.add_widget(_actions(self.sync_now, self.resend))
+        self.group.add_widget(self.caption)
+        column.addWidget(self.group)
+
+    def _test(self, _action: str) -> None:
+        self.status.busy("Reaching your sheet…")
+        self.test_requested.emit(self.values())
+
+    def set_values(self, settings: dict) -> None:
+        sheets = settings.get("google_sheets") or {}
+        self.enabled.blockSignals(True)
+        self.url.blockSignals(True)
+        self.tab.blockSignals(True)
+        self.enabled.setChecked(bool(sheets.get("enabled", False)))
+        self.url.setText(str(sheets.get("web_app_url") or ""))
+        self.tab.setText(str(sheets.get("tab") or "").strip() or "Applications")
+        self.enabled.blockSignals(False)
+        self.url.blockSignals(False)
+        self.tab.blockSignals(False)
+
+    def values(self) -> dict:
+        return {"google_sheets": {
+            "enabled": self.enabled.isChecked(),
+            "web_app_url": self.url.text().strip(),
+            "tab": self.tab.text().strip() or "Applications",
+        }}
+
+    def set_test_result(self, ok: bool, message: str) -> None:
+        self.status.set_status("Sheet connected" if ok else "Could not reach the sheet", message,
+                               "green" if ok else "red", "test", "Test again")
+
+    def set_sync_state(self, last_synced: str | None, count: int) -> None:
+        if not last_synced:
+            self.caption.setText("Not synced yet")
+            return
+        self.caption.setText(f"Last synced {relative_time(last_synced)} · {int(count)} applications")

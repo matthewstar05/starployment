@@ -388,6 +388,10 @@ DEFAULT_SETTINGS: dict = {
         "imap_username": "",
         "sender_address": "",
     },
+    # --- optional copy of confirmed applications into a Google Sheet the candidate owns ---
+    # The web app runs as the candidate. Its token stays in the local vault, never in this dict.
+    # target is a hash of the URL and tab; when either changes, the next sync resends every row.
+    "google_sheets": {"enabled": False, "web_app_url": "", "tab": "Applications", "target": ""},
     # --- optional agent harness fallback for forms the engine can't finish ---
     "harness": {"enabled": False, "backend": "codex_cli"},
     # --- Workday (apply/workday.py, vault.py) ---
@@ -475,6 +479,39 @@ def validate_settings(settings: dict) -> dict:
         create_accounts: StrictBool
         send: StrictBool
         check_portal: StrictBool = True
+
+    class GoogleSheets(StrictModel):
+        enabled: StrictBool
+        web_app_url: StrictStr = ""
+        tab: StrictStr = "Applications"
+        target: StrictStr = ""
+
+        @field_validator("web_app_url")
+        @classmethod
+        def web_app_link(cls, value: str) -> str:
+            import re
+            value = value.strip()
+            if any(ord(char) < 32 for char in value) or len(value) > 300:
+                raise ValueError("The web app URL is not valid")
+            if value and not re.fullmatch(r"https://script\.google\.com/macros/s/[A-Za-z0-9_-]+/exec", value):
+                raise ValueError("The web app URL must be an Apps Script link ending in /exec")
+            return value
+
+        @field_validator("tab")
+        @classmethod
+        def tab_name(cls, value: str) -> str:
+            value = value.strip()
+            if not value or len(value) > 100 or any(ord(char) < 32 for char in value):
+                raise ValueError("The tab name must be 1–100 characters")
+            return value
+
+        @field_validator("target")
+        @classmethod
+        def target_hash(cls, value: str) -> str:
+            value = value.strip()
+            if len(value) > 128 or any(ord(char) < 32 for char in value):
+                raise ValueError("The sheet target is not valid")
+            return value
 
     class CompanyCap(StrictModel):
         count: StrictInt = Field(ge=0, le=100)     # 0 turns the cap off
@@ -587,6 +624,7 @@ def validate_settings(settings: dict) -> dict:
         email_tracking: EmailTracking
         answers: Answers
         email_verification: EmailVerification
+        google_sheets: GoogleSheets
         keychain_protection: StrictBool
         harness: Harness
         workday: Workday

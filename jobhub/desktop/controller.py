@@ -28,7 +28,7 @@ MAIL_RETRY_MS = 5 * 60_000   # after the mail server could not be reached
 PLUS_OVERRUN_PAUSE_SECONDS = 30
 # Short tasks the candidate is waiting on; they get their own thread so they
 # never queue behind preparation or Luna, which can hold the assist pool for minutes.
-QUICK_TASKS = frozenset({"preview", "vault_auth", "agent_status", "agent_test", "mail_test", "import_resume"})
+QUICK_TASKS = frozenset({"preview", "vault_auth", "agent_status", "agent_test", "mail_test", "sheet_test", "import_resume"})
 
 SCORING_KEYS = frozenset({
     "target_titles", "preferred_locations", "exclude_title_words", "include_internships",
@@ -106,6 +106,8 @@ class DesktopController(QObject):
         self._mail_syncing = threading.Event()
         self._mail_retry_pending = False
         self._portal_checking = threading.Event()
+        self._sheet_syncing = threading.Event()
+        self._sheet_after_checks = False
 
         window.scan_requested.connect(self.scan)
         window.apply_requested.connect(self.apply)
@@ -169,6 +171,7 @@ class DesktopController(QObject):
         vault.clear_export()   # an export file left by a closed session never lingers
         # Connections
         self._wire_connections(window.settings.luna, window.settings.email)
+        self._wire_sheets(getattr(window.settings, "sheets", None))
         self.refresh(include_account=True)
 
         self._refresh_timer = QTimer(self)
@@ -281,6 +284,11 @@ class DesktopController(QObject):
         if settings.get("email_tracking", {}).get("enabled"):
             self.sync_email()
         self.check_workday()
+        # Confirmed applications are copied after the inbox and Workday checks, so a
+        # stage those checks just learned is included in this cycle's sheet update.
+        if (settings.get("google_sheets") or {}).get("enabled"):
+            self._sheet_after_checks = True
+            self._maybe_sync_sheet()
         self._status("Searching your sources for new jobs…", 0, "busy")
         self._update_scan_state(settings)
 
@@ -680,9 +688,9 @@ class DesktopController(QObject):
         self._last_settings_signature = signature
         return changed and not (self.window.settings.dirty or self.window.profile.dirty)
 
-    def _submit_assist(self, kind: str, function, context: object = None, *args) -> None:
+    def _submit_assist(self, kind: str, function, context: object = None, *args) -> bool:
         if self._stopping.is_set():
-            return   # the window is closing; late UI signals must not start new work
+            return False   # the window is closing; late UI signals must not start new work
 
         def run():
             try:
@@ -694,7 +702,8 @@ class DesktopController(QObject):
         try:
             (self._quick if kind in QUICK_TASKS else self._assist).submit(run)
         except RuntimeError:   # shut down between the check and the submit
-            pass
+            return False
+        return True
 
     # ------------------------------------------------------------ Workday sign-ins
     def show_saved_sign_ins(self) -> None:
@@ -850,6 +859,11 @@ class DesktopController(QObject):
         elif kind == "mail_test":
             ok, message = result
             context.set_test_result(ok, message)
+        elif kind == "sheet_test":
+            ok, message = result
+            if context is not None and hasattr(context, "set_test_result"):
+                context.set_test_result(ok, message)
+            return
         elif kind == "mail_sync":
             report = result
             from datetime import datetime, timezone
@@ -862,6 +876,7 @@ class DesktopController(QObject):
             elif context:
                 self._status(report.summary, tone="info")
             self.refresh(include_account=True)
+            self._maybe_sync_sheet()
             return
         elif kind == "workday_portal":
             report = result
@@ -872,6 +887,24 @@ class DesktopController(QObject):
             elif context:
                 self._status(report.summary, tone="info")
             self.refresh(include_account=True)
+            self._maybe_sync_sheet()
+            return
+        elif kind == "sheet_sync":
+            report = result
+            manual = bool(context)
+            sent = int(getattr(report, "sent", 0) or 0)
+            summary = str(getattr(report, "summary", "") or "Google Sheet sync finished")
+            if manual or sent:
+                db.add_event(summary)
+                self._status(summary, 12_000, "success" if sent else "info")
+            panel = getattr(self.window.settings, "sheets", None)
+            setter = getattr(panel, "set_sync_state", None)
+            if setter is not None:
+                from ..models import now_iso
+                setter(now_iso(), int(getattr(report, "total", 0) or 0))
+            if manual or sent:
+                self.refresh(include_account=True)
+            self._maybe_sync_sheet()
             return
         elif kind == "rescore":
             self._status("Job rankings updated", tone="success")
@@ -899,7 +932,7 @@ class DesktopController(QObject):
             db.add_event(f"Desktop {kind} failed: {error}", "error")
             self.refresh(include_account=True)
             return
-        if kind in ("agent_test", "mail_test") and context is not None:
+        if kind in ("agent_test", "mail_test", "sheet_test") and context is not None and hasattr(context, "set_test_result"):
             context.set_test_result(False, error)
             return
         if kind == "agent_status" and context is not None:
@@ -915,12 +948,23 @@ class DesktopController(QObject):
             self._status(f"{error}. Your inbox will be checked again in a few minutes.", 10_000, "warning")
             db.add_event(f"Inbox check postponed: {error}", "warn")
             self.refresh(wait=False)
+            self._maybe_sync_sheet()
+            return
+        if kind == "sheet_sync":
+            # Unattended cycles retry next time. A warning in the log, a toast only when asked.
+            db.add_event(f"Google Sheet sync failed: {error[:300]}", "warn")
+            if context:
+                self._status(f"Google Sheet sync failed: {error[:300]}", 12_000, "warning")
+            self.refresh(wait=False)
+            self._maybe_sync_sheet()
             return
         label = {"plan": "Preparing applications", "prepare_one": "Preparing the application", "luna": "AI Autofill",
                  "mail_sync": "Inbox check", "workday_portal": "Workday check", "preview": "Resume preview", "import_resume": "Resume import"}.get(kind, kind)
         self._status(f"{label} failed: {error}", 15_000, "error")
         db.add_event(f"Desktop {kind} failed: {error}", "error")
         self.refresh(wait=False)
+        if kind in ("mail_sync", "workday_portal"):
+            self._maybe_sync_sheet()
 
     def _prep_progress(self, text: str, done: int, total: int) -> None:
         self._status(f"{text} · {done} of {total}", 0, "busy")
@@ -1371,6 +1415,80 @@ class DesktopController(QObject):
             self._status("Checking your inbox…", 0, "busy")
         self._mail_syncing.set()
         self._submit_assist("mail_sync", self._mail_sync_job, manual, manual)
+
+    def _maybe_sync_sheet(self) -> None:
+        """Start the sheet sync once this cycle's inbox and Workday checks have finished."""
+        if not self._sheet_after_checks:
+            return
+        if self._mail_syncing.is_set() or self._portal_checking.is_set() or self._sheet_syncing.is_set():
+            return
+        if not (db.get_settings().get("google_sheets") or {}).get("enabled"):
+            self._sheet_after_checks = False
+            return
+        self._sheet_after_checks = False
+        if not self.sync_sheet():
+            self._sheet_after_checks = self._sheet_syncing.is_set()
+
+    def sync_sheet(self, manual: bool = False, full: bool = False) -> bool:
+        """Copy confirmed applications to the Google Sheet. One sync runs at a time."""
+        if self._stopping.is_set():
+            return False
+        if not manual and not (db.get_settings().get("google_sheets") or {}).get("enabled"):
+            return False
+        if self._sheet_syncing.is_set():
+            if manual:
+                self._status("A Google Sheet sync is already running", tone="info")
+            return False
+        if manual:
+            self._status("Updating your Google Sheet…", 0, "busy")
+        self._sheet_syncing.set()
+
+        def run(full=full):
+            from .. import sheets_sync
+            try:
+                return sheets_sync.sync(db.get_settings(), full=full)
+            finally:
+                self._sheet_syncing.clear()
+
+        if not self._submit_assist("sheet_sync", run, manual):
+            self._sheet_syncing.clear()
+            return False
+        return True
+
+    def _copy_sheet_script(self) -> None:
+        from .. import sheets_sync
+        try:
+            script = sheets_sync.setup_script()
+        except Exception as exc:  # noqa: BLE001 - the vault can be unavailable
+            self._status(f"Could not prepare the setup script: {exc}", tone="error")
+            return
+        clipboard = QApplication.clipboard()
+        if clipboard is None:
+            self._status("Could not reach the clipboard", tone="error")
+            return
+        clipboard.setText(script)
+        self._status("Setup script copied. Paste it into Extensions → Apps Script.", tone="success")
+
+    def _sheet_test(self, panel, values: dict) -> None:
+        from .. import sheets_sync
+
+        def run():
+            return sheets_sync.test({**db.get_settings(), **(values or {})})
+
+        self._submit_assist("sheet_test", run, panel)
+
+    def _wire_sheets(self, panel) -> None:
+        if panel is None:
+            return
+        copy = getattr(panel, "copy_script_requested", None)
+        test = getattr(panel, "test_requested", None)
+        sync = getattr(panel, "sync_requested", None)
+        if copy is not None:
+            copy.connect(self._copy_sheet_script)
+        if test is not None:
+            test.connect(lambda values, panel=panel: self._sheet_test(panel, values))
+        if sync is not None:
+            sync.connect(lambda full: self.sync_sheet(manual=True, full=bool(full)))
 
     # ------------------------------------------------------------------ profile
     def import_resume(self, path: str) -> None:
